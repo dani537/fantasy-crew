@@ -1,1 +1,1 @@
-This folder is for datasets in csv
+This folder is for datasets in csv format

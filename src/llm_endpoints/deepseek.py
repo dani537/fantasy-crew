@@ -12,7 +12,7 @@ class DeepseekClient:
             base_url="https://api.deepseek.com"
         )
 
-    def generate_content(self, prompt: str, system_prompt: str = "You are a helpful assistant", model: str = "deepseek-chat"):
+    def generate_content(self, prompt: str, system_prompt: str = "You are a helpful assistant", model: str = "deepseek-reasoner"):
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -26,10 +26,3 @@ class DeepseekClient:
         except Exception as e:
             print(f"Error generating content: {e}")
             return None
-
-if __name__ == "__main__":
-    # Simple test
-    deepseek = DeepseekClient()
-    response = deepseek.generate_content("Explain how AI works in a few words")
-    print("Response from Deepseek:")
-    print(response)

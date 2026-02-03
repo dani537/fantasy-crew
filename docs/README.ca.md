@@ -1,8 +1,5 @@
 # 🚀 Fantasy Crew (Multi-Agent System)
 
-> [!NOTE]
-> Aquest document també està disponible en [Anglès](README.md) i [Castellà](README.es.md).
-
 **Objectiu:** Crear un equip d'agents d'IA autònoms que gestionin una plantilla de Biwenger, optimitzant el rendiment esportiu i financer mitjançant l'ús de LLMs d'última generació i anàlisi de dades avançat.
 
 Aquest sistema supera un jugador humà en eliminar el biaix emocional, operar 24/7 i processar grans volums de dades en temps real per maximitzar el Valor de Mercat (VM) i la puntuació de la plantilla.

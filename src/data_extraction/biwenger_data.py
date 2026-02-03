@@ -3,21 +3,34 @@ import pandas as pd
 import datetime
 import time
 import random
+from dataclasses import dataclass
+from typing import List, Optional
 
 # Módulos
 from src.data_extraction.auth import random_headers
 
-LALIGA_INFO_URL = "https://cf.biwenger.com/api/v2/competitions/la-liga/data"
+# Config
+from src.config import GeneralSettings
+
+LALIGA_INFO_URL = f"https://cf.biwenger.com/api/v2/competitions/la-liga/data?score={GeneralSettings.SCORE_TYPE}"
 JORNADA_URL = 'https://cf.biwenger.com/api/v2/rounds/la-liga'
-CLAUSES_URL = "https://biwenger.as.com/api/v2/owners/league/clause"
 
 # SUMMARY:
 
 # LaLigaGeneralData --> Extrae los datos generales de la liga (es decir, comunes de Biwenger en todas las ligas, no los de
 #                       la liga en particular donde participa el usuario)
+@dataclass
+class ActiveEvent:
+    id: int
+    name: str
+    status: str
+    end: datetime.datetime
+    type: str
 
-# LaLigaClausulas -->   Extrae los datos de las cláusulas de la liga (es decir, los jugadores que han comprado los usuarios
-#                       de la liga en la que participa el usuario)
+@dataclass
+class SeasonInfo:
+    rounds: List[dict]
+    active_events: List[ActiveEvent]
 
 class LaLigaGeneralData:
     '''
@@ -39,8 +52,11 @@ class LaLigaGeneralData:
         response = self.session.get(LALIGA_INFO_URL, headers=headers)
         if response.status_code == 200:
             response_json = response.json()
-            self.players = response_json.get('data', {}).get('players', {})
-            self.teams = response_json.get('data', {}).get('teams', {})
+            data = response_json.get('data', {})
+            self.players = data.get('players', {})
+            self.teams = data.get('teams', {})
+            self.season_raw = data.get('season', {})
+            self.active_events_raw = data.get('activeEvents', [])
             return True
         else:
             raise Exception(f"Error: {response.status_code} - {response.text}")
@@ -71,17 +87,17 @@ class LaLigaGeneralData:
         
         for player_id, player in self.players.items():
             data_dict['id'].append(int(player_id))
-            data_dict['name'].append(player['name'])
-            data_dict['slug'].append(player['slug'])
-            data_dict['teamID'].append(player['teamID'])
-            data_dict['position'].append(player['position'])
+            data_dict['name'].append(player.get('name', ''))
+            data_dict['slug'].append(player.get('slug', ''))
+            data_dict['teamID'].append(player.get('teamID'))
+            data_dict['position'].append(player.get('position'))
             data_dict['altPositions'].append(player.get('altPositions'))
-            data_dict['price'].append(player['price'])
-            data_dict['priceIncrement'].append(player['priceIncrement'])
-            data_dict['status'].append(player['status'])
+            data_dict['price'].append(player.get('price', 0))
+            data_dict['priceIncrement'].append(player.get('priceIncrement', 0))
+            data_dict['status'].append(player.get('status', 'unknown'))
             data_dict['statusInfo'].append(player.get('statusInfo'))
-            data_dict['fitness'].append(player['fitness'])
-            data_dict['points'].append(player['points'])
+            data_dict['fitness'].append(player.get('fitness', []))
+            data_dict['points'].append(player.get('points', 0))
             data_dict['pointsHome'].append(player.get('pointsHome'))
             data_dict['pointsAway'].append(player.get('pointsAway'))
             data_dict['playedHome'].append(player.get('playedHome'))
@@ -140,6 +156,29 @@ class LaLigaGeneralData:
         self.df_teams = pd.DataFrame(data_dict)
         return self.df_teams
 
+    def season_info(self) -> SeasonInfo:
+        """Procesa y devuelve la información de la temporada y eventos activos"""
+        if not hasattr(self, 'season_raw') or not self.season_raw:
+            raise ValueError("Primero debe obtener los datos de laliga_data")
+        
+        rounds = self.season_raw.get('rounds', [])
+        active_events_raw = getattr(self, 'active_events_raw', [])
+        
+        active_events = []
+        for event in active_events_raw:
+            active_events.append(ActiveEvent(
+                id=event.get('id'),
+                name=event.get('name'),
+                status=event.get('status'),
+                end=datetime.datetime.fromtimestamp(event.get('end')) if event.get('end') else None,
+                type=event.get('type')
+            ))
+            
+        return SeasonInfo(
+            rounds=rounds,
+            active_events=active_events
+        )
+
     def _jornadas_data(self):
         """Extrae los datos de la próxima jornada"""
         headers = random_headers()
@@ -183,55 +222,10 @@ class LaLigaGeneralData:
         print('🟢 Players extracted')
         self.teams_info()
         print('🟢 Teams extracted')
+        self.season_info()
+        print('🟢 Season & Active Events extracted')
         self.next_jornada_info()
         print('🟢 Next jornada extracted')
-
-
-class LaLigaClausulas:
-    '''
-    Extrae los datos de las cláusulas de la liga (es decir, los jugadores que han comprado los usuarios de la liga en la que participa el usuario)
-    '''
-    def __init__(self, session, token: str, league_id: int, user_id: int):
-        self.token = token
-        self.league_id = league_id
-        self.user_id = user_id
-        self._clauses_data(session)
-    
-    def _clauses_data(self, session):
-        extra_headers = {
-            'authorization': "Bearer " + self.token,
-            'x-league': str(self.league_id),
-            'x-user': str(self.user_id),
-            'referer': "https://biwenger.as.com/market"
-        }
-        response = session.get(CLAUSES_URL, headers=extra_headers)
-        if response.status_code == 200:
-            response_json = response.json()
-            self.clauses = response_json.get('data', {})
-            return True
-        else:
-            raise Exception(f"Error: {response.status_code} - {response.text}")
-    
-    def clauses_info(self) -> pd.DataFrame:
-        if not self.clauses:
-            raise ValueError("Primero debe obtener los datos de clauses_data")
-        
-        data_dict = {
-            'id': [],
-            'propietario': [],
-            'fecha_compra': [],
-            'precio_compra': [],
-            'clausula': []
-        }
-        for clausula in self.clauses:
-            data_dict['id'].append(int(clausula.get('id')))
-            data_dict['propietario'].append(clausula.get('owner').get('user').get('name'))
-            data_dict['fecha_compra'].append(datetime.datetime.fromtimestamp(clausula.get('owner').get('date')))
-            data_dict['precio_compra'].append(clausula.get('owner').get('price'))
-            data_dict['clausula'].append(clausula.get('owner').get('clause'))
-
-        self.df = pd.DataFrame(data_dict)
-        return self.df
 
 LEAGUE_URL = "https://biwenger.as.com/api/v2/league?include=all,-lastAccess&fields=*,standings,tournaments,group,settings(description)"
 MARKET_URL = "https://biwenger.as.com/api/v2/market"
@@ -364,8 +358,8 @@ class UserLeagueData:
         for user in self.league_info:
             user_id = user.get('id')
             
-            # Pausa aleatoria para simular comportamiento humano (entre 15 y 25 segundos)
-            time.sleep(random.uniform(15, 25))
+            # Pausa aleatoria para simular comportamiento humano (entre 1 y 3 segundos)
+            time.sleep(random.uniform(1, 3))
             
             # URL detallada con filtros específicos para obtener toda la información relevante
             url = f"https://biwenger.as.com/api/v2/user/{user_id}?fields=*,account(id),players(id,owner),lineups(round,points,count,position),league(id,name,competition,type,mode,marketMode,scoreID),market,seasons,offers,lastPositions"

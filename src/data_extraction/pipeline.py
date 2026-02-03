@@ -59,10 +59,11 @@ def extract_and_save_data():
             df_user_info.to_csv('./data/user_info.csv', index=False)
 
         # LaLiga General Data
-        print_step(2, "Extracting LaLiga General Data (Players, Teams, Next Match)")
+        print_step(2, "Extracting LaLiga General Data (Players, Teams, Next Match, Season)")
         with redirect_stdout(f):
             laliga_data = LaLigaGeneralData(auth.session)
             laliga_data.run()
+            season_info = laliga_data.season_info()
 
         # Fantasy League Data
         print_step(3, "Extracting User League Data (Table, Market, My Players)")
@@ -93,6 +94,21 @@ def extract_and_save_data():
         laliga_data.df_players.to_csv('./data/players.csv', index=False)
         laliga_data.df_teams.to_csv('./data/teams.csv', index=False)
         laliga_data.df_next_jornada.to_csv('./data/next_jornada.csv', index=False)
+        
+        # Save Season info
+        pd.DataFrame(season_info.rounds).to_csv('./data/rounds.csv', index=False)
+        
+        # Convert List[ActiveEvent] dataclasses to DataFrame
+        active_events_list = []
+        for event in season_info.active_events:
+            active_events_list.append({
+                'id': event.id,
+                'name': event.name,
+                'status': event.status,
+                'end': event.end,
+                'type': event.type
+            })
+        pd.DataFrame(active_events_list).to_csv('./data/active_events.csv', index=False)
 
         user_league_data.df_league_players.to_csv('./data/league_players.csv', index=False)
         user_league_data.df_league_table.to_csv('./data/league_teams.csv', index=False)
@@ -127,7 +143,9 @@ def import_data():
         'comuniate': './data/comuniate.csv',
         'news': './data/news.csv',
         'odds': './data/odds.csv',
-        'user_info': './data/user_info.csv'
+        'user_info': './data/user_info.csv',
+        'rounds': './data/rounds.csv',
+        'active_events': './data/active_events.csv'
     }
     
     imported_data = {}
@@ -209,6 +227,14 @@ def tables_columns(data):
             'fecha': 'ODDS_FECHA', 'local': 'ODDS_LOCAL', 'visitante': 'ODDS_VISITANTE',
             '1': 'ODDS_1', 'X': 'ODDS_X', '2': 'ODDS_2',
             'home_goals': 'ODDS_HOME_GOALS', 'away_goals': 'ODDS_AWAY_GOALS'
+        },
+        'rounds': {
+            'id': 'ROUND_ID', 'name': 'ROUND_NAME', 'short': 'ROUND_SHORT',
+            'status': 'ROUND_STATUS', 'type': 'ROUND_TYPE'
+        },
+        'active_events': {
+            'id': 'EVENT_ID', 'name': 'EVENT_NAME', 'status': 'EVENT_STATUS',
+            'end': 'EVENT_END', 'type': 'EVENT_TYPE'
         }
     }
 

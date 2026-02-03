@@ -268,7 +268,7 @@ class ComuniateData:
                 print(f"❌ Error al obtener HTML de {team_name}.")
             
             if i < len(teams_to_process) - 1:
-                wait = random.uniform(10, 20)
+                wait = random.uniform(1, 2)
                 print(f"💤 Esperando {wait:.2f} segundos...")
                 time.sleep(wait)
         

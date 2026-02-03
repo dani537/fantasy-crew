@@ -36,6 +36,8 @@ class DataAnalyst:
         if df_players_total is not None and not df_players_total.empty:
             # 4. Feature Engineering
             df_master = self._feature_engineering(df_players_total)
+            df_master.to_csv('./data/_master.csv', index=False)
+            df_master.to_excel('./data/_master.xlsx', index=False)
             return df_master
         
         return df_players_total
@@ -107,6 +109,36 @@ class DataAnalyst:
         # ----------------------------------------------------------------------
         float_cols = df.select_dtypes(include=['float64', 'float32']).columns
         df[float_cols] = df[float_cols].round(2)
+
+        # ----------------------------------------------------------------------
+        # 5. Financial & Scoring Metrics
+        # ----------------------------------------------------------------------
+        # VALUE_SCORE: Points per Million (approx)
+        # Avoid division by zero
+        df['VALUE_SCORE'] = df['AVG_POINTS'] / (df['MARKET_SALE_PRICE'] / 1_000_000 + 1)
+        df['VALUE_SCORE'] = df['VALUE_SCORE'].fillna(0.0)
+
+        # TREND_SCORE: Price Increment factor
+        df['TREND_SCORE'] = df['PLAYER_PRICE_INCREMENT'] / 100_000
+        df['TREND_SCORE'] = df['TREND_SCORE'].fillna(0.0)
+        
+        # FINAL_SCORE: Combination of Value and Trend
+        df['FINAL_SCORE'] = df['VALUE_SCORE'] + df['TREND_SCORE']
+        
+        # CLAUSE_VALUE: Points per Million of Clause
+        if 'BIWPLAYER_CLAUSE' in df.columns:
+             df['CLAUSE_VALUE'] = df['AVG_POINTS'] / (df['BIWPLAYER_CLAUSE'] / 1_000_000 + 1)
+             df['CLAUSE_VALUE'] = df['CLAUSE_VALUE'].fillna(0.0)
+        else:
+             df['CLAUSE_VALUE'] = 0.0
+
+        # POTENTIAL_LOSS: Difference between purchase price and current price
+        # Negative = Loss if sold, Positive = Profit if sold
+        if 'BIWPLAYER_PURCHASE_PRICE' in df.columns:
+            df['SALE_PROFIT'] = df['PLAYER_PRICE'] - df['BIWPLAYER_PURCHASE_PRICE']
+            df['SALE_PROFIT'] = df['SALE_PROFIT'].fillna(0.0)
+        else:
+            df['SALE_PROFIT'] = 0.0
 
         return df
 
@@ -315,7 +347,7 @@ class DataAnalyst:
 
         # 7. Selección de Columnas: Limpia el DataFrame para mantener solo los campos relevantes para el análisis.
         selected_columns = [
-            'PLAYER_NAME', 'PLAYER_POSITION', 'PLAYER_ALT_POSITIONS', 'PLAYER_PRICE',
+            'PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'PLAYER_ALT_POSITIONS', 'PLAYER_PRICE',
             'PLAYER_PRICE_INCREMENT', 'PLAYER_STATUS', 'PLAYER_STATUS_INFO',
             'PLAYER_FITNESS', 'PLAYER_POINTS', 'AVG_POINTS', 'AVG_POINTS_HOME',
             'AVG_POINTS_AWAY', 'TEAM_ID', 'TEAM_NAME', 'TEAM_IS_HOME',

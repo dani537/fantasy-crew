@@ -1,7 +1,7 @@
 # 🚀 Fantasy Crew (Multi-Agent System)
 
 > [!NOTE]
-> This document is also available in [Catalan](README.ca.md) and [Spanish](README.es.md).
+> This document is also available in [Catalan](docs/README.ca.md) and [Spanish](docs/README.es.md).
 
 **Goal:** Build a team of autonomous AI agents to manage a Biwenger squad, optimizing both sporting and financial performance using state-of-the-art LLMs and advanced data analysis.
 
