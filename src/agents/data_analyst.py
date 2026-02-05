@@ -113,32 +113,149 @@ class DataAnalyst:
         # ----------------------------------------------------------------------
         # 5. Financial & Scoring Metrics
         # ----------------------------------------------------------------------
-        # VALUE_SCORE: Points per Million (approx)
-        # Avoid division by zero
-        df['VALUE_SCORE'] = df['AVG_POINTS'] / (df['MARKET_SALE_PRICE'] / 1_000_000 + 1)
-        df['VALUE_SCORE'] = df['VALUE_SCORE'].fillna(0.0)
-
-        # TREND_SCORE: Price Increment factor
-        df['TREND_SCORE'] = df['PLAYER_PRICE_INCREMENT'] / 100_000
-        df['TREND_SCORE'] = df['TREND_SCORE'].fillna(0.0)
         
-        # FINAL_SCORE: Combination of Value and Trend
-        df['FINAL_SCORE'] = df['VALUE_SCORE'] + df['TREND_SCORE']
-        
-        # CLAUSE_VALUE: Points per Million of Clause
-        if 'BIWPLAYER_CLAUSE' in df.columns:
-             df['CLAUSE_VALUE'] = df['AVG_POINTS'] / (df['BIWPLAYER_CLAUSE'] / 1_000_000 + 1)
-             df['CLAUSE_VALUE'] = df['CLAUSE_VALUE'].fillna(0.0)
+        # PERCENTILE: Global percentile based on PLAYER_POINTS
+        if 'PLAYER_POINTS' in df.columns:
+            df['PERCENTILE'] = df['PLAYER_POINTS'].rank(pct=True)
+            
+            # POSITION_PERCENTILE: Percentile within each PLAYER_POSITION group
+            if 'PLAYER_POSITION' in df.columns:
+                df['POSITION_PERCENTILE'] = df.groupby('PLAYER_POSITION')['PLAYER_POINTS'].rank(pct=True)
+            else:
+                df['POSITION_PERCENTILE'] = 0.0
         else:
-             df['CLAUSE_VALUE'] = 0.0
+            df['PERCENTILE'] = 0.0
+            df['POSITION_PERCENTILE'] = 0.0
 
-        # POTENTIAL_LOSS: Difference between purchase price and current price
-        # Negative = Loss if sold, Positive = Profit if sold
-        if 'BIWPLAYER_PURCHASE_PRICE' in df.columns:
-            df['SALE_PROFIT'] = df['PLAYER_PRICE'] - df['BIWPLAYER_PURCHASE_PRICE']
-            df['SALE_PROFIT'] = df['SALE_PROFIT'].fillna(0.0)
+        # ----------------------------------------------------------------------
+        # 6. Availability Metrics
+        # ----------------------------------------------------------------------
+        
+        # Helper to determine availability
+        is_market = (df['MARKET_SALE_PRICE'] > 0)
+        is_clause = (df['BIWPLAYER_CLAUSE'] > 0) & (df['BIWPLAYER_CLAUSE_LOCKED_UNTIL'].isna() | (df['BIWPLAYER_CLAUSE_LOCKED_UNTIL'] == ''))
+        
+        df['IS_AVAILABLE'] = is_market | is_clause
+        
+        def get_avail_type(row_is_market, row_is_clause):
+            types = []
+            if row_is_market: types.append("Purchase")
+            if row_is_clause: types.append("Clause")
+            return ", ".join(types) if types else "None"
+        
+        df['AVAILABILITY_TYPE'] = df.apply(lambda r: get_avail_type(r.name in is_market[is_market].index, r.name in is_clause[is_clause].index), axis=1)
+        # Optimization: use np.select or simple vectorization instead of apply if possible, but for small datasets this is fine.
+        # Let's vectorize it for better performance and clarity.
+        df['AVAILABILITY_TYPE'] = "None"
+        df.loc[is_market, 'AVAILABILITY_TYPE'] = "Purchase"
+        df.loc[is_clause, 'AVAILABILITY_TYPE'] = "Clause"
+        df.loc[is_market & is_clause, 'AVAILABILITY_TYPE'] = "Purchase, Clause"
+
+        # REAL_SALE_PRICE: The actual cost to acquire the player
+        df['REAL_SALE_PRICE'] = 0.0
+        # Set clause price first
+        df.loc[is_clause, 'REAL_SALE_PRICE'] = df.loc[is_clause, 'BIWPLAYER_CLAUSE']
+        # Override with market price if available (priority)
+        df.loc[is_market, 'REAL_SALE_PRICE'] = df.loc[is_market, 'MARKET_SALE_PRICE']
+
+        # ----------------------------------------------------------------------
+        # 7. Momentum Metrics
+        # ----------------------------------------------------------------------
+        
+        def calculate_momentum(val):
+            if pd.isna(val) or val == '' or val == '[]':
+                return 0.0
+            try:
+                # Parse string list if needed
+                if isinstance(val, str):
+                    val_list = ast.literal_eval(val)
+                elif isinstance(val, (list, tuple)):
+                    val_list = val
+                else:
+                    return 0.0
+                
+                # Filter and Map values:
+                # - Skip 'injured', 'sanctioned', and 'doubt' (treat doubt as injury)
+                # - Map None or 'discarded' to 0.0
+                processed_points = []
+                for x in val_list:
+                    if x in ['injured', 'sanctioned', 'doubt']:
+                        continue
+
+                    if x is None or x == 'discarded':
+                        processed_points.append(0.0)
+                    elif isinstance(x, (int, float)):
+                        processed_points.append(float(x))
+                
+                if not processed_points:
+                    return 0.0
+                
+                return sum(processed_points) / len(processed_points)
+            except Exception:
+                return 0.0
+
+        if 'PLAYER_FITNESS' in df.columns:
+            df['AVG_POINTS_MOMENTUM'] = df['PLAYER_FITNESS'].apply(calculate_momentum)
+            # MOMENTUM_TREND: Difference between recent form and seasonal average
+            if 'AVG_POINTS' in df.columns:
+                df['MOMENTUM_TREND'] = df['AVG_POINTS_MOMENTUM'] - df['AVG_POINTS']
+            else:
+                df['MOMENTUM_TREND'] = 0.0
         else:
-            df['SALE_PROFIT'] = 0.0
+            df['AVG_POINTS_MOMENTUM'] = 0.0
+            df['MOMENTUM_TREND'] = 0.0
+
+        # ----------------------------------------------------------------------
+        # 8. Moneyball (Efficiency) Metrics
+        # ----------------------------------------------------------------------
+        
+        # We calculate "Millions per Point" to identify bargains
+        # Only relevant for players that can actually be acquired (IS_AVAILABLE)
+        
+        df['COST_PER_POINT'] = 0.0
+        mask_cpp = (df['IS_AVAILABLE']) & (df['AVG_POINTS'] > 0)
+        df.loc[mask_cpp, 'COST_PER_POINT'] = (df.loc[mask_cpp, 'REAL_SALE_PRICE'] / 1_000_000) / df.loc[mask_cpp, 'AVG_POINTS']
+        
+        # COST_PER_MOMENTUM_POINT: Price in millions / Recent average points
+        df['COST_PER_MOMENTUM_POINT'] = 0.0
+        mask_cpmp = (df['IS_AVAILABLE']) & (df['AVG_POINTS_MOMENTUM'] > 0)
+        df.loc[mask_cpmp, 'COST_PER_MOMENTUM_POINT'] = (df.loc[mask_cpmp, 'REAL_SALE_PRICE'] / 1_000_000) / df.loc[mask_cpmp, 'AVG_POINTS_MOMENTUM']
+
+        # ----------------------------------------------------------------------
+        # 9. Expected Points (xP) & Risk-Adjusted Cost
+        # ----------------------------------------------------------------------
+        
+        def clean_percentage(val):
+            if pd.isna(val):
+                return 0.0
+            if isinstance(val, (int, float)):
+                return float(val) / 100.0 if val > 1.0 else float(val)
+            if isinstance(val, str):
+                val = val.replace('%', '').strip()
+                if not val:
+                    return 0.0
+                try:
+                    return float(val) / 100.0
+                except ValueError:
+                    # Non-numeric string (e.g., player name due to column shift)
+                    return 0.0
+            return 0.0
+
+
+        # Clean COMUNIATE_SUPPLENT (it might be string with %)
+        if 'COMUNIATE_SUPPLENT' in df.columns:
+            df['COMUNIATE_SUPPLENT'] = df['COMUNIATE_SUPPLENT'].apply(clean_percentage)
+        else:
+            df['COMUNIATE_SUPPLENT'] = 0.0
+            
+        # EXPECTED_POINTS (xP): Momentum * (P(Starter) + P(Sub)*0.8)
+        # 0.8 factor is lenient for subs
+        df['EXPECTED_POINTS'] = df['AVG_POINTS_MOMENTUM'] * (df['COMUNIATE_STARTER'] + (df['COMUNIATE_SUPPLENT'] * 0.8))
+        
+        # COST_PER_XP: Price / xP
+        df['COST_PER_XP'] = 0.0
+        mask_cpxp = (df['IS_AVAILABLE']) & (df['EXPECTED_POINTS'] > 0)
+        df.loc[mask_cpxp, 'COST_PER_XP'] = (df.loc[mask_cpxp, 'REAL_SALE_PRICE'] / 1_000_000) / df.loc[mask_cpxp, 'EXPECTED_POINTS']
 
         return df
 

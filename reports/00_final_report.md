@@ -1,126 +1,126 @@
-# 📁 Fantasy Crew: Final Executive Report
-_Generated: 2026-02-03 02:10_
+# 🏆 Fantasy Crew - Final Report
+**Generated**: 2026-02-05 17:15
 
 ---
 
-## 📋 Coach's Report (The Mister)
+## 📋 Coach Report
 ### 🧠 Match Analysis
-Examining the odds: **Barcelona (86% win probability)** at home vs. Mallorca is the most favorable fixture—excellent for Barcelona defenders. **Real Sociedad (57% win prob)** at home vs. Elche is also a strong opportunity. **Athletic (62% win prob)** at home vs. Levante is promising for our Athletic players. Tough away matches for **Real Madrid at Valencia** (only 64% win prob away) and **Osasuna at Celta** (only 23% win prob away) suggest caution with those players despite their quality.
+The upcoming matches present a mix of opportunities and challenges. Barcelona (vs. Mallorca) and Real Sociedad (vs. Elche) have the highest implied win probabilities (87% and 60% respectively at home), favoring players like **Koundé** and **Aramburu**. Teams with strong home advantage include **Atlético** (74% vs. Betis) and **Athletic** (62% vs. Levante), boosting **Unai Simón** and **Griezmann**'s prospects (if fit). Conversely, tough away fixtures for **Real Madrid** at Valencia (65% win prob for Madrid) still offer upside for **Tchouameni**. The key is navigating player absences: **Vinícius Jr** (sanctioned), **Pedraza** (sanctioned), and **Griezmann** (doubtful) are major concerns.
 
 ### 📋 Squad Status
-- **Out (Sanctioned):** Pedraza (DF), Vinícius Jr (FW).
-- **Doubt:** Griezmann (FW) – fitness unclear, recent scores poor.
-- **Starters likely (COMUNIATE_STARTER = 1):** Catena, Gumbau, Aramburu, Koundé, Kike García, Rioja, Pepelu, Rafa Marín, Tchouameni, Unai Simón, Muriqi, Vinícius Jr (suspended).
-- **Form Standouts:** Muriqi (20 pts in last 5), Unai Simón (consistent), Rafa Marín (solid home avg), Koundé (strong home avg).
+- **Unavailable/Suspended**: Vinícius Jr, Pedraza.
+- **Injury Doubt**: Griezmann (fitness shows consecutive 'doubt' entries). His 0.0 xP reflects high uncertainty.
+- **Standout Form (High xP & Positive Momentum)**: Pepelu (6.0 xP, +1.5 trend), Unai Simón (6.0 xP, +1.27), Aramburu (5.8 xP, +1.8), Koundé (5.4 xP, +0.92), Tchouameni (5.25 xP, +0.04).
+- **Concerns**: Rafa Marín (2.2 xP, -2.8 trend), Manu Sánchez (0 xP, negative trend), Diego Rico (0 xP). Several players have 0 xP due to low starter probability.
 
 ### ⚽ Recommended Lineup
 **Formation**: 3-5-2  
-*(We lack reliable forwards due to Vinícius suspension & Griezmann doubt, so we load the midfield.)*
+*(Chosen due to Vinícius' suspension and Griezmann's doubt, leaving only two reliable forwards. This maximizes the use of our strong midfielders with high xP.)*
 
-- **GK**: **Unai Simón** – Clear starter, excellent form, home match vs. Levante.
-- **DF**: **Koundé** (Barcelona) – Top home fixture, high win probability. **Rafa Marín** (Villarreal) – Home, decent avg. **Aramburu** (Real Sociedad) – Strong home fixture vs. Elche.
-- **MF**: **Tchouameni** (Real Madrid) – Despite tough away match, he’s consistent and versatile. **Pepelu** (Valencia) – Home, good avg, on set-pieces. **Gumbau** (Rayo Vallecano) – Home, starter, cheap enabler. **Rioja** (Valencia) – Listed as FW but has MF alternate position; use him in MF to fill line. **Pol Lozano** (Espanyol) – Away but likely to start, decent avg.
-- **FW**: **Muriqi** (Mallorca) – In outstanding form (20, 9, 9 last 3), even vs. Barcelona he can score. **Kike García** (Espanyol) – Away at Villarreal, but starter and avg away > home.
+- **GK**: **Unai Simón** (ATH) - Clear starter, highest GK xP (6.0), home match vs. Levante (62% win prob).
+- **DF**: **Koundé** (BAR) - Starter (1.0), excellent fixture (87% win prob), solid xP (5.4).
+- **DF**: **Aramburu** (RSO) - Starter (1.0), best DF xP (5.8), home vs. Elche (60% win prob).
+- **DF**: **Catena** (OSA) - Starter (1.0), decent xP (3.75). Despite away at Celta, he is a guaranteed starter.
+- **MF**: **Pepelu** (VAL) - Locked starter (1.0), highest squad xP (6.0). Tough fixture but essential.
+- **MF**: **Tchouameni** (RMA) - Starter (1.0), high xP (5.25). Madrid are favorites away at Valencia.
+- **MF**: **Pol Lozano** (ESP) - Starter (1.0), xP 3.0. Away at Villarreal is tough, but we need his guaranteed minutes.
+- **MF**: **Gumbau** (RAY) - 60% starter chance (0.6), xP 1.2. Home vs. Oviedo gives him a reasonable opportunity.
+- **MF**: **Pablo Torre** (MAL) - Not a starter (0.0 xP), but his strong momentum (+0.9) and bench potential make him a better 5th MF option than players like **Boayar** or **Kike García** as a forward. He can cover MF/FW.
+- **FW**: **Rioja** (VAL) - Starter (1.0), solid xP (4.8). Must start despite tough fixture.
+- **FW**: **Kike García** (ESP) - Not a starter (0.0 xP), but chosen over Boayar due to slightly better recent form and the need to fill the position. This is the weakest link.
 
-**Justification**: We avoid empty positions by using Rioja in MF (his alt position) and fielding two forwards who are fit and starting. The 3-5-2 maximizes our midfield strength and covers for missing forwards. Defense chosen for best home fixtures/highest win odds.
+**Key Decisions**:  
+1.  **3-5-2 over 3-4-3**: With Vinícius out and Griezmann doubtful, we only have one reliable forward (Rioja). The 3-5-2 allows us to field five midfielders with higher collective xP than forcing a third forward with 0.0 xP.
+2.  **Pablo Torre over Kike García/Boayar in the 11**: Torre’s MF eligibility and positive momentum offer more upside as a flex player than a 0 xP forward.
+3.  **Catena over Rafa Marín/Diego Rico**: Guaranteed starter status (1.0) outweighs Marín's low xP and negative trend.
 
 ### 🚨 Urgent Needs
-**NECESSITEM DF** – We have only 3 reliable defenders (Koundé, Rafa Marín, Aramburu) after suspending Pedraza. If any gets rotated, we risk -4. Also **NECESSITEM FW** – With Vinícius out and Griezmann doubtful, we lack forward depth.
+**NECESSITEM 1 FW (de qualitat)**. The forward line is critically weak. **NECESSITEM 1 MF (titular clar)** to upgrade the Gumbau/Torre slot for more consistent points.
 
 ### 💰 Market Strategy (For Sale)
-1. **Catena** – REAL – Not starting regularly, negative profit but freeing up funds for a needed defender.
-2. **Diego Rico** – REAL – Not starting, negative profit, clear roster clog.
-3. **Griezmann** – RESERVE – Expensive, doubtful, huge sale loss; keep unless a great offer arrives.
-4. **Álex Padilla** – RESERVE – Backup GK; keep as coverage for Unai Simón (same team).
-5. **Manu Sánchez** – REAL – Not starting, away at Athletic, minimal profit loss.
+1.  **Vinícius Jr** - RESERVE - Sanctioned this week. **DO NOT SELL**. His market price (17.5M) is far below his clause value. Selling now would crystallize a massive loss. Hold and wait for his return and potential clause activation.
+2.  **Pedraza** - RESERVE - Sanctioned and with good historical form. Similar to Vinícius, selling at a low price (1.9M) likely incurs a loss vs. acquisition cost. Keep as a viable DF/MF option once available.
+3.  **Griezmann** - REAL - High salary, doubtful fitness, and 0.0 xP. The sustained 'doubt' status and negative momentum trend (-0.75) indicate a declining, unreliable asset. Consider selling to free up significant budget for a reliable forward, even at a potential loss.
+4.  **Boayar** - REAL - Minimal price (150k), 0.0 xP, and not a starter. He is a truly unusable player who occupies a roster spot. Sell to free space.
+5.  **Álex Padilla** - REAL - Backup GK for Unai Simón. Per the rules, we have automatic coverage with two GKs from the same team. He is redundant and has 0 value. Selling him incurs no risk and frees a roster spot.
 
 ---
 
-## 💼 Sporting Director's Proposals (The Broker)
+## 💼 Sporting Director Proposals
 ### 💵 Financial Diagnosis
-Current balance is **€2,378,062**, which is positive. However, to fund necessary signings and maintain a healthy buffer, we will generate liquidity by selling non‑starting assets. The goal is to stay well above €0 after all transactions, complying with the critical rule.
+Current balance is **€27,558,062**, which is comfortably positive. No immediate liquidity risk. However, to fund future signings (a quality forward and a clear-starting midfielder as per coach’s urgent needs) and free up roster spots, we will execute strategic sales of underperforming or redundant assets. The clause window is closed and no free agents are available, so no signings can be made at this time.
 
 ### 🎯 Target Signings
-We prioritize a starting‑caliber defender and a forward with good value. The clause window is open, enabling immediate buyouts.
-
-| Player | Type | Price/Clause | Rationale |
-|--------|------|--------------|-----------|
-| **Matturro** (Levante – DF) | Clause | €2,703,000 | Strong average (4.0), decent clause value (1.08021). Provides a reliable third defender alongside Koundé and Rafa Marín. |
-| **Diangana** (Elche – FW) | Clause | €990,000 | Good forward depth, avg 3.25, clause value 1.63317. Addresses the urgent need with Vinícius suspended and Griezmann doubtful. |
+*No signings possible at the moment.*  
+- The clause window is **CLOSED** (deadline: 2026-02-04 21:00).  
+- The free-agent market currently shows **no available players**.  
+- We will wait for the next clause window to address the squad’s weaknesses with cost-efficient targets.
 
 ### 📤 Recommended Sales
-Sell underperforming, non‑starting players to raise funds and clear roster space. Although these sales realize losses, the players are not contributing and the cash is needed for reinforcements.
+The following players are recommended for sale to generate funds and optimize the squad. Prices are set at their current market value to ensure a quick sale while minimizing losses on high-investment players.
 
 | Player | Suggested Price | Reason |
 |--------|-----------------|--------|
-| **Catena** | €5,040,000 | Not starting regularly; frees up significant funds. |
-| **Diego Rico** | €1,070,000 | Not starting; minimal role in squad. |
-| **Manu Sánchez** | €920,000 | Away fixture vs. Athletic, not starting; small loss acceptable. |
+| Boayar | €150,000 | Unusable forward (0 xP, not a starter). Frees a roster spot. |
+| Álex Padilla | €150,000 | Redundant backup GK (0 xP). We have automatic coverage with Unai Simón. |
+| Ander Yoldi | €150,000 | Unused forward (0 xP, no momentum). No projected minutes. |
+| Diego Rico | €980,000 | Defender with 0 xP and negative trend. Not in lineup plans. |
+| Manu Sánchez | €950,000 | Defender with 0 xP and negative trend. Not in lineup plans. |
+| Griezmann | €5,220,000 | High-salary forward with sustained doubt (0 xP, negative trend). Selling frees budget for a reliable replacement, even at a potential loss. |
+
+**Important holds:**  
+- **Vinícius Jr** and **Pedraza** are suspended but have clause values far above market price. Selling now would crystallize a large loss. Retain for future value.  
+- **Kike García** is kept for this week’s lineup due to forward shortage.  
+- **Rafa Marín** is retained as defensive cover despite negative trend.
 
 ### ⚖️ Final Forecast
+Estimated balance after all sales (no purchases possible):
+
 ```
-Current Balance:    €2,378,062
-+ Expected Sales:   €7,030,000 (Catena €5.04M + Diego Rico €1.07M + Manu Sánchez €0.92M)
-- Expected Buys:    €3,693,000 (Matturro €2.703M + Diangana €0.99M)
-= Projected Balance: €5,715,062
+Current Balance:    €27,558,062
++ Expected Sales:   €7,600,000
+- Expected Buys:    €0
+= Projected Balance: €35,158,062
 ```
-**Result:** Well above €0 – rule satisfied, and we have strengthened two weak positions.
+
+*Note: All sales are subject to market demand. The projected balance ensures ample liquidity for future signings when the clause window reopens.*
 
 ---
 
-## 🏛️ President's Decisions (The Strategist)
-🏛️ **EXECUTIVE SUMMARY**  
-The situation is manageable but requires immediate action. Our balance is positive, but our squad depth is critically thin in defense and attack due to suspension (Vinícius Jr) and doubt (Griezmann). We must sell non‑contributors to fund two essential signings—a starting defender and a forward—while comfortably maintaining a positive balance. The proposed 3‑5‑2 lineup covers our weaknesses, and the market operations align with our core objectives.
+## 🏛️ President Decision
+### 🏛️ EXECUTIVE SUMMARY
+The current squad is financially stable but sportingly vulnerable, particularly in attack. With the clause window closed, our immediate focus is to optimize the roster by selling underperforming and redundant assets. This will generate liquidity and free squad slots, positioning us to aggressively address our critical need for a quality forward and a clear-starting midfielder in the next market window. We will field a competitive 3-5-2 lineup for the upcoming jornada to avoid point penalties, leveraging our midfield strength while acknowledging the forward line as our primary weakness to fix.
 
----
-
-### ✅ APPROVED OPERATIONS  
-
+### ✅ APPROVED OPERATIONS
 | # | Operation | Player | Amount | Reason |
 |---|-----------|--------|--------|--------|
-| 1 | **SELL** | Catena | €5,040,000 | Not a regular starter; frees significant funds for reinforcements. |
-| 2 | **SELL** | Diego Rico | €1,070,000 | Not starting; minimal role, clears roster space. |
-| 3 | **SELL** | Manu Sánchez | €920,000 | Away vs. Athletic, not starting; small loss acceptable. |
-| 4 | **CLAUSE** | Matturro (DF – Levante) | €2,703,000 | Reliable defender (avg 4.0) with good clause value; addresses urgent DF need. |
-| 5 | **CLAUSE** | Diangana (FW – Elche) | €990,000 | Solid forward depth (avg 3.25), excellent clause value; covers Vinícius absence/Griezmann doubt. |
+| 1 | SELL | Boayar | €150,000 | Unusable forward (0 xP). Frees a roster spot. |
+| 2 | SELL | Álex Padilla | €150,000 | Redundant backup GK. Zero risk sale. |
+| 3 | SELL | Ander Yoldi | €150,000 | Unused forward with no projected role. |
+| 4 | SELL | Diego Rico | €980,000 | Defender with 0 xP, not in plans. |
+| 5 | SELL | Manu Sánchez | €950,000 | Defender with 0 xP, negative trend. |
+| 6 | SELL | Griezmann | €5,220,000 | High-salary asset with sustained doubt and 0 xP. Frees significant budget for a reliable future replacement. |
 
----
-
-### ❌ REJECTED OPERATIONS  
-
+### ❌ REJECTED OPERATIONS
 | Operation | Player | Reason for Rejection |
 |-----------|--------|---------------------|
-| SELL | Griezmann | Despite doubt, the huge sale loss (€‑13,414,056) is too severe; retain as bench option unless a strong offer emerges. |
-| SELL | Álex Padilla | Required as GK coverage for Unai Simón (same team); cheap and necessary for squad depth. |
+| SELL | Vinícius Jr | Clause Protection Rule. Market price (€17.5M) is far below his clause value. Selling now would crystallize a massive loss. Retain for future value and potential clause activation. |
+| SELL | Pedraza | Clause Protection Rule. Similar rationale to Vinícius. He is suspended but has value as a viable DF/MF option upon return. |
 
----
-
-### 💰 FINANCIAL PROJECTION  
-
+### 💰 FINANCIAL PROJECTION
 ```
-Current Balance:       €2,378,062
-+ Approved Sales:      €7,030,000 (Catena €5.04M + Rico €1.07M + Sánchez €0.92M)
-- Approved Purchases:  €3,693,000 (Matturro €2.703M + Diangana €0.99M)
-= Final Balance:       €5,715,062
+Current Balance:     €27,558,062
++ Approved Sales:    €7,600,000
+- Approved Purchases: €0
+= Final Balance:     €35,158,062
 ```
-✅ **RULE COMPLIANCE:** Final balance remains strongly positive (>€0).
 
----
-
-### 🎯 FINAL ORDERS  
-
-**Execute the following actions in Biwenger in this exact order:**
-
-1. **SELL Catena** for €5,040,000 (use “Offer to Market” at suggested price).  
-2. **SELL Diego Rico** for €1,070,000 (use “Offer to Market” at suggested price).  
-3. **SELL Manu Sánchez** for €920,000 (use “Offer to Market” at suggested price).  
-4. **CLAUSE Matturro** (Levante – DF) for €2,703,000 (activate clause immediately).  
-5. **CLAUSE Diangana** (Elche – FW) for €990,000 (activate clause immediately).  
-
-Once completed, set the **starting lineup as 3‑5‑2** with:  
-- **GK**: Unai Simón  
-- **DF**: Koundé, Rafa Marín, Matturro  
-- **MF**: Tchouameni, Pepelu, Gumbau, Rioja (MF alt position), Pol Lozano  
-- **FW**: Muriqi, Diangana  
-
-**Monitor Griezmann’s fitness** – if confirmed fit, consider him for the bench.
+### 🎯 FINAL ORDERS
+1.  Execute the **SELL** operations in Biwenger for the following players in this order: **Boayar, Álex Padilla, Ander Yoldi, Diego Rico, Manu Sánchez, Griezmann**.
+2.  **DO NOT LIST** Vinícius Jr or Pedraza for sale.
+3.  Set the lineup for Jornada 23 to the Coach's recommended **3-5-2 formation**:
+    *   **GK**: Unai Simón
+    *   **DF**: Koundé, Aramburu, Catena
+    *   **MF**: Pepelu, Tchouameni, Pol Lozano, Gumbau, Pablo Torre
+    *   **FW**: Rioja, Kike García
+4.  Monitor the market and prepare a target list for the **next clause window**, prioritizing one quality forward and one clear-starting midfielder.

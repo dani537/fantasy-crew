@@ -1,122 +1,224 @@
-# 🚀 Fantasy Crew (Multi-Agent System)
+# ⚽ Fantasy Crew — Agentic AI for Biwenger
 
-> [!NOTE]
-> This document is also available in [Catalan](docs/README.ca.md) and [Spanish](docs/README.es.md).
 
-**Goal:** Build a team of autonomous AI agents to manage a Biwenger squad, optimizing both sporting and financial performance using state-of-the-art LLMs and advanced data analysis.
+> 📖 Also available in [Català](docs/README.ca.md) · [Español](docs/README.es.md)
 
-This system outperforms a human player by eliminating emotional bias, operating 24/7, and processing massive volumes of real-time data to maximize Squad Value and total points.
+This project explores how **agentic AI** can make strategic decisions in a dynamic, competitive environment. Inspired by Billy Beane's **Moneyball** philosophy, the system aims to maximize points within a given budget by treating players as undervalued assets rather than just names.
 
----
-
-## 👥 The Coaching Staff (The Agents)
-
-The system operates using a **sequential multi-agent architecture**, where each role utilizes Language Models (LLMs) and data processing to add value at a specific stage of the pipeline.
-
-### 1. 🔮 The Analyst (Data Analyst)
-**"The Source of Truth"**
-*   **Role:** Data engineering and consolidation agent. Prepares the ground for language models through deterministic cleaning.
-*   **Processing (Feature Engineering):**
-    *   **Multi-Source Fuzzy Matching:** Cross-references team and player names across Biwenger, Comuniate, and bookmakers (Odds), resolving discrepancies (e.g., "RCD Espanyol" vs "Espanyol").
-    *   **Tactical Normalization:** Maps numerical positions to readable labels (`GK`, `DF`, `MF`, `FW`) and processes alternative positions.
-    *   **Probability Cleaning:** Converts noise in press data (e.g., "80%") into clean numerical values for analysis.
-    *   **Token Optimization:** Rounds metrics to 2 decimal places to maximize efficiency within LLM context windows.
-*   **Output:** Generates `df_master_analysis.csv` (full squad data) and enriches `data/next_match.csv` with victory probabilities (Odds).
-
-### 2. 📋 The Coach (The Mister)
-**"The Sports Strategist"**
-*   **Role:** Makes tactical decisions based on performance and availability.
-*   **Logic (DeepSeek):**
-    *   **Temporal Context:** Considers the current date/time and the proximity of the next game week.
-    *   **Lineup Management:** Prioritizes offensive formations (3-4-3) but remains flexible to avoid the **-4 point penalty** for empty slots.
-    *   **Club Awareness:** Recognizes teammates (via `TEAM_NAME`) to secure the goal if both the starter and substitute goalkeepers from the same club are available.
-    *   **Momentum Analysis:** Evaluates recent form (`PLAYER_FITNESS`) and relative performance (Home/Away) against opponent difficulty (Odds).
-*   **Market Strategy:** Defines which players are necessary sales (**REAL**) and which are listed to receive preventive offers (**RESERVE**).
-
-### 3. 💼 The Sporting Director (The Broker)
-**"The Financial Controller"**
-*   **Role:** Executes market strategy under strict budgetary discipline.
-*   **Logic (DeepSeek):**
-    *   **The Positive Balance Dogma:** Priority #1 is ensuring the team does not start the game week with a negative balance (which would result in zero points).
-    *   **Budget Management:** Loads real balance from `user_info.csv` and estimates revenue from proposed sales to calculate purchasing power.
-    *   **Needs-Based Scouting:** Cross-references the Coach's cries for help (e.g., "WE NEED MF") with the best opportunities on the market.
-*   **Output:** Signing proposals that balance sporting impact and profitability (`ROI`).
-
-### 4. 🧠 The President (The Strategist)
-**"The Executive Authority"**
-*   **Role:** Final validator with a vision for risk and long-term strategy.
-*   **Logic (DeepSeek):**
-    *   **Budgetary Filter:** Applies maximum financial severity; rejects ostentatious signings that compromise the club's stability.
-    *   **Conditional Approval:** May authorize a signing subject to the prior sale of a non-performing asset.
-*   **Output:** Issues the **Final Executive Report** with the definitive actions to be taken.
+The agents operate autonomously: extracting real-time data, analyzing performance trends, and generating actionable transfer recommendations—delivered directly to your inbox.
 
 ---
 
-## 🔄 Workflow
+## 🎯 Core Concept
 
-The system runs these agents in a chain (`main.py`):
+**The Moneyball Approach to Fantasy Football**
 
-1.  **Extract & Transform:** `DataAnalyst` downloads data and creates the `df_master_analysis`.
-2.  **Squad Analysis:** `Coach` reads your team data and detects issues.
-3.  **Market Scouting:** `SportingDirector` reads the Coach's report and searches for market solutions.
-4.  **Executive Decision:** `President` reviews solutions and gives the green light.
-5.  **Reporting:** The final `final_recommendations.md` file is generated, documenting the entire process.
+Traditional fantasy managers rely on intuition, star names, and emotional attachment. This system takes a different approach:
+
+- **Efficiency over prestige** → Cost per Expected Point (€/xP) is the key metric
+- **Momentum over reputation** → Recent form matters more than historical averages
+- **Data over gut feeling** → Every decision is backed by statistical evidence
+
+---
+
+## 🤖 The Agent Team
+
+The system orchestrates **four specialized AI agents**, each with a distinct role in the decision-making pipeline.
+
+| Agent | Role | Key Responsibility |
+|-------|------|-------------------|
+| **📊 Data Analyst** | The Foundation | Extracts, cleans, and enriches data from multiple sources |
+| **📋 Coach** | The Tactician | Analyzes squad, recommends lineups, identifies weak spots |
+| **💼 Sporting Director** | The Broker | Scans market for value signings, proposes transfers |
+| **🧠 President** | The Authority | Validates proposals, ensures financial sustainability |
+
+### Agent Details
+
+**🔮 Data Analyst**
+- Fuzzy matching across Biwenger, Comuniate, and betting data
+- Calculates `EXPECTED_POINTS (xP)` based on form and probability of playing
+- Computes `COST_PER_XP` — the ultimate efficiency metric
+
+**📋 Coach**
+- Maximizes lineup xP while respecting position constraints
+- Flags players with declining `MOMENTUM_TREND` for potential sale
+- Prioritizes offensive formations (3-4-3) when possible
+
+**💼 Sporting Director**
+- Targets signings with lowest `COST_PER_XP`
+- Detects market inefficiencies (improving players priced below value)
+- Ensures positive balance before each gameweek
+
+**🧠 President**
+- Applies financial severity — rejects risky expenditures
+- Protects high-investment assets from being sold at a loss
+- Issues final executive decisions
+
+---
+
+## 🔄 Workflow Architecture
+
+The system uses **LangGraph** to orchestrate the agent workflow with explicit state management and conditional routing.
+
+```mermaid
+graph TD
+    A[🚀 START] --> B[🔮 Data Analyst]
+    B --> C[📋 Coach]
+    C --> D[💼 Sporting Director]
+    D --> E{🧠 President}
+    
+    E -->|✅ Approved| F[📄 Generate Reports]
+    E -->|❌ Rejected| D
+    
+    F --> G[📧 Send Email]
+    G --> H[🏁 END]
+    
+    style A fill:#1a1a2e,stroke:#16213e,color:#fff
+    style B fill:#4a4e69,stroke:#22223b,color:#fff
+    style C fill:#22577a,stroke:#38a3a5,color:#fff
+    style D fill:#57cc99,stroke:#80ed99,color:#000
+    style E fill:#c9184a,stroke:#ff758f,color:#fff
+    style F fill:#7209b7,stroke:#b5179e,color:#fff
+    style G fill:#f72585,stroke:#b5179e,color:#fff
+    style H fill:#1a1a2e,stroke:#16213e,color:#fff
+```
+
+**Key Features:**
+- **Conditional Routing:** If the President rejects a proposal, it loops back to the Sporting Director for revision
+- **State Persistence:** Each agent receives context from previous steps
+- **Email Notifications:** Final report delivered via Gmail SMTP
 
 ---
 
 ## 📊 Data Sources
 
-The system is powered by a robust data architecture extracted automatically through various processes (`src/`):
-
-### 1. Biwenger API (Official Data)
-Direct connection to the Biwenger API to obtain the real state of the league.
-*   **LaLiga General Data (`LaLigaGeneralData`):**
-    *   Complete **Player** database (Points, Price, Status, Fitness, Home/Away stats).
-    *   **Team** information (Calendar, Upcoming opponents).
-    *   **Next Game Week** data (Schedules, Matches).
-*   **User League Data (`UserLeagueData`):**
-    *   **Rivals:** We scan all rival squads to know their lineups, purchase prices, and most importantly, their **Release Clauses**.
-    *   **Market:** Monitoring free agents for sale and offers received for our players.
-    *   **Standings:** Current state of the points table and squad value.
-
-### 2. Comuniate (Advanced Web Scraping)
-Extraction of tactical intelligence from *Comuniate.com* using `BeautifulSoup`.
-*   **Probable Lineups:** Predicted starting elevens for the next game week.
-*   **Start Probability:** Estimated percentage of a player starting the match.
-*   **Status Alerts:** Detection of players **One Card Away** from suspension or **Doubtful** due to injury.
-*   **Tactical Positions:** Precise classification of the player's role on the pitch.
-
-### 3. Jornada Perfecta (RSS & News Analysis)
-Real-time news ingestion system from *JornadaPerfecta.com*.
-*   **News Processing:** Reading and cleaning of sports articles.
-*   **LLM Summarization:** Transforming news into optimized formats for "The Oracle" (AI) to understand context (injuries, rotations, press conferences).
-
-### 4. Betting Houses (Odds)
-Market statistical data to support decision-making.
-*   **Match Prediction:** Mathematical probabilities (1X2) extracted and mapped for each match.
-*   **Player Difficulty:** Allows evaluating if a player faces an "easy" match (clear favorite) or a "wall" (the opponent is favorite), optimizing lineup recommendations.
-*   **Synchronization:** Automatic mapping via the Analyst to cross betting data with the Biwenger squad.
+| Source | Type | Data Provided |
+|--------|------|--------------|
+| **Biwenger API** | Official | Players, prices, fitness, league standings, market |
+| **Comuniate** | Web Scraping | Probable lineups, starting probability, injury alerts |
+| **Jornada Perfecta** | RSS Feed | Real-time news (injuries, rotations, press conferences) |
+| **EuroClubIndex** | Odds | Match probabilities (1X2) for difficulty assessment |
 
 ---
 
-## 🛠️ Technology Stack
+## 🛠️ Tech Stack
 
-*   **Language:** Python 3.12+
-*   **Agent Management:** LangGraph / CrewAI (Role orchestration).
-*   **Data Processing:**
-    *   `Pandas` for DataFrame manipulation and data cleaning.
-    *   `BeautifulSoup4` for Web Scraping (Comuniate).
-    *   `Feedparser` for RSS reading.
-*   **AI Models (LLMs):**
-    *   **DeepSeek-V3:** Intermediate logic and structured data processing (High Performance/Low Cost).
-    *   **DeepSeek-R1:** Complex reasoning engine for the "President".
-    *   **Gemini 1.5 Flash:** Long-context analysis (wide window) for processing massive news feeds.
+| Component | Technology |
+|-----------|------------|
+| **Orchestration** | LangGraph (StateGraph) |
+| **LLM** | DeepSeek API |
+| **Data Processing** | pandas, thefuzz |
+| **Web Scraping** | BeautifulSoup, httpx |
+| **Email** | SMTP (Gmail) |
+| **Language** | Python 3.10+ |
 
 ---
 
-## 🎯 Competitive Advantage
+## 🚀 Getting Started
 
-1.  **No Emotional Bias:** The system does not "fall in love" with players. It sells when statistics indicate a decline and buys when it detects an opportunity.
-2.  **Financial Engineering:** Precise calculation of future value, clauses, and profit margins.
-3.  **Reaction Speed:** Ability to buy or sell seconds after a relevant news item occurs (training injury, confirmed lineup).
-4.  **Global Vision:** Cross-referencing market data, news, and advanced statistics that would take a human hours to compile manually.
+### Prerequisites
+
+- Python 3.10+
+- A Biwenger account
+- DeepSeek API key
+- Gmail account with App Password enabled
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/fantasy-crew.git
+cd fantasy-crew
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+### Configuration
+
+Create a `.env` file in the project root:
+
+```env
+# Biwenger Authentication
+BIWENGER_EMAIL=your_biwenger_email@example.com
+BIWENGER_PASSWORD=your_biwenger_password
+
+# LLM API
+DEEPSEEK_API_KEY=your_deepseek_api_key
+
+# Gmail Notifications (Optional)
+GMAIL_ADRESS=your_gmail@gmail.com
+GMAIL_PASSWORD=your_app_password
+
+# Score Type
+SCORE_TYPE=5 #1: AS points / 2: SofaScore / 5: AVG AS and SofaScore / 3: Stats / 6: Biwenger Social
+```
+
+> **Note:** For Gmail, you need to generate an [App Password](https://support.google.com/accounts/answer/185833) — your regular password won't work.
+
+### Running the System
+
+```bash
+# Full execution with LangGraph orchestration
+python main_langgraph.py
+```
+
+### Output
+
+Reports are saved to `./reports/`:
+- `00_final_report.md` — Consolidated report
+- `01_coach_report.md` — Squad analysis
+- `02_sporting_director_proposals.md` — Transfer recommendations
+- `03_president_decision.md` — Final decisions
+
+If email is configured, the report is also sent to your inbox.
+
+---
+
+## 📁 Project Structure
+
+```
+fantasy-crew/
+├── main.py                    # Classic sequential entry point
+├── main_langgraph.py          # LangGraph orchestrated entry point
+├── requirements.txt
+├── .env                       # Configuration (not tracked)
+├── src/
+│   ├── agents/
+│   │   ├── data_analyst.py    # Data extraction & feature engineering
+│   │   ├── coach.py           # Lineup analysis
+│   │   ├── sporting_director.py # Market proposals
+│   │   └── president.py       # Final decisions
+│   ├── graph/
+│   │   ├── state.py           # LangGraph state schema
+│   │   ├── nodes.py           # Agent node functions
+│   │   └── graph.py           # StateGraph builder
+│   └── utils/
+│       └── email_sender.py    # Gmail SMTP utility
+├── data/                      # Extracted CSVs (generated)
+├── reports/                   # Agent output (generated)
+└── docs/
+    └── DATA_DICTIONARY.md     # Field documentation
+```
+
+---
+
+## 📄 License
+
+MIT License — Feel free to use, modify, and distribute.
+
+---
+
+## 👤 Author
+
+**Daniel Sanchez**  
+[LinkedIn](https://linkedin.com/in/daniel-sanchez-rodriguez-51084031) · [GitHub](https://github.com/dani537)
+
+---
+
+> *"The goal isn't to buy players. The goal is to buy wins."* — Billy Beane

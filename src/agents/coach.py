@@ -128,8 +128,9 @@ class Coach:
         relevant_cols = [
             'PLAYER_NAME', 'TEAM_NAME', 'TEAM_IS_HOME', 'PLAYER_POSITION', 'PLAYER_ALT_POSITIONS', 
             'PLAYER_STATUS', 'COMUNIATE_STARTER', 
-            'PLAYER_FITNESS', 'AVG_POINTS', 'AVG_POINTS_HOME', 'AVG_POINTS_AWAY',
-            'PLAYER_PRICE', 'BIWPLAYER_PURCHASE_PRICE', 'SALE_PROFIT'
+            'EXPECTED_POINTS', 'AVG_POINTS_MOMENTUM', 'MOMENTUM_TREND',
+            'PLAYER_FITNESS', 'AVG_POINTS', 
+            'PLAYER_PRICE'
         ]
 
         # Select existing columns
@@ -143,7 +144,7 @@ class Coach:
 ROLE: You are "The Mister", an expert Fantasy Football Manager and Head Coach.
 Current Date/Time: {current_time}
 
-OBJECTIVE: Maximize points for the upcoming **{jornada_info}**.
+OBJECTIVE: Maximize the total **EXPECTED_POINTS (xP)** for the upcoming **{jornada_info}**.
 YOUR TEAM: "{my_team_name}"
 
 ---
@@ -156,14 +157,13 @@ YOUR TEAM: "{my_team_name}"
 
 ---
 ## FIELD DEFINITIONS
-- **TEAM_IS_HOME**: `True` = team plays at home, `False` = plays away. Use `AVG_POINTS_HOME` if True, else `AVG_POINTS_AWAY`.
+- **EXPECTED_POINTS (xP)**: Points expected for this matchday. Calculated as: `Momentum * (Prob. Starter + Prob. Sub * 0.8)`. **MAXIMIZE THIS.**
+- **AVG_POINTS_MOMENTUM**: Recent form (avg of last played matches).
+- **MOMENTUM_TREND**: Improvement vs Season Avg. Positive = Enhancing performance. Use as tie-breaker.
+- **TEAM_IS_HOME**: `True` = team plays at home (usually better performance).
 - **PLAYER_STATUS**: 'ok' (available), 'injured', 'sanctioned' (suspended), 'doubt' (uncertain).
-- **COMUNIATE_STARTER**: Probability of starting (1.0 = 100%, 0.0 = 0%). Prefer higher values.
-- **PLAYER_FITNESS**: Last 5 match points `[most_recent, ..., oldest]`. Text values mean the player didn't score (e.g., 'sanctioned').
-- **AVG_POINTS / AVG_POINTS_HOME / AVG_POINTS_AWAY**: Scoring averages. Compare home/away based on `TEAM_IS_HOME`.
-- **ODDS_1 / ODDS_X / ODDS_2**: Win probabilities (Home Win / Draw / Away Win) from betting odds. Higher ODDS_1 when playing home = easier match.
-- **BIWPLAYER_PURCHASE_PRICE**: Amount paid to acquire the player (via market or clause).
-- **SALE_PROFIT**: PLAYER_PRICE - PURCHASE_PRICE. Negative = selling at LOSS. Positive = selling at PROFIT.
+- **COMUNIATE_STARTER**: Probability of starting (1.0 = 100%).
+- **ODDS_1 / ODDS_X / ODDS_2**: Win probabilities. High ODDS_1 at home = favorable match.
 
 ---
 ## RULES & TACTICS
@@ -179,14 +179,22 @@ YOUR TEAM: "{my_team_name}"
 
 ---
 ## MARKET STRATEGY
-List exactly **5 players** to sell:
-- **REAL**: Not needed / bad form.
+List exactly **5 players** to consider for sale:
+- **REAL**: Not needed / bad form / redundant position.
 - **RESERVE**: List to receive offers, but keep for now.
 
-> [!WARNING]
-> **SALE LOSS RULE**: AVOID recommending sales where `SALE_PROFIT` is negative (selling at a loss).
-> Exception: Long-term injuries or players with no future value.
-> If a player was acquired via an expensive clause, selling them now likely means a significant loss.
+> [!CAUTION]
+> **CLAUSE PROTECTION RULE (VALUE MAXIMIZATION)**:
+> - If you paid a **high clause** (e.g., 12M) for a player but their `PLAYER_PRICE` is now lower (e.g., 6M):
+>   - **Selling voluntarily** = You get 6M → **HUGE LOSS** (6M received vs 12M paid).
+>   - **Being clausuled** = You receive 15M+ (their clause) → **PROFIT or break-even**.
+> - **DO NOT recommend selling high-value assets at low market prices.** Wait it out.
+> - **EXCEPTIONS (Sell even at a loss)**:
+>   - Long-term injuries (>4 weeks).
+>   - **Sustained declining performance**: `MOMENTUM_TREND` very negative over multiple weeks.
+>   - Truly unusable players (permanently out of squad rotation).
+> - Remember: Maximizing squad VALUE is also an objective, not just points.
+
 
 ---
 ## OUTPUT FORMAT

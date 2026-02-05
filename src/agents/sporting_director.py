@@ -155,19 +155,24 @@ class SportingDirector:
         
         # --- A. MARKET (Free Agents) ---
         market_cols = ['PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 
-                       'AVG_POINTS', 'MARKET_SALE_PRICE', 'FINAL_SCORE']
+                       'AVG_POINTS', 'MARKET_SALE_PRICE', 'FINAL_SCORE', 
+                       'COST_PER_XP', 'COST_PER_POINT', 'COST_PER_MOMENTUM_POINT']
         existing_market_cols = [c for c in market_cols if c in df_master.columns]
         
         market_players = df_master[df_master['MARKET_SALE_PRICE'] > 0].copy()
         if not market_players.empty and 'FINAL_SCORE' in market_players.columns:
-            market_players = market_players.sort_values(by='FINAL_SCORE', ascending=False).head(15)
+            # Sort by Value Efficiency (Cost per xP) instead of Score
+            if 'COST_PER_XP' in market_players.columns:
+                 market_players = market_players.sort_values(by='COST_PER_XP', ascending=True).head(15)
+            else:
+                 market_players = market_players.sort_values(by='FINAL_SCORE', ascending=False).head(15)
             market_summary = market_players[existing_market_cols].to_markdown(index=False)
         else:
             market_summary = "No free agents on the market."
         
         # --- B. CLAUSE TARGETS (Other teams' players with clauses) ---
         clause_cols = ['PLAYER_ID', 'PLAYER_NAME', 'TEAM_NAME', 'BIWPLAYER_TEAM_NAME',
-                       'BIWPLAYER_CLAUSE', 'CLAUSE_VALUE', 'AVG_POINTS']
+                       'BIWPLAYER_CLAUSE', 'COST_PER_XP', 'COST_PER_MOMENTUM_POINT']
         existing_clause_cols = [c for c in clause_cols if c in df_master.columns]
         
         clause_summary = "No clause opportunities or clause window is closed."
@@ -179,13 +184,14 @@ class SportingDirector:
                 (df_master['BIWPLAYER_TEAM_NAME'].notna())
             ].copy()
             
-            if not clause_targets.empty and 'CLAUSE_VALUE' in clause_targets.columns:
-                clause_targets = clause_targets.sort_values(by='CLAUSE_VALUE', ascending=False).head(15)
+            # Sort by lowest Cost/xP (Moneyball efficiency)
+            if not clause_targets.empty and 'COST_PER_XP' in clause_targets.columns:
+                clause_targets = clause_targets.sort_values(by='COST_PER_XP', ascending=True).head(15)
                 clause_summary = clause_targets[existing_clause_cols].to_markdown(index=False)
         
         # --- C. MY SQUAD (For Sales) ---
-        squad_cols = ['PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 'AVG_POINTS', 
-                      'PLAYER_PRICE', 'BIWPLAYER_PURCHASE_PRICE', 'SALE_PROFIT', 'TREND_SCORE', 'PLAYER_STATUS']
+        squad_cols = ['PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 'EXPECTED_POINTS', 
+                      'PLAYER_PRICE', 'MOMENTUM_TREND']
         existing_squad_cols = [c for c in squad_cols if c in df_master.columns]
         
         my_squad = df_master[df_master['BIWPLAYER_TEAM_NAME'] == my_team_name].copy()
@@ -221,51 +227,55 @@ Current Date/Time: {current_time}
 
 ---
 ## 🛒 MARKET OPPORTUNITIES (Free Agents)
-Players available for bidding. `FINAL_SCORE` = Value (Points/Price) + Trend.
-
+Sorted by **Efficiency** (Lowest Cost/xP first).
 {market_summary}
 
 ---
 ## 🔓 CLAUSE BUYOUT OPPORTUNITIES
-Players from other teams you can sign immediately by paying their clause.
-`CLAUSE_VALUE` = Points per Million of Clause. Higher = better value.
-
+Sorted by **Efficiency** (Lowest Cost/xP first).
 {clause_summary}
 
 ---
 ## 👥 MY SQUAD (For Sales Strategy)
-`TREND_SCORE` > 0 = price rising. `TREND_SCORE` < 0 = price falling (sell candidate).
-
+High Price + Low xP + Negative Trend = SELL
 {my_squad_summary}
 
 ---
 ## 📖 FIELD DEFINITIONS
-- **FINAL_SCORE**: Combined metric of value (Points per € spent) and price trend. Higher = better signing.
-- **CLAUSE_VALUE**: Points per Million of Clause. Higher = more efficient buyout.
-- **TREND_SCORE**: Price momentum. Positive = appreciating asset. Negative = depreciating.
-- **BIWPLAYER_TEAM_NAME**: The manager/team that currently owns the player.
-- **BIWPLAYER_CLAUSE**: The release clause amount in €.
-- **BIWPLAYER_PURCHASE_PRICE**: Amount we paid to acquire the player.
-- **SALE_PROFIT**: PLAYER_PRICE - PURCHASE_PRICE. Negative = Loss. Positive = Profit.
+- **COST_PER_XP**: Millions paid per Expected Point. **LOWER IS BETTER**. (e.g. 0.5 is better than 1.2).
+- **COST_PER_MOMENTUM_POINT**: Cost per recent form point. If this is MUCH LOWER than Cost/Point, it's a **BARGAIN (Chollo)**.
+- **EXPECTED_POINTS (xP)**: Risk-adjusted points expected for this week.
+- **MOMENTUM_TREND**: Price/Form momentum. Positive = rising.
+- **BIWPLAYER_PURCHASE_PRICE**: What we PAID to acquire this player (market or clause).
+- **BIWPLAYER_CLAUSE**: What OTHERS must pay to steal this player from us.
 
-> [!WARNING]
-> **SALE LOSS RULE**: AVOID recommending sales where `SALE_PROFIT` is negative.
-> Selling a player we paid a high clause for at a loss is a BAD decision.
-> Exception: Only recommend loss sales for long-term injuries or truly unusable players.
+> [!CAUTION]
+> **CLAUSE PROTECTION RULE (VALUE MAXIMIZATION)**:
+> - **Voluntary Sale** → We receive `PLAYER_PRICE` (low market value, e.g., 6M).
+> - **Being Clausuled** → We receive `BIWPLAYER_CLAUSE` (high clause value, e.g., 15M).
+> - If `BIWPLAYER_PURCHASE_PRICE` > `PLAYER_PRICE` but < `BIWPLAYER_CLAUSE`:
+>   - Selling is a **LOSS**. Being clausuled is a **PROFIT**.
+>   - **DO NOT recommend selling these players.** Wait for a clause buyout.
+> - **EXCEPTIONS (Sell even at a loss)**:
+>   - Long-term injuries (>4 weeks).
+>   - **Sustained declining performance**: `MOMENTUM_TREND` very negative over multiple weeks.
+>   - Truly unusable players (permanently out of squad rotation).
+> - Remember: **Maximizing squad VALUE** is a secondary objective after points.
+
 
 > [!IMPORTANT]
-> **CLAUSE REALITY**: When signing a player owned by another team, the **CLAUSE is the real price**, not the market value.
-> Example: A player worth €20M with a €80M clause will cost you €80M to sign (or a negotiated offer the owner accepts).
-> Only "Free Agents" (Market) can be signed at their listed price via bidding.
+> **CLAUSE REALITY**: When signing a player from another team, the **CLAUSE is the real price**.
 
 ---
 ## 🎯 YOUR TASKS
 1. **Ensure Liquidity**: Check Coach's recommended sales. Estimate income to fix balance if negative or to fund signings.
-2. **Reinforce Weaknesses**: If Coach needs a position, find the best value signing from Market or Clauses.
+2. **Reinforce Weaknesses**: If Coach needs a position, find the **most efficient** signing (Lowest Cost/xP).
 3. **Strategic Bidding**: 
-   - For "Market" players, suggest bid amounts (higher than asking price if high potential).
+   - Identify **BARGAINS**: Players with low Cost/xP and positive trend.
    - If clause window is OPEN, identify high-value clause targets.
-4. **Asset Management**: Set prices for players the coach wants to sell.
+4. **Asset Management**: 
+   - Set prices for players the coach wants to sell.
+   - **PROTECT high-investment players**: If `PURCHASE_PRICE` > `PLAYER_PRICE`, DO NOT recommend voluntary sale.
 
 ---
 ## 📄 OUTPUT FORMAT (Markdown)

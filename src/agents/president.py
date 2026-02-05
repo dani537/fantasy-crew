@@ -216,11 +216,25 @@ Current Date/Time: {current_time}
 
 3. **Evaluate Value**:
    - Cheap player with good points > Expensive star with marginal improvement.
-   - Consider `CLAUSE_VALUE` and `FINAL_SCORE` metrics.
+   - Consider `COST_PER_XP` as the key efficiency metric.
 
 4. **Approve in Order**:
    - First: Sales (to generate liquidity).
    - Second: Signings (using generated liquidity).
+
+> [!CAUTION]
+> **CLAUSE PROTECTION RULE (VALUE MAXIMIZATION)**:
+> - **Voluntary Sale** → We receive `PLAYER_PRICE` (low market value).
+> - **Being Clausuled** → We receive `BIWPLAYER_CLAUSE` (high clause value).
+> - If a player was acquired via **expensive clause** and their market price has dropped:
+>   - **DO NOT approve voluntary sales** that result in significant losses.
+>   - Better to wait for someone to clausule them (we recover the investment).
+> - **EXCEPTIONS (Approve sale even at a loss)**:
+>   - Long-term injuries (>4 weeks).
+>   - **Sustained declining performance**: `MOMENTUM_TREND` very negative over multiple weeks.
+>   - Truly unusable players (permanently out of squad rotation).
+> - **Maximizing squad VALUE** is a secondary objective after points.
+
 
 ---
 ## 📄 OUTPUT FORMAT (Executive Order)

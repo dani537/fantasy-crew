@@ -1,32 +1,39 @@
-# 📋 Coach Report (The Mister)
-_Generated: 2026-02-03 02:06_
-
 ### 🧠 Match Analysis
-Examining the odds: **Barcelona (86% win probability)** at home vs. Mallorca is the most favorable fixture—excellent for Barcelona defenders. **Real Sociedad (57% win prob)** at home vs. Elche is also a strong opportunity. **Athletic (62% win prob)** at home vs. Levante is promising for our Athletic players. Tough away matches for **Real Madrid at Valencia** (only 64% win prob away) and **Osasuna at Celta** (only 23% win prob away) suggest caution with those players despite their quality.
+The upcoming matches present a mix of opportunities and challenges. Barcelona (vs. Mallorca) and Real Sociedad (vs. Elche) have the highest implied win probabilities (87% and 60% respectively at home), favoring players like **Koundé** and **Aramburu**. Teams with strong home advantage include **Atlético** (74% vs. Betis) and **Athletic** (62% vs. Levante), boosting **Unai Simón** and **Griezmann**'s prospects (if fit). Conversely, tough away fixtures for **Real Madrid** at Valencia (65% win prob for Madrid) still offer upside for **Tchouameni**. The key is navigating player absences: **Vinícius Jr** (sanctioned), **Pedraza** (sanctioned), and **Griezmann** (doubtful) are major concerns.
 
 ### 📋 Squad Status
-- **Out (Sanctioned):** Pedraza (DF), Vinícius Jr (FW).
-- **Doubt:** Griezmann (FW) – fitness unclear, recent scores poor.
-- **Starters likely (COMUNIATE_STARTER = 1):** Catena, Gumbau, Aramburu, Koundé, Kike García, Rioja, Pepelu, Rafa Marín, Tchouameni, Unai Simón, Muriqi, Vinícius Jr (suspended).
-- **Form Standouts:** Muriqi (20 pts in last 5), Unai Simón (consistent), Rafa Marín (solid home avg), Koundé (strong home avg).
+- **Unavailable/Suspended**: Vinícius Jr, Pedraza.
+- **Injury Doubt**: Griezmann (fitness shows consecutive 'doubt' entries). His 0.0 xP reflects high uncertainty.
+- **Standout Form (High xP & Positive Momentum)**: Pepelu (6.0 xP, +1.5 trend), Unai Simón (6.0 xP, +1.27), Aramburu (5.8 xP, +1.8), Koundé (5.4 xP, +0.92), Tchouameni (5.25 xP, +0.04).
+- **Concerns**: Rafa Marín (2.2 xP, -2.8 trend), Manu Sánchez (0 xP, negative trend), Diego Rico (0 xP). Several players have 0 xP due to low starter probability.
 
 ### ⚽ Recommended Lineup
 **Formation**: 3-5-2  
-*(We lack reliable forwards due to Vinícius suspension & Griezmann doubt, so we load the midfield.)*
+*(Chosen due to Vinícius' suspension and Griezmann's doubt, leaving only two reliable forwards. This maximizes the use of our strong midfielders with high xP.)*
 
-- **GK**: **Unai Simón** – Clear starter, excellent form, home match vs. Levante.
-- **DF**: **Koundé** (Barcelona) – Top home fixture, high win probability. **Rafa Marín** (Villarreal) – Home, decent avg. **Aramburu** (Real Sociedad) – Strong home fixture vs. Elche.
-- **MF**: **Tchouameni** (Real Madrid) – Despite tough away match, he’s consistent and versatile. **Pepelu** (Valencia) – Home, good avg, on set-pieces. **Gumbau** (Rayo Vallecano) – Home, starter, cheap enabler. **Rioja** (Valencia) – Listed as FW but has MF alternate position; use him in MF to fill line. **Pol Lozano** (Espanyol) – Away but likely to start, decent avg.
-- **FW**: **Muriqi** (Mallorca) – In outstanding form (20, 9, 9 last 3), even vs. Barcelona he can score. **Kike García** (Espanyol) – Away at Villarreal, but starter and avg away > home.
+- **GK**: **Unai Simón** (ATH) - Clear starter, highest GK xP (6.0), home match vs. Levante (62% win prob).
+- **DF**: **Koundé** (BAR) - Starter (1.0), excellent fixture (87% win prob), solid xP (5.4).
+- **DF**: **Aramburu** (RSO) - Starter (1.0), best DF xP (5.8), home vs. Elche (60% win prob).
+- **DF**: **Catena** (OSA) - Starter (1.0), decent xP (3.75). Despite away at Celta, he is a guaranteed starter.
+- **MF**: **Pepelu** (VAL) - Locked starter (1.0), highest squad xP (6.0). Tough fixture but essential.
+- **MF**: **Tchouameni** (RMA) - Starter (1.0), high xP (5.25). Madrid are favorites away at Valencia.
+- **MF**: **Pol Lozano** (ESP) - Starter (1.0), xP 3.0. Away at Villarreal is tough, but we need his guaranteed minutes.
+- **MF**: **Gumbau** (RAY) - 60% starter chance (0.6), xP 1.2. Home vs. Oviedo gives him a reasonable opportunity.
+- **MF**: **Pablo Torre** (MAL) - Not a starter (0.0 xP), but his strong momentum (+0.9) and bench potential make him a better 5th MF option than players like **Boayar** or **Kike García** as a forward. He can cover MF/FW.
+- **FW**: **Rioja** (VAL) - Starter (1.0), solid xP (4.8). Must start despite tough fixture.
+- **FW**: **Kike García** (ESP) - Not a starter (0.0 xP), but chosen over Boayar due to slightly better recent form and the need to fill the position. This is the weakest link.
 
-**Justification**: We avoid empty positions by using Rioja in MF (his alt position) and fielding two forwards who are fit and starting. The 3-5-2 maximizes our midfield strength and covers for missing forwards. Defense chosen for best home fixtures/highest win odds.
+**Key Decisions**:  
+1.  **3-5-2 over 3-4-3**: With Vinícius out and Griezmann doubtful, we only have one reliable forward (Rioja). The 3-5-2 allows us to field five midfielders with higher collective xP than forcing a third forward with 0.0 xP.
+2.  **Pablo Torre over Kike García/Boayar in the 11**: Torre’s MF eligibility and positive momentum offer more upside as a flex player than a 0 xP forward.
+3.  **Catena over Rafa Marín/Diego Rico**: Guaranteed starter status (1.0) outweighs Marín's low xP and negative trend.
 
 ### 🚨 Urgent Needs
-**NECESSITEM DF** – We have only 3 reliable defenders (Koundé, Rafa Marín, Aramburu) after suspending Pedraza. If any gets rotated, we risk -4. Also **NECESSITEM FW** – With Vinícius out and Griezmann doubtful, we lack forward depth.
+**NECESSITEM 1 FW (de qualitat)**. The forward line is critically weak. **NECESSITEM 1 MF (titular clar)** to upgrade the Gumbau/Torre slot for more consistent points.
 
 ### 💰 Market Strategy (For Sale)
-1. **Catena** – REAL – Not starting regularly, negative profit but freeing up funds for a needed defender.
-2. **Diego Rico** – REAL – Not starting, negative profit, clear roster clog.
-3. **Griezmann** – RESERVE – Expensive, doubtful, huge sale loss; keep unless a great offer arrives.
-4. **Álex Padilla** – RESERVE – Backup GK; keep as coverage for Unai Simón (same team).
-5. **Manu Sánchez** – REAL – Not starting, away at Athletic, minimal profit loss.
+1.  **Vinícius Jr** - RESERVE - Sanctioned this week. **DO NOT SELL**. His market price (17.5M) is far below his clause value. Selling now would crystallize a massive loss. Hold and wait for his return and potential clause activation.
+2.  **Pedraza** - RESERVE - Sanctioned and with good historical form. Similar to Vinícius, selling at a low price (1.9M) likely incurs a loss vs. acquisition cost. Keep as a viable DF/MF option once available.
+3.  **Griezmann** - REAL - High salary, doubtful fitness, and 0.0 xP. The sustained 'doubt' status and negative momentum trend (-0.75) indicate a declining, unreliable asset. Consider selling to free up significant budget for a reliable forward, even at a potential loss.
+4.  **Boayar** - REAL - Minimal price (150k), 0.0 xP, and not a starter. He is a truly unusable player who occupies a roster spot. Sell to free space.
+5.  **Álex Padilla** - REAL - Backup GK for Unai Simón. Per the rules, we have automatic coverage with two GKs from the same team. He is redundant and has 0 value. Selling him incurs no risk and frees a roster spot.

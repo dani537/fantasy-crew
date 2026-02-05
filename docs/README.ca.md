@@ -1,119 +1,224 @@
-# 🚀 Fantasy Crew (Multi-Agent System)
+# ⚽ Fantasy Crew — IA Agèntica per a Biwenger
 
-**Objectiu:** Crear un equip d'agents d'IA autònoms que gestionin una plantilla de Biwenger, optimitzant el rendiment esportiu i financer mitjançant l'ús de LLMs d'última generació i anàlisi de dades avançat.
 
-Aquest sistema supera un jugador humà en eliminar el biaix emocional, operar 24/7 i processar grans volums de dades en temps real per maximitzar el Valor de Mercat (VM) i la puntuació de la plantilla.
+> 📖 També disponible en [English](../README.md) · [Español](README.es.md)
 
----
+Aquest projecte explora com la **IA agèntica** pot prendre decisions estratègiques en un entorn dinàmic i competitiu. Inspirat en la filosofia **Moneyball** de Billy Beane, el sistema busca maximitzar els punts amb un pressupost determinat, tractant els jugadors com a actius infravalorats en lloc de simples noms.
 
-## 👥 L'Staff Tècnic (Els Agents)
-
-El sistema opera mitjançant una **arquitectura seqüencial de multi-agents**, on cada rol utilitza models de llenguatge (LLMs) i processament de dades per aportar valor en una etapa específica del pipeline.
-
-### 1. 🔮 L'Analista (Data Analyst)
-**"La Font de Veritat"**
-*   **Rol:** Agent d'enginyeria i consolidació de dades. Prepara el terreny per als models de llenguatge mitjançant neteja determinista.
-*   **Processament (Feature Engineering):**
-    *   **Fuzzy Matching Multi-Font:** Creua noms d'equips i jugadors entre Biwenger, Comuniate i cases d'aposta (Odds), resolent discrepàncies (ex. "RCD Espanyol" vs "Espanyol").
-    *   **Normalització Tàctica:** Mapeja posicions numèriques a etiquetes llegibles (`GK`, `DF`, `MF`, `FW`) i processa posicions alternatives.
-    *   **Neteja de Probabilitats:** Converteix sorolls en les dades de premsa (ex. "80%") en valors numèrics nets per a l'anàlisi.
-    *   **Optimització de Tokens:** Arrodoneix mètriques a 2 decimals per maximitzar l'eficiència en la finestra de context dels LLMs.
-*   **Sortida:** Genera `df_master_analysis.csv` (plantilla completa) i enriqueix `data/next_match.csv` amb probabilitats de victòria (Odds).
-
-### 2. 📋 L'Entrenador (The Mister)
-**"L'Estratega Esportiu"**
-*   **Rol:** Pren decisions tàctiques basades en el rendiment i la disponibilitat.
-*   **Lògica (DeepSeek):**
-    *   **Context Temporal:** Considera la data/hora actual i la proximitat de l'inici de la jornada.
-    *   **Gestió d'Alineacions:** Prioritza formacions ofensives (3-4-3) però és flexible per evitar la penalització de **-4 punts** per forats buits.
-    *   **Consciència de Club:** Reconeix companys d'equip (via `TEAM_NAME`) per assegurar la porteria si compta amb el porter titular i el suplent del mateix club.
-    *   **Anàlisi de Momentum:** Avalua la ratxa (`PLAYER_FITNESS`) i el rendiment relatiu (Casa/Fora) davant la dificultat del rival (Odds).
-*   **Estratègia de Mercat:** Defineix quins jugadors són vendes necessàries (**REAL**) i quins s'incriuen per rebre ofertes preventives (**RESERVE**).
-
-### 3. 💼 El Director Esportiu (The Broker)
-**"El Controlador Financer"**
-*   **Rol:** Executa l'estratègia de mercat sota una disciplina pressupostària estricta.
-*   **Lògica (DeepSeek):**
-    *   **El Dogma del Balanç Positiu:** La seva prioritat #1 és assegurar que l'equip no comenci la jornada amb saldo negatiu (fet que anul·laria els punts).
-    *   **Gestió de Pressupost:** Carrega el saldo real des de `user_info.csv` i estima els ingressos per vendes proposades per calcular el poder de compra.
-    *   **Scouting Basat en Necessitats:** Creua els crits d'auxili de l'Entrenador (ex. "NECESSITEM MC") amb les millors oportunitats del mercat.
-*   **Sortida:** Projectes de fitxatge que equilibren impacte esportiu i rendibilitat (`ROI`).
-
-### 4. 🧠 El President (The Strategist)
-**"L'Autoritat Executiva"**
-*   **Rol:** Validador final amb visió de risc i llarg termini.
-*   **Lògica (DeepSeek):**
-    *   **Filtre Pressupostari:** Aplica la màxima severitat financera; rebutja fitxatges ostentosos que comprometin l'estabilitat del club.
-    *   **Aprovació Condicional:** Pot autoritzar un fitxatge supeditat a la venda prèvia d'un llast de l'equip.
-*   **Sortida:** Emet l'**Informe Executiu Final** amb les accions definitives a prendre.
+Els agents operen de manera autònoma: extraient dades en temps real, analitzant tendències de rendiment i generant recomanacions de fitxatges accionables—lliurades directament a la teva safata d'entrada.
 
 ---
 
-## 🔄 Flux de Treball (Workflow)
+## 🎯 Concepte Principal
 
-El sistema executa aquests agents en cadena (`main.py`):
+**L'Enfocament Moneyball al Fantasy Football**
 
-1.  **Extract & Transform:** `DataAnalyst` descarrega dades i crea el `df_master_analysis`.
-2.  **Squad Analysis:** `Coach` llegeix les dades del teu equip i detecta problemes.
-3.  **Market Scouting:** `SportingDirector` llegeix l'informe del Coach i busca solucions al mercat.
-4.  **Executive Decision:** `President` revisa les solucions i dona llum verda.
-5.  **Reporting:** Es genera l'arxiu final `final_recommendations.md` amb tot el procés.
+Els gestors de fantasy tradicionals confien en la intuïció, els noms estrella i l'afecció emocional. Aquest sistema adopta un enfocament diferent:
+
+- **Eficiència sobre prestigi** → El cost per punt esperat (€/xP) és la mètrica clau
+- **Momentum sobre reputació** → La forma recent importa més que les mitjanes històriques
+- **Dades sobre intuïció** → Cada decisió està recolzada per evidència estadística
 
 ---
 
-## 📊 Fonts de Dades (Data Sources)
+## 🤖 L'Equip d'Agents
 
-El sistema s'alimenta d'una arquitectura de dades robusta extreta automàticament mitjançant diversos processos (`src/`):
+El sistema orquestra **quatre agents d'IA especialitzats**, cadascun amb un rol diferent en el pipeline de presa de decisions.
 
-### 1. Biwenger API (Dades Oficials)
-Connexió directa amb l'API de Biwenger per obtenir l'estat real de la lliga.
-*   **Dades Generals de LaLiga (`LaLigaGeneralData`):**
-    *   Base de dades completa de **Jugadors** (Punts, Preu, Estat físic, Fitness, Estadístiques local/visitant).
-    *   Informació d'**Equips** (Calendari, Pròxims rivals).
-    *   Dades de la **Pròxima Jornada** (Horaris, Partits).
-*   **Dades de la Lliga d'Usuari (`UserLeagueData`):**
-    *   **Rivals:** Escanejem les plantilles de tots els rivals per conèixer les seves alineacions, preus de compra i, el més important, les seves **Clàusules de Rescissió**.
-    *   **Mercat:** Monitorització de jugadors lliures en venda i ofertes rebudes pels nostres jugadors.
-    *   **Classificació:** Estat actual de la taula de punts i valor d'equip.
+| Agent | Rol | Responsabilitat Principal |
+|-------|-----|--------------------------|
+| **🔮 Analista de Dades** | El Fonament | Extreu, neteja i enriqueix dades de múltiples fonts |
+| **📋 Entrenador** | El Tàctic | Analitza la plantilla, recomana alineacions, identifica punts febles |
+| **💼 Director Esportiu** | El Broker | Escaneja el mercat buscant valor, proposa fitxatges |
+| **🧠 President** | L'Autoritat | Valida propostes, assegura la sostenibilitat financera |
 
-### 2. Comuniate (Web Scraping Avançat)
-Extracció d'intel·ligència tàctica des de *Comuniate.com* mitjançant `BeautifulSoup`.
-*   **Alineacions Probables:** Predicció dels onzes titulars per a la següent jornada.
-*   **Probabilitat de Titularitat:** Percentatge estimat que un jugador iniciï el partit.
-*   **Alertes d'Estat:** Detecció de jugadors **Apercebuts** (risc de sanció) o **Dubte** per molèsties.
-*   **Posicions Tàctiques:** Classificació precisa del rol del jugador al camp.
+### Detalls dels Agents
 
-### 3. Jornada Perfecta (RSS & News Analysis)
-Sistema d'ingesta de notícies en temps real des de *JornadaPerfecta.com*.
-*   **Processament de Notícies:** Lectura i neteja d'articles esportius.
-*   **Resum per a LLMs:** Transformació de notícies en formats optimitzats perquè "The Oracle" (IA) pugui llegir-les i entendre el context (lesions, rotacions, rodes de premsa).
+**📊 Analista de Dades**
+- Matching difús entre Biwenger, Comuniate i dades d'apostes
+- Calcula `EXPECTED_POINTS (xP)` basat en forma i probabilitat de jugar
+- Computa `COST_PER_XP` — la mètrica d'eficiència definitiva
 
-### 4. Casas d'Aposta (Odds)
-Dades estadístiques de mercat per recolzar la presa de decisions.
-*   **Predicció de Partits:** Probabilitats matemàtiques (1X2) extretes i mapejades per a cada matx.
-*   **Dificultat del Jugador:** Permet avaluar si un jugador s'enfronta a un partit "fàcil" (favorit clar) o un "mura" (el rival és favorit), optimitzant la recomanació d'alineació.
-*   **Sincronització:** Mapeig automàtic mitjançant l'Analista per creuar dades d'apostes amb la plantilla de Biwenger.
+**📋 Entrenador**
+- Maximitza el xP de l'alineació respectant les restriccions de posició
+- Marca jugadors amb `MOMENTUM_TREND` en declivi per a possible venda
+- Prioritza formacions ofensives (3-4-3) quan és possible
+
+**💼 Director Esportiu**
+- Busca fitxatges amb el menor `COST_PER_XP`
+- Detecta ineficiències de mercat (jugadors en millora amb preu per sota del seu valor)
+- Assegura saldo positiu abans de cada jornada
+
+**🧠 President**
+- Aplica severitat financera — rebutja despeses arriscades
+- Protegeix actius d'alta inversió de ser venuts amb pèrdues
+- Emet les decisions executives finals
+
+---
+
+## 🔄 Arquitectura del Workflow
+
+El sistema utilitza **LangGraph** per orquestrar el workflow dels agents amb gestió d'estat explícita i routing condicional.
+
+```mermaid
+graph TD
+    A[🚀 INICI] --> B[🔮 Analista de Dades]
+    B --> C[📋 Entrenador]
+    C --> D[💼 Director Esportiu]
+    D --> E{🧠 President}
+    
+    E -->|✅ Aprovat| F[📄 Generar Informes]
+    E -->|❌ Rebutjat| D
+    
+    F --> G[📧 Enviar Email]
+    G --> H[🏁 FI]
+    
+    style A fill:#1a1a2e,stroke:#16213e,color:#fff
+    style B fill:#4a4e69,stroke:#22223b,color:#fff
+    style C fill:#22577a,stroke:#38a3a5,color:#fff
+    style D fill:#57cc99,stroke:#80ed99,color:#000
+    style E fill:#c9184a,stroke:#ff758f,color:#fff
+    style F fill:#7209b7,stroke:#b5179e,color:#fff
+    style G fill:#f72585,stroke:#b5179e,color:#fff
+    style H fill:#1a1a2e,stroke:#16213e,color:#fff
+```
+
+**Característiques Clau:**
+- **Routing Condicional:** Si el President rebutja una proposta, torna al Director Esportiu per revisió
+- **Persistència d'Estat:** Cada agent rep context dels passos anteriors
+- **Notificacions per Email:** Informe final lliurat via Gmail SMTP
+
+---
+
+## 📊 Fonts de Dades
+
+| Font | Tipus | Dades Proporcionades |
+|------|-------|---------------------|
+| **Biwenger API** | Oficial | Jugadors, preus, forma física, classificació, mercat |
+| **Comuniate** | Web Scraping | Alineacions probables, probabilitat de titular, alertes de lesions |
+| **Jornada Perfecta** | RSS Feed | Notícies en temps real (lesions, rotacions, rodes de premsa) |
+| **EuroClubIndex** | Odds | Probabilitats de partit (1X2) per avaluar dificultat |
 
 ---
 
 ## 🛠️ Stack Tecnològic
 
-*   **Llenguatge:** Python 3.12+
-*   **Gestió d'Agents:** LangGraph / CrewAI (Orquestració de rols).
-*   **Processament de Dades:**
-    *   `Pandas` per a manipulació de DataFrames i neteja de dades.
-    *   `BeautifulSoup4` per a Web Scraping (Comuniate).
-    *   `Feedparser` per a lectura de RSS.
-*   **Models d'IA (LLMs):**
-    *   **DeepSeek-V3:** Lògica intermèdia i processament de dades estructurades (High Performance/Low Cost).
-    *   **DeepSeek-R1:** Motor de raonament complex per al "President".
-    *   **Gemini 1.5 Flash:** Anàlisi de context llarg (finestra àmplia) per processar notícies massives.
+| Component | Tecnologia |
+|-----------|------------|
+| **Orquestració** | LangGraph (StateGraph) |
+| **LLM** | DeepSeek API |
+| **Processament de Dades** | pandas, thefuzz |
+| **Web Scraping** | BeautifulSoup, httpx |
+| **Email** | SMTP (Gmail) |
+| **Llenguatge** | Python 3.10+ |
 
 ---
 
-## 🎯 Avantatge Competitiu
+## 🚀 Començar
 
-1.  **Sense Biaix Emocional:** El sistema no s'"enamora" de jugadors. Ven quan l'estadística indica declivi i fitxa quan detecta oportunitat.
-2.  **Enginyeria Financera:** Càlcul precís del valor futur, clàusules i marges de benefici.
-3.  **Velocitat de Reacció:** Capacitat de fitxar o vendre segons després que passi una notícia rellevant (lesió en entrenament, alineació confirmada).
-4.  **Visió Global:** Creuat de dades de mercat, notícies i estadística avançada que un humà trigaria hores a recopilar manualment.
+### Prerequisits
+
+- Python 3.10+
+- Compte de Biwenger
+- Clau API de DeepSeek
+- Compte de Gmail amb App Password activat
+
+### Instal·lació
+
+```bash
+# Clonar el repositori
+git clone https://github.com/yourusername/fantasy-crew.git
+cd fantasy-crew
+
+# Crear entorn virtual
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
+
+# Instal·lar dependències
+pip install -r requirements.txt
+```
+
+### Configuració
+
+Crea un fitxer `.env` a l'arrel del projecte:
+
+```env
+# Autenticació Biwenger
+BIWENGER_EMAIL=el_teu_email_biwenger@example.com
+BIWENGER_PASSWORD=la_teva_contrasenya_biwenger
+
+# API LLM
+DEEPSEEK_API_KEY=la_teva_clau_api_deepseek
+
+# Notificacions Gmail (Opcional)
+GMAIL_ADRESS=el_teu_gmail@gmail.com
+GMAIL_PASSWORD=la_teva_app_password
+
+# Tipus de Puntuació
+SCORE_TYPE=5 #1: Punts AS / 2: SofaScore / 5: Mitjana AS i SofaScore / 3: Stats / 6: Biwenger Social
+```
+
+> **Nota:** Per a Gmail, necessites generar una [App Password](https://support.google.com/accounts/answer/185833) — la teva contrasenya normal no funcionarà.
+
+### Executar el Sistema
+
+```bash
+# Execució completa amb orquestració LangGraph
+python main_langgraph.py
+```
+
+### Sortida
+
+Els informes es guarden a `./reports/`:
+- `00_final_report.md` — Informe consolidat
+- `01_coach_report.md` — Anàlisi de la plantilla
+- `02_sporting_director_proposals.md` — Recomanacions de fitxatges
+- `03_president_decision.md` — Decisions finals
+
+Si l'email està configurat, l'informe també s'envia a la teva safata d'entrada.
+
+---
+
+## 📁 Estructura del Projecte
+
+```
+fantasy-crew/
+├── main.py                    # Punt d'entrada seqüencial clàssic
+├── main_langgraph.py          # Punt d'entrada orquestrat LangGraph
+├── requirements.txt
+├── .env                       # Configuració (no rastrejat)
+├── src/
+│   ├── agents/
+│   │   ├── data_analyst.py    # Extracció i enginyeria de dades
+│   │   ├── coach.py           # Anàlisi d'alineació
+│   │   ├── sporting_director.py # Propostes de mercat
+│   │   └── president.py       # Decisions finals
+│   ├── graph/
+│   │   ├── state.py           # Esquema d'estat LangGraph
+│   │   ├── nodes.py           # Funcions de nodes dels agents
+│   │   └── graph.py           # Constructor del StateGraph
+│   └── utils/
+│       └── email_sender.py    # Utilitat SMTP Gmail
+├── data/                      # CSVs extrets (generat)
+├── reports/                   # Sortida dels agents (generat)
+└── docs/
+    └── DATA_DICTIONARY.md     # Documentació de camps
+```
+
+---
+
+## 📄 Llicència
+
+MIT License — Lliure d'usar, modificar i distribuir.
+
+---
+
+## 👤 Autor
+
+**Daniel Sanchez**  
+[LinkedIn](https://linkedin.com/in/daniel-sanchez-rodriguez-51084031) · [GitHub](https://github.com/dani537)
+
+---
+
+> *"L'objectiu no és comprar jugadors. L'objectiu és comprar victòries."* — Billy Beane
