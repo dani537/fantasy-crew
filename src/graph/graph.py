@@ -23,10 +23,22 @@ WORKFLOW:
            │               │
            ▼               │
     ┌──────────────┐       │
+    │   Debate     │       │
+    │ (Coach ↔ SD) │       │
+    └──────┬───────┘       │
+           │               │
+           ▼               │
+    ┌──────────────┐       │
     │  President   │───────┘
     │  (Decision)  │ (rejected → loop back)
     └──────┬───────┘
            │ (approved)
+           ▼
+    ┌──────────────┐
+    │   Execute    │
+    │   Actions    │
+    └──────┬───────┘
+           │
            ▼
     ┌──────────────┐
     │   Generate   │
@@ -43,7 +55,9 @@ from src.graph.nodes import (
     data_analyst_node,
     coach_node,
     sporting_director_node,
+    debate_node,
     president_node,
+    execute_actions_node,
     generate_report_node,
     email_report_node
 )
@@ -61,16 +75,16 @@ def should_continue(state: AgentState) -> str:
     iteration_count = state.get("iteration_count", 0)
     max_iterations = state.get("max_iterations", 2)
     
-    # If approved or we've hit max iterations, proceed to reports
+    # If approved or we've hit max iterations, proceed to execute_actions
     if decision_status == "approved" or iteration_count >= max_iterations:
-        return "generate_reports"
+        return "execute_actions"
     
     # If rejected, loop back to Sporting Director
     if decision_status == "rejected":
         return "sporting_director"
     
-    # Default: proceed to reports
-    return "generate_reports"
+    # Default: proceed to execute_actions
+    return "execute_actions"
 
 
 def build_fantasy_crew_graph():
@@ -87,7 +101,9 @@ def build_fantasy_crew_graph():
     graph.add_node("data_analyst", data_analyst_node)
     graph.add_node("coach", coach_node)
     graph.add_node("sporting_director", sporting_director_node)
+    graph.add_node("debate", debate_node)
     graph.add_node("president", president_node)
+    graph.add_node("execute_actions", execute_actions_node)
     graph.add_node("generate_reports", generate_report_node)
     graph.add_node("send_email", email_report_node)
     
@@ -95,19 +111,21 @@ def build_fantasy_crew_graph():
     graph.add_edge(START, "data_analyst")
     graph.add_edge("data_analyst", "coach")
     graph.add_edge("coach", "sporting_director")
-    graph.add_edge("sporting_director", "president")
+    graph.add_edge("sporting_director", "debate")
+    graph.add_edge("debate", "president")
     
     # Conditional edge from President
     graph.add_conditional_edges(
         "president",
         should_continue,
         {
-            "generate_reports": "generate_reports",
+            "execute_actions": "execute_actions",
             "sporting_director": "sporting_director"
         }
     )
     
-    # Reports -> Email -> END
+    # Execute Actions -> Reports -> Email -> END
+    graph.add_edge("execute_actions", "generate_reports")
     graph.add_edge("generate_reports", "send_email")
     graph.add_edge("send_email", END)
     

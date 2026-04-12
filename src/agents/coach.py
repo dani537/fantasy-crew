@@ -139,93 +139,24 @@ class Coach:
         
         squad_summary = squad_view.to_markdown(index=False)
         
-        # 5. Construct the Super Prompt
-        prompt = f"""
-ROLE: You are "The Mister", an expert Fantasy Football Manager and Head Coach.
-Current Date/Time: {current_time}
+        # 5. Construct the Prompt (loaded from src/prompts/)
+        from src.prompts.coach_prompts import get_coach_analysis_prompt
+        from src.prompts.system_roles import COACH_SYSTEM_ROLE
 
-OBJECTIVE: Maximize the total **EXPECTED_POINTS (xP)** for the upcoming **{jornada_info}**.
-YOUR TEAM: "{my_team_name}"
-
----
-## UPCOMING MATCHES (Context for Odds & Difficulty)
-{matches_summary}
-
----
-## YOUR SQUAD
-{squad_summary}
-
----
-## FIELD DEFINITIONS
-- **EXPECTED_POINTS (xP)**: Points expected for this matchday. Calculated as: `Momentum * (Prob. Starter + Prob. Sub * 0.8)`. **MAXIMIZE THIS.**
-- **AVG_POINTS_MOMENTUM**: Recent form (avg of last played matches).
-- **MOMENTUM_TREND**: Improvement vs Season Avg. Positive = Enhancing performance. Use as tie-breaker.
-- **TEAM_IS_HOME**: `True` = team plays at home (usually better performance).
-- **PLAYER_STATUS**: 'ok' (available), 'injured', 'sanctioned' (suspended), 'doubt' (uncertain).
-- **COMUNIATE_STARTER**: Probability of starting (1.0 = 100%).
-- **ODDS_1 / ODDS_X / ODDS_2**: Win probabilities. High ODDS_1 at home = favorable match.
-
----
-## RULES & TACTICS
-
-> [!CAUTION]
-> **POSITION RULE**: Players can ONLY be placed in their `PLAYER_POSITION` or `PLAYER_ALT_POSITIONS`. 
-> A DF cannot play as FW. A FW cannot play as GK. NEVER place a player in an invalid position.
-
-1. **Formations**: 3-4-3 (preferred), 3-5-2, 4-3-3, 4-4-2, 5-4-1, 5-3-2.
-2. **Empty Positions**: Penalizes **-4 POINTS**. Avoid at all costs.
-3. **Scoring Strategy**: Goals give **DF (+5), MF (+4), FW (+3)**. Place versatile players in the most "defensive" valid line.
-4. **Goalkeeper Safety**: If you have 2 GKs from the SAME TEAM, you have automatic coverage. **DO NOT recommend selling the backup GK if they share a team with your starter.**
-
----
-## MARKET STRATEGY
-List exactly **5 players** to consider for sale:
-- **REAL**: Not needed / bad form / redundant position.
-- **RESERVE**: List to receive offers, but keep for now.
-
-> [!CAUTION]
-> **CLAUSE PROTECTION RULE (VALUE MAXIMIZATION)**:
-> - If you paid a **high clause** (e.g., 12M) for a player but their `PLAYER_PRICE` is now lower (e.g., 6M):
->   - **Selling voluntarily** = You get 6M → **HUGE LOSS** (6M received vs 12M paid).
->   - **Being clausuled** = You receive 15M+ (their clause) → **PROFIT or break-even**.
-> - **DO NOT recommend selling high-value assets at low market prices.** Wait it out.
-> - **EXCEPTIONS (Sell even at a loss)**:
->   - Long-term injuries (>4 weeks).
->   - **Sustained declining performance**: `MOMENTUM_TREND` very negative over multiple weeks.
->   - Truly unusable players (permanently out of squad rotation).
-> - Remember: Maximizing squad VALUE is also an objective, not just points.
-
-
----
-## OUTPUT FORMAT
-
-### 🧠 Match Analysis
-Brief rival/difficulty analysis using odds.
-
-### 📋 Squad Status
-Health summary, injuries, standout form.
-
-### ⚽ Recommended Lineup
-**Formation**: [e.g. 3-4-3]
-- **GK**: [Name]
-- **DF**: [Names]
-- **MF**: [Names]
-- **FW**: [Names]
-*(Justify key decisions)*
-
-### 🚨 Urgent Needs
-If risk of -4 penalty: "NECESSITEM [POSITION]" (or equivalent in target language).
-
-### 💰 Market Strategy (For Sale)
-1. [Name] - [REAL/RESERVE] - [Reason]
-2. ...
-"""
+        prompt = get_coach_analysis_prompt(
+            current_time=current_time,
+            jornada_info=jornada_info,
+            my_team_name=my_team_name,
+            matches_summary=matches_summary,
+            squad_summary=squad_summary,
+        )
         
         # Generate Report
-        report = self.llm.generate_content(prompt, system_prompt="You are an expert Fantasy Football Coach.")
+        report = self.llm.generate_content(prompt, system_prompt=COACH_SYSTEM_ROLE)
         
         if report:
             print("📝 Coach Report Generated")
             return report
         else:
             return "Error generating Coach Report."
+

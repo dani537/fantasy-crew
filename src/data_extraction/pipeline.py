@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 
 # Imports for data extraction
 from src.data_extraction.auth import BiwengerAuth
-from src.data_extraction.biwenger_data import LaLigaGeneralData, UserLeagueData
+from src.data_extraction.biwenger_data import BiwengerGeneralData, UserLeagueData
 from src.data_extraction.external_data import ComuniateData, JornadaPerfectaData, EuroClubIndexData
 
 # Config
@@ -59,11 +59,11 @@ def extract_and_save_data():
             df_user_info.to_csv('./data/user_info.csv', index=False)
 
         # LaLiga General Data
-        print_step(2, "Extracting LaLiga General Data (Players, Teams, Next Match, Season)")
+        print_step(2, f"Extracting General Data for Competition: {auth.player_info.competition_slug}")
         with redirect_stdout(f):
-            laliga_data = LaLigaGeneralData(auth.session)
-            laliga_data.run()
-            season_info = laliga_data.season_info()
+            general_data = BiwengerGeneralData(auth.session, competition_slug=auth.player_info.competition_slug)
+            general_data.run()
+            season_info = general_data.season_info()
 
         # Fantasy League Data
         print_step(3, "Extracting User League Data (Table, Market, My Players)")
@@ -91,9 +91,9 @@ def extract_and_save_data():
         print_step(7, "Saving extracted data to CSVs")
         os.makedirs('./data', exist_ok=True)
         
-        laliga_data.df_players.to_csv('./data/players.csv', index=False)
-        laliga_data.df_teams.to_csv('./data/teams.csv', index=False)
-        laliga_data.df_next_jornada.to_csv('./data/next_jornada.csv', index=False)
+        general_data.df_players.to_csv('./data/players.csv', index=False)
+        general_data.df_teams.to_csv('./data/teams.csv', index=False)
+        general_data.df_next_jornada.to_csv('./data/next_jornada.csv', index=False)
         
         # Save Season info
         pd.DataFrame(season_info.rounds).to_csv('./data/rounds.csv', index=False)

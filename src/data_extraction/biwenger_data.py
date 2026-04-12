@@ -3,7 +3,7 @@ import pandas as pd
 import datetime
 import time
 import random
-from dataclasses import dataclass
+from pydantic import BaseModel
 from typing import List, Optional
 
 # Módulos
@@ -12,35 +12,37 @@ from src.data_extraction.auth import random_headers
 # Config
 from src.config import GeneralSettings
 
-LALIGA_INFO_URL = f"https://cf.biwenger.com/api/v2/competitions/la-liga/data?score={GeneralSettings.SCORE_TYPE}"
-JORNADA_URL = 'https://cf.biwenger.com/api/v2/rounds/la-liga'
+# We'll build URLs dynamically in the class
 
 # SUMMARY:
 
 # LaLigaGeneralData --> Extrae los datos generales de la liga (es decir, comunes de Biwenger en todas las ligas, no los de
 #                       la liga en particular donde participa el usuario)
-@dataclass
-class ActiveEvent:
+
+class ActiveEvent(BaseModel):
     id: int
     name: str
     status: str
-    end: datetime.datetime
+    end: Optional[datetime.datetime]
     type: str
 
-@dataclass
-class SeasonInfo:
+class SeasonInfo(BaseModel):
     rounds: List[dict]
     active_events: List[ActiveEvent]
 
-class LaLigaGeneralData:
+class BiwengerGeneralData:
     '''
-    Extrae los datos generales de la liga (es decir, comunes de Biwenger en todas las ligas, no los de la liga en particular donde participa el usuario):
-    - laliga_data: extrae los datos generales de la liga
+    Extrae los datos generales de la competición según el slug (ej. la-liga, euroliga):
+    - laliga_data: extrae los datos generales de la liga (jugadores, equipos)
     - players_info: crea un DataFrame a partir de los datos de jugadores (extraídos en laliga_data)
     - teams_info: crea un DataFrame a partir de los datos de equipos (extraídos en laliga_data)
     '''
-    def __init__(self, session):
+    def __init__(self, session, competition_slug: str = "la-liga"):
         self.session = session
+        self.competition_slug = competition_slug
+        self.info_url = f"https://cf.biwenger.com/api/v2/competitions/{self.competition_slug}/data?score={GeneralSettings.SCORE_TYPE}"
+        self.jornada_url = f"https://cf.biwenger.com/api/v2/rounds/{self.competition_slug}"
+        
         self._laliga_data()
         self._jornadas_data()
     
@@ -49,7 +51,7 @@ class LaLigaGeneralData:
         headers['Referer'] = "https://biwenger.as.com/peloton/news"
         headers['Authorization'] = None  # Importante: no enviar el token al CDN
         
-        response = self.session.get(LALIGA_INFO_URL, headers=headers)
+        response = self.session.get(self.info_url, headers=headers)
         if response.status_code == 200:
             response_json = response.json()
             data = response_json.get('data', {})
@@ -185,7 +187,7 @@ class LaLigaGeneralData:
         headers['Referer'] = "https://biwenger.as.com/peloton/news"
         headers['Authorization'] = None
         
-        response = self.session.get(JORNADA_URL, headers=headers)
+        response = self.session.get(self.jornada_url, headers=headers)
         if response.status_code == 200:
             response_json = response.json()
             self.next_jornada = response_json.get('data', {}).get('next', {})

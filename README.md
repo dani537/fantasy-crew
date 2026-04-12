@@ -35,41 +35,46 @@ The system orchestrates **four specialized AI agents**, each with a distinct rol
 ### Agent Details
 
 **🔮 Data Analyst**
-- Fuzzy matching across Biwenger, Comuniate, and betting data
-- Calculates `EXPECTED_POINTS (xP)` based on form and probability of playing
-- Computes `COST_PER_XP` — the ultimate efficiency metric
+- Extracts market data, player stats, and financial context (budgets, rivals' value).
+- Pulls **pending received offers** from the system for evaluation.
+- Normalizes data from diverse sources (Biwenger, Comuniate, Jornada Perfecta).
+- Autocalculates key situational metrics (e.g., `AVG_POINTS_HOME`, `COST_PER_XP`).
 
 **📋 Coach**
-- Maximizes lineup xP while respecting position constraints
-- Flags players with declining `MOMENTUM_TREND` for potential sale
-- Prioritizes offensive formations (3-4-3) when possible
+- Analyzes individual player performance based on the Data Analyst's extractions.
+- Generates a **strict JSON "Briefing"** outputting tactical needs and sales priorities.
+- Labels constraints using predefined Enums (`disponible`, `lesionado`, `intocable`, `venta_urgente`), avoiding unstructured text.
+- Allocates recommended budget percentages for each required position.
 
 **💼 Sporting Director**
-- Targets signings with lowest `COST_PER_XP`
-- Detects market inefficiencies (improving players priced below value)
-- Ensures positive balance before each gameweek
+- Translates the Coach's "Briefing" into exact monetary bids and sale prices.
+- Directly resolves **pending market offers** (accept/reject/maintain).
+- Handles **"Empty Market"** scenarios (gracefully reporting when no suitable players are available).
+- Implements the **Golden Rule** (`saldo_proyectado_post_operaciones`): automatically voids bids if they project a negative balance within 48h of a gameweek start.
 
 **🧠 President**
-- Applies financial severity — rejects risky expenditures
-- Protects high-investment assets from being sold at a loss
-- Issues final executive decisions
+- Validates the Sporting Director's operations against long-term strategy.
+- Can invoke a **Debate** round, asking the Coach for a second opinion on the Sporting Director's proposed targets before approving.
+- Protects high-investment assets and makes the final executive "Go/No-Go" decision.
 
 ---
 
 ## 🔄 Workflow Architecture
 
-The system uses **LangGraph** to orchestrate the agent workflow with explicit state management and conditional routing.
+The system uses **LangGraph** to orchestrate the agent workflow with explicit state management, a **debate round** between Coach and Sporting Director, and conditional routing.
 
 ```mermaid
 graph TD
     A[🚀 START] --> B[🔮 Data Analyst]
     B --> C[📋 Coach]
     C --> D[💼 Sporting Director]
-    D --> E{🧠 President}
+    D --> DB[🗣️ Debate]
+    DB --> E{🧠 President}
     
-    E -->|✅ Approved| F[📄 Generate Reports]
+    E -->|✅ Approved| X[⚡ Execute Actions]
     E -->|❌ Rejected| D
     
+    X --> F[📄 Generate Reports]
     F --> G[📧 Send Email]
     G --> H[🏁 END]
     
@@ -77,16 +82,34 @@ graph TD
     style B fill:#4a4e69,stroke:#22223b,color:#fff
     style C fill:#22577a,stroke:#38a3a5,color:#fff
     style D fill:#57cc99,stroke:#80ed99,color:#000
+    style DB fill:#f4a261,stroke:#e76f51,color:#000
     style E fill:#c9184a,stroke:#ff758f,color:#fff
+    style X fill:#e63946,stroke:#d62828,color:#fff
     style F fill:#7209b7,stroke:#b5179e,color:#fff
     style G fill:#f72585,stroke:#b5179e,color:#fff
     style H fill:#1a1a2e,stroke:#16213e,color:#fff
 ```
 
 **Key Features:**
-- **Conditional Routing:** If the President rejects a proposal, it loops back to the Sporting Director for revision
+- **Agent Debate:** After the Sporting Director proposes transfers, the Coach critiques them from a tactical perspective before the President decides
+- **Conditional Routing:** If the President rejects a proposal, it loops back to the Sporting Director for revision (max 2 iterations)
+- **Automated Execution:** Approved operations (lineup, sales, bids) are automatically executed via the Biwenger API
 - **State Persistence:** Each agent receives context from previous steps
 - **Email Notifications:** Final report delivered via Gmail SMTP
+
+---
+
+## ⚡ Active API Actions
+
+The `src/actions` module contains wrappers for writing back to the Biwenger API, turning the extracted data pipeline into an autonomous agent capable of executing decisions. Supported actions include:
+
+### Market Operations (`MarketActions`)
+- **Place Bids (`place_offer`)**: Bid for a player in the market or execute a direct release clause ('clausulazo'). You can bid to the computer (market) or other managers.
+- **Sell Players (`place_player_on_market`)**: List your own players on the transfer market setting a custom starting price. 
+- **Accept Offers (`accept_offer`)**: Accept incoming offers received for players currently on the market.
+
+### Tactical Operations (`LineupActions`)
+- **Set Lineups (`set_lineup`)**: Save the optimum generated starting eleven to Biwenger before the gameweek deadline (supports custom formations like "3-4-3" and player ID injection).
 
 ---
 
@@ -189,15 +212,25 @@ fantasy-crew/
 ├── requirements.txt
 ├── .env                       # Configuration (not tracked)
 ├── src/
+│   ├── actions/
+│   │   ├── __init__.py        # BiwengerActions facade
+│   │   ├── market_actions.py  # Bids, sales, offers
+│   │   └── lineup_actions.py  # Lineup/formation updates
 │   ├── agents/
 │   │   ├── data_analyst.py    # Data extraction & feature engineering
-│   │   ├── coach.py           # Lineup analysis
-│   │   ├── sporting_director.py # Market proposals
-│   │   └── president.py       # Final decisions
+│   │   ├── coach.py           # Lineup analysis (logic only)
+│   │   ├── sporting_director.py # Market proposals (logic only)
+│   │   └── president.py       # Final decisions (logic only)
+│   ├── prompts/               # ✏️ EDIT HERE to tune agent behavior
+│   │   ├── system_roles.py    # System role strings for all agents
+│   │   ├── coach_prompts.py   # Coach analysis + debate critique prompts
+│   │   ├── sporting_director_prompts.py  # SD proposal prompt
+│   │   └── president_prompts.py          # President decision prompt
 │   ├── graph/
 │   │   ├── state.py           # LangGraph state schema
-│   │   ├── nodes.py           # Agent node functions
+│   │   ├── nodes.py           # Agent node functions (incl. debate)
 │   │   └── graph.py           # StateGraph builder
+│   ├── data_extraction/       # API auth, scraping, data pipeline
 │   └── utils/
 │       └── email_sender.py    # Gmail SMTP utility
 ├── data/                      # Extracted CSVs (generated)
@@ -205,6 +238,8 @@ fantasy-crew/
 └── docs/
     └── DATA_DICTIONARY.md     # Field documentation
 ```
+
+> **💡 Tip:** To change how any agent thinks or behaves, edit the prompt files in `src/prompts/`. No Python logic changes needed.
 
 ---
 

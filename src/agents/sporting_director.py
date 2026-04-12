@@ -208,107 +208,27 @@ class SportingDirector:
         active_round_info = self.get_active_round_info()
         season_context_str = f"⚠️ SEASON CONTEXT: {active_round_info}\n" if active_round_info else ""
 
-        prompt = f"""
-ROLE: You are the Sporting Director (The Broker) for "{my_team_name}".
-Current Date/Time: {current_time}
+        from src.prompts.sporting_director_prompts import get_sd_proposal_prompt
+        from src.prompts.system_roles import SPORTING_DIRECTOR_SYSTEM_ROLE
 
----
-## 💰 FINANCIAL STATUS
-- **Current Balance**: €{current_balance:,.0f}
-- **Clause Window**: {clause_status} (Deadline: {clause_deadline})
-{season_context_str}
-> [!CAUTION]
-> **CRITICAL RULE**: We MUST have a **POSITIVE balance (€0+)** by the start of the Jornada.
-> A negative balance results in **0 POINTS** for the entire team.
-
----
-## 📋 COACH'S REPORT (Needs & Sales Advice)
-{coach_report}
-
----
-## 🛒 MARKET OPPORTUNITIES (Free Agents)
-Sorted by **Efficiency** (Lowest Cost/xP first).
-{market_summary}
-
----
-## 🔓 CLAUSE BUYOUT OPPORTUNITIES
-Sorted by **Efficiency** (Lowest Cost/xP first).
-{clause_summary}
-
----
-## 👥 MY SQUAD (For Sales Strategy)
-High Price + Low xP + Negative Trend = SELL
-{my_squad_summary}
-
----
-## 📖 FIELD DEFINITIONS
-- **COST_PER_XP**: Millions paid per Expected Point. **LOWER IS BETTER**. (e.g. 0.5 is better than 1.2).
-- **COST_PER_MOMENTUM_POINT**: Cost per recent form point. If this is MUCH LOWER than Cost/Point, it's a **BARGAIN (Chollo)**.
-- **EXPECTED_POINTS (xP)**: Risk-adjusted points expected for this week.
-- **MOMENTUM_TREND**: Price/Form momentum. Positive = rising.
-- **BIWPLAYER_PURCHASE_PRICE**: What we PAID to acquire this player (market or clause).
-- **BIWPLAYER_CLAUSE**: What OTHERS must pay to steal this player from us.
-
-> [!CAUTION]
-> **CLAUSE PROTECTION RULE (VALUE MAXIMIZATION)**:
-> - **Voluntary Sale** → We receive `PLAYER_PRICE` (low market value, e.g., 6M).
-> - **Being Clausuled** → We receive `BIWPLAYER_CLAUSE` (high clause value, e.g., 15M).
-> - If `BIWPLAYER_PURCHASE_PRICE` > `PLAYER_PRICE` but < `BIWPLAYER_CLAUSE`:
->   - Selling is a **LOSS**. Being clausuled is a **PROFIT**.
->   - **DO NOT recommend selling these players.** Wait for a clause buyout.
-> - **EXCEPTIONS (Sell even at a loss)**:
->   - Long-term injuries (>4 weeks).
->   - **Sustained declining performance**: `MOMENTUM_TREND` very negative over multiple weeks.
->   - Truly unusable players (permanently out of squad rotation).
-> - Remember: **Maximizing squad VALUE** is a secondary objective after points.
-
-
-> [!IMPORTANT]
-> **CLAUSE REALITY**: When signing a player from another team, the **CLAUSE is the real price**.
-
----
-## 🎯 YOUR TASKS
-1. **Ensure Liquidity**: Check Coach's recommended sales. Estimate income to fix balance if negative or to fund signings.
-2. **Reinforce Weaknesses**: If Coach needs a position, find the **most efficient** signing (Lowest Cost/xP).
-3. **Strategic Bidding**: 
-   - Identify **BARGAINS**: Players with low Cost/xP and positive trend.
-   - If clause window is OPEN, identify high-value clause targets.
-4. **Asset Management**: 
-   - Set prices for players the coach wants to sell.
-   - **PROTECT high-investment players**: If `PURCHASE_PRICE` > `PLAYER_PRICE`, DO NOT recommend voluntary sale.
-
----
-## 📄 OUTPUT FORMAT (Markdown)
-
-### 💵 Financial Diagnosis
-Explain current balance status and how you plan to stay positive.
-
-### 🎯 Target Signings
-Prioritized list of signings (Market bid OR Clause buyout).
-| Player | Type | Price/Clause | Rationale |
-|--------|------|--------------|-----------|
-| Name   | Market/Clause | €X | Why this player |
-
-### 📤 Recommended Sales
-Players to list, suggested price, and expected revenue.
-| Player | Suggested Price | Reason |
-|--------|-----------------|--------|
-| Name   | €X              | Why sell |
-
-### ⚖️ Final Forecast
-Estimated balance after all operations.
-```
-Current Balance:    €{current_balance:,.0f}
-+ Expected Sales:   €X
-- Expected Buys:    €X
-= Projected Balance: €X
-```
-"""
+        prompt = get_sd_proposal_prompt(
+            my_team_name=my_team_name,
+            current_time=current_time,
+            current_balance=current_balance,
+            clause_status=clause_status,
+            clause_deadline=clause_deadline,
+            season_context_str=season_context_str,
+            coach_report=coach_report,
+            market_summary=market_summary,
+            clause_summary=clause_summary,
+            my_squad_summary=my_squad_summary,
+        )
         
-        proposals = self.llm.generate_content(prompt, system_prompt="You are a brilliant Football Sporting Director and master of financial logic.")
+        proposals = self.llm.generate_content(prompt, system_prompt=SPORTING_DIRECTOR_SYSTEM_ROLE)
         
         if proposals:
             print("💼 Transfer Proposals Generated")
             return proposals
         else:
             return "Error generating Transfer Proposals."
+

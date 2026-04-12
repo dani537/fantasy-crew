@@ -32,7 +32,10 @@ def run_fantasy_crew_langgraph():
         "df_master": None,
         "coach_report": "",
         "sd_proposals": "",
+        "coach_critique": "",
         "president_decision": "",
+        "approved_actions": None,
+        "execution_results": None,
         "iteration_count": 0,
         "max_iterations": 2,
         "decision_status": "pending",
@@ -68,12 +71,25 @@ def run_fantasy_crew_langgraph():
                         print(f"   ❌ Error: {node_output['error']}")
                     else:
                         print("   💼 Transfer Proposals Generated")
+
+                elif node_name == "debate":
+                    print("🚀 Node: Debate - Coach critiques SD proposals...")
+                    if node_output.get("error"):
+                        print(f"   ❌ Error: {node_output['error']}")
+                    else:
+                        print("   🗣️ Coach Critique Generated")
                 
                 elif node_name == "president":
                     print("🚀 Node: President - Making decision...")
                     status = node_output.get("decision_status", "unknown")
                     iteration = node_output.get("iteration_count", 0)
                     print(f"   🏛️ Decision: {status.upper()} (Iteration {iteration})")
+
+                elif node_name == "execute_actions":
+                    print("🚀 Node: Execute Actions - Running API operations...")
+                    results = node_output.get("execution_results", [])
+                    for res in results:
+                        print(f"   ⚙️ {res}")
                 
                 elif node_name == "generate_reports":
                     print("🚀 Node: GenerateReports - Saving reports...")

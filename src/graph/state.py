@@ -22,7 +22,10 @@ class AgentState(TypedDict):
     # Agent outputs
     coach_report: str
     sd_proposals: str
+    coach_critique: str
     president_decision: str
+    approved_actions: Optional[dict]
+    execution_results: Optional[list]
     
     # Control flow
     iteration_count: int

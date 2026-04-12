@@ -1,6 +1,8 @@
 import requests
 import random
-from dataclasses import dataclass
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from pydantic import BaseModel
 
 BASE_URL = "https://biwenger.as.com/"
 LOGIN_URL = BASE_URL + 'api/v2/auth/login'
@@ -10,8 +12,7 @@ USER_INFO_URL = BASE_URL + 'api/v2/account'
 # NOTA: Aquest codi només està preparat per quan l'usuari té una sola lliga (com és el meu cas), resta pendent
 #       per a gestionar múltiples ligues a get_user_info, ara mateix només retorna la primera lliga
 
-@dataclass
-class PlayerInfo:
+class PlayerInfo(BaseModel):
     user_id: int
     user_name: str
     league_id: int
@@ -19,6 +20,8 @@ class PlayerInfo:
     team_id: int
     team_name: str
     balance: int
+    competition_slug: str
+
 
 def get_random_user_agent() -> str:
     """Returns a random User-Agent string."""
@@ -60,9 +63,22 @@ class BiwengerAuth:
         self.email = email
         self.password = password
         self.session = requests.Session()
+        self._setup_retries()
         self._setup_headers()
         self.token = None
         self.player_info = None
+
+    def _setup_retries(self):
+        """Configures requests to automatically retry on network failures or temporary 5xx errors."""
+        retries = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def _setup_headers(self):
         """Sets up the base headers for the session to mimic a real browser."""
@@ -127,6 +143,7 @@ class BiwengerAuth:
 
             league_id = response_json.get('data').get('leagues')[0].get('id')
             league_name = response_json.get('data').get('leagues')[0].get('name')
+            competition_slug = response_json.get('data').get('leagues')[0].get('competition')
             team_id = response_json.get('data').get('leagues')[0].get('user').get('id')
             team_name = response_json.get('data').get('leagues')[0].get('user').get('name')
             balance = response_json.get('data').get('leagues')[0].get('user').get('balance')
@@ -138,7 +155,8 @@ class BiwengerAuth:
                 league_name=league_name,
                 team_id=team_id,
                 team_name=team_name,
-                balance=balance
+                balance=balance,
+                competition_slug=competition_slug
             )
 
             return self.player_info
@@ -157,6 +175,10 @@ class BiwengerAuth:
         print(f"Token obtenido: {token[:20]}...")
         player_info = self.get_user_info()
         print(f"Usuario: {player_info.user_name}")
-        print(f"Liga: {player_info.league_name}")
+        print(f"Liga: {player_info.league_name} ({player_info.competition_slug})")
         print(f"Equipo: {player_info.team_name}")
         print(f"Balance: {player_info.balance:,}€")
+        return {
+            'token': token,
+            'player_info': player_info
+        }
