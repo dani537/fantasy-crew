@@ -2,7 +2,7 @@ name: Biwenger Agent Workflow
 
 on:
   schedule:
-    - cron: '0 8,20 * * *' # Executes at 08:00 and 20:00 UTC every day
+    - cron: '0 4 * * *' # Executes at 04:00 UTC (06:00 AM local time in Spain) every day
   workflow_dispatch:      # Allows manual trigger from GitHub UI
 
 jobs:
