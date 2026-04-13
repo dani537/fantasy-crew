@@ -1,17 +1,11 @@
 """
-Fantasy Crew - LangGraph Multi-Agent System
-============================================
+Fantasy Crew - Multi-Agent System
+==================================
 
 Entry point for running the Fantasy Crew using LangGraph orchestration.
 
 Usage:
-    python main_langgraph.py
-
-This version uses LangGraph StateGraph for:
-- Explicit workflow visualization
-- State management across agents
-- Conditional routing (President can reject → loop back to SD)
-- Checkpointing and debugging support
+    python main.py
 """
 
 from datetime import datetime
@@ -30,10 +24,9 @@ def run_fantasy_crew_langgraph():
     # Initial state
     initial_state = {
         "df_master": None,
-        "coach_report": "",
-        "sd_proposals": "",
-        "coach_critique": "",
-        "president_decision": "",
+        "coach_report": {},
+        "sd_proposals": {},
+        "president_decision": {},
         "approved_actions": None,
         "execution_results": None,
         "iteration_count": 0,
@@ -71,13 +64,6 @@ def run_fantasy_crew_langgraph():
                         print(f"   ❌ Error: {node_output['error']}")
                     else:
                         print("   💼 Transfer Proposals Generated")
-
-                elif node_name == "debate":
-                    print("🚀 Node: Debate - Coach critiques SD proposals...")
-                    if node_output.get("error"):
-                        print(f"   ❌ Error: {node_output['error']}")
-                    else:
-                        print("   🗣️ Coach Critique Generated")
                 
                 elif node_name == "president":
                     print("🚀 Node: President - Making decision...")
@@ -99,9 +85,9 @@ def run_fantasy_crew_langgraph():
         print("=" * 60)
         print("📂 Reports saved in ./reports/:")
         print("   • 00_final_report.md (consolidated)")
-        print("   • 01_coach_report.md")
-        print("   • 02_sporting_director_proposals.md")
-        print("   • 03_president_decision.md")
+        print("   • 01_coach_report.json")
+        print("   • 02_sporting_director_proposals.json")
+        print("   • 03_president_decision.json")
         print("=" * 60)
         
     except Exception as e:

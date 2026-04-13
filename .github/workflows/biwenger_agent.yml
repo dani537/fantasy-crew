@@ -1,0 +1,38 @@
+name: Biwenger Agent Workflow
+
+on:
+  schedule:
+    - cron: '0 8,20 * * *' # Executes at 08:00 and 20:00 UTC every day
+  workflow_dispatch:      # Allows manual trigger from GitHub UI
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run Biwenger Agent
+        env:
+          # Secrets (Sensitive)
+          BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
+          BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          
+          # Variables (Config)
+          LANGUAGE: ${{ vars.LANGUAGE }}
+          GMAIL_ADRESS: ${{ vars.GMAIL_ADRESS }}
+          SCORE_TYPE: ${{ vars.SCORE_TYPE }}
+        run: python main.py

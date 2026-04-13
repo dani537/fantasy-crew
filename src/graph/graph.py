@@ -111,8 +111,7 @@ def build_fantasy_crew_graph():
     graph.add_edge(START, "data_analyst")
     graph.add_edge("data_analyst", "coach")
     graph.add_edge("coach", "sporting_director")
-    graph.add_edge("sporting_director", "debate")
-    graph.add_edge("debate", "president")
+    graph.add_edge("sporting_director", "president")
     
     # Conditional edge from President
     graph.add_conditional_edges(

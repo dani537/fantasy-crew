@@ -146,26 +146,11 @@ def president_node(state: AgentState) -> dict:
         df_master = state["df_master"]
         coach_report = state["coach_report"]
         sd_proposals = state["sd_proposals"]
-        coach_critique = state.get("coach_critique", "No critique available.")
         
-        decision = president.decide(coach_report, sd_proposals, df_master, coach_critique)
+        decision = president.decide(coach_report, sd_proposals, df_master)
         
-        # Extract JSON from the decision
-        import re
-        import json
-        approved_actions = None
-        json_match = re.search(r'```json\s*(.*?)\s*```', decision, re.DOTALL)
-        if json_match:
-            try:
-                # Pre-process to remove potential comments //
-                json_str = json_match.group(1)
-                json_str_clean = re.sub(r'//.*', '', json_str)
-                approved_actions = json.loads(json_str_clean)
-                print(f"   ✅ Parsed President Actions: {len(approved_actions)} categories found.")
-            except json.JSONDecodeError as e:
-                print(f"   ⚠️ Warning: Could not parse President JSON: {e}")
-        else:
-            print("   ⚠️ Warning: No JSON block found in President's decision.")
+        approved_actions = decision if isinstance(decision, dict) else {}
+        print(f"   ✅ Parsed President Actions: {len(approved_actions)} categories found.")
         
         # Increment iteration count
         iteration_count = state.get("iteration_count", 0) + 1
@@ -193,22 +178,23 @@ def generate_report_node(state: AgentState) -> dict:
     Consolidates all agent outputs into final reports.
     """
     import os
+    import json
     from datetime import datetime
     
     reports_dir = "./reports"
     os.makedirs(reports_dir, exist_ok=True)
     
     # Save individual reports
-    with open(f"{reports_dir}/01_coach_report.md", 'w', encoding='utf-8') as f:
-        f.write(state.get("coach_report", "No coach report generated."))
+    with open(f"{reports_dir}/01_coach_report.json", 'w', encoding='utf-8') as f:
+        json.dump(state.get("coach_report", {}), f, indent=2, ensure_ascii=False)
     
-    with open(f"{reports_dir}/02_sporting_director_proposals.md", 'w', encoding='utf-8') as f:
-        f.write(state.get("sd_proposals", "No proposals generated."))
+    with open(f"{reports_dir}/02_sporting_director_proposals.json", 'w', encoding='utf-8') as f:
+        json.dump(state.get("sd_proposals", {}), f, indent=2, ensure_ascii=False)
     
-    with open(f"{reports_dir}/03_president_decision.md", 'w', encoding='utf-8') as f:
-        f.write(state.get("president_decision", "No decision generated."))
+    with open(f"{reports_dir}/03_president_decision.json", 'w', encoding='utf-8') as f:
+        json.dump(state.get("president_decision", {}), f, indent=2, ensure_ascii=False)
     
-    # Generate consolidated report
+    # Generate consolidated report (can be plain text for email)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     final_report = f"""# 🏆 Fantasy Crew - Final Report
 **Generated**: {timestamp}
@@ -216,25 +202,31 @@ def generate_report_node(state: AgentState) -> dict:
 ---
 
 ## 📋 Coach Report
-{state.get("coach_report", "No report available.")}
+```json
+{json.dumps(state.get("coach_report", {}), indent=2, ensure_ascii=False)}
+```
 
 ---
 
 ## 💼 Sporting Director Proposals
-{state.get("sd_proposals", "No proposals available.")}
+```json
+{json.dumps(state.get("sd_proposals", {}), indent=2, ensure_ascii=False)}
+```
 
 ---
 
 ## 🏛️ President Decision
-{state.get("president_decision", "No decision available.")}
+```json
+{json.dumps(state.get("president_decision", {}), indent=2, ensure_ascii=False)}
+```
 """
     
     with open(f"{reports_dir}/00_final_report.md", 'w', encoding='utf-8') as f:
         f.write(final_report)
     
-    print("📄 Saved: ./reports/01_coach_report.md")
-    print("📄 Saved: ./reports/02_sporting_director_proposals.md")
-    print("📄 Saved: ./reports/03_president_decision.md")
+    print("📄 Saved: ./reports/01_coach_report.json")
+    print("📄 Saved: ./reports/02_sporting_director_proposals.json")
+    print("📄 Saved: ./reports/03_president_decision.json")
     print("📄 Saved: ./reports/00_final_report.md")
     
     return {"final_report": final_report}
@@ -302,12 +294,15 @@ def email_report_node(state: AgentState) -> dict:
     if os.path.exists("./reports/00_final_report.md"):
         attachments.append("./reports/00_final_report.md")
     
-    # 2. Excel and important CSVs from data/
+    # 2. Add individual JSON files
+    for json_file in ["01_coach_report.json", "02_sporting_director_proposals.json", "03_president_decision.json"]:
+        if os.path.exists(f"./reports/{json_file}"):
+            attachments.append(f"./reports/{json_file}")
+
+    # 3. Excel and important CSVs from data/
     important_patterns = [
         "./data/_master.xlsx",
         "./data/_master.csv",
-        "./data/market_sales.csv",
-        "./data/user_info.csv"
     ]
     for pattern in important_patterns:
         if os.path.exists(pattern):
@@ -355,9 +350,10 @@ def execute_actions_node(state: AgentState) -> dict:
         # 1. Update Lineup
         lineup_data = approved_actions.get("lineup")
         if lineup_data and "formation" in lineup_data and "player_ids" in lineup_data:
-            print(f"   ⚽ Setting lineup: {lineup_data['formation']}")
-            success = actions.lineup.set_lineup(lineup_data["formation"], lineup_data["player_ids"])
-            results.append(f"Lineup {lineup_data['formation']}: {'Success' if success else 'Failed'}")
+            print(f"   ⚽ DRY-RUN: Setting lineup: {lineup_data['formation']}")
+            # success = actions.lineup.set_lineup(lineup_data["formation"], lineup_data["player_ids"])
+            success = True
+            results.append(f"Lineup {lineup_data['formation']}: {'Success' if success else 'Failed'} (SIMULATION)")
 
         # 2. Process Sales (Placing players on market)
         sales = approved_actions.get("sales", [])
@@ -365,9 +361,10 @@ def execute_actions_node(state: AgentState) -> dict:
             pid = sale.get("player_id")
             price = sale.get("price", 0)
             if pid:
-                print(f"   🏷️ Selling player {pid} for {price}€")
-                success = actions.market.place_player_on_market(pid, price)
-                results.append(f"Sell Player {pid}: {'Success' if success else 'Failed'}")
+                print(f"   🏷️ DRY-RUN: Selling player {pid} for {price}€")
+                # success = actions.market.place_player_on_market(pid, price)
+                success = True
+                results.append(f"Sell Player {pid}: {'Success' if success else 'Failed'} (SIMULATION)")
 
         # 3. Process Bids (Offers / Buying)
         bids = approved_actions.get("bids", [])
@@ -376,9 +373,10 @@ def execute_actions_node(state: AgentState) -> dict:
             amount = bid.get("amount", 0)
             to_user = bid.get("to_user_id")
             if pid and amount:
-                print(f"   💰 Bidding {amount}€ for player {pid}")
-                success = actions.market.place_offer(amount, pid, to_user)
-                results.append(f"Bid {amount}€ for Player {pid}: {'Success' if success else 'Failed'}")
+                print(f"   💰 DRY-RUN: Bidding {amount}€ for player {pid}")
+                # success = actions.market.place_offer(amount, pid, to_user)
+                success = True
+                results.append(f"Bid {amount}€ for Player {pid}: {'Success' if success else 'Failed'} (SIMULATION)")
 
         return {"execution_results": results}
 

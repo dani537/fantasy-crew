@@ -1,85 +1,58 @@
-# 🧠 The Broker's Strategic Plan  
-## 💵 Financial Diagnosis  
-Current balance is **€23.08M**, comfortably positive. However, the immediate priority is **goalkeeper reinforcement** and **defensive depth**.  
-
-We will:  
-1. **Sell non-performing assets** to raise funds and clear squad slots.  
-2. **Execute two clause buyouts**: a starting GK and a starting DF.  
-3. **Maintain a positive balance** after operations, ensuring no point penalty.  
-
-Estimated net spend after planned sales & signings: **≈ -€15.5M**. This leaves a projected balance of **≈ €7.5M** – safe for Jornada start.  
+### 💵 Financial Diagnosis  
+Current balance: **€33.26M**. This is healthy, and with the clause window open until April 19, we have flexibility to invest. Our primary short‑term goal is **reinforcing the squad**—specifically a goalkeeper and a defender—while staying positive. The upcoming Jornada income will further support liquidity. No emergency sales are needed for cash flow, but we should offload underperforming assets to free roster slots and raise funds for targeted signings.
 
 ---
 
-## 🎯 Target Signings  
-### Immediate Needs – Must Start This Week  
+### 🎯 Target Signings  
+We must address the **goalkeeper** and **defender** weaknesses immediately. Using efficiency (lowest Cost/xP) and availability in the clause market:
 
 | Player | Type | Price/Clause | Rationale |
 |--------|------|--------------|-----------|
-| **Remiro (GK, Real Sociedad)** | Clause | €22.5M | **Top priority.** Elite GK, high save potential, 0 cost/xP efficiency. Home match vs. Cádiz (Real Sociedad favored). Solves GK crisis instantly. |
-| **Arambarri (DF, Getafe)** | Clause | €2.25M | **Secondary need.** Strong xP (3.8), positive momentum (+0.58), starter. Getafe at home vs. Valladolid (≈52% win prob). Direct upgrade over Bartra. |
+| **Miguel Santos (GK, Betis)** | Clause | €5.25M | Highest xP (4.0) among affordable GKs, positive momentum (+0.33). A reliable starter who solves our GK crisis. |
+| **Adrián López (DF, Alavés)** | Clause | €2.7M | Strong xP (3.2), excellent momentum (+1.67). Cheap, young, and an immediate upgrade over Bartra. Fills the defensive gap. |
 
-*Why these two?*  
-- Remiro is the **most efficient available GK** by clause cost vs. quality.  
-- Arambarri offers **best defense efficiency** in clause list: low cost, high xP, positive trend.  
+**Why these two?**  
+- **Santos** is the most cost‑efficient GK available (Cost/xP ≈ 1.31M per point).  
+- **Adrián López** offers the best defensive value (Cost/xP ≈ 0.84M per point) and his momentum suggests rising price.  
+Both are starters, fit the coach’s 3‑5‑2 system, and leave us with ample remaining budget.
 
 ---
 
-## 📤 Recommended Sales  
-*Execute these sales BEFORE clause buyouts to ensure liquidity.*  
+### 📤 Recommended Sales  
+We’ll sell **low‑xP, declining‑trend players** who are not part of the core. Avoid selling high‑clause assets (Lewandowski, Rashford) unless we get a clause offer.
 
 | Player | Suggested Price | Reason |
 |--------|-----------------|--------|
-| **Oblak** | €2.62M | Injured/doubt, unusable. Freeing salary and slot for new GK. |
-| **Boayar** | €0.15M | Injured, zero xP, dead weight. Minimal recovery. |
-| **Bartra** | €2.54M | 0% starter, negative trend (-2.48), tough fixture (Betis away). Directly replaced by Arambarri. |
-| **Pepelu** | €1.8M | 0% starter, catastrophic momentum (-4.17), no prospect. |
+| Catena (DF) | €4.5M | Sanctioned, negative trend, low xP. Frees a DF slot. |
+| Pedraza (DF) | €1.32M | 0 xP, not starting, redundant. |
+| Boayar (FW) | €0.15M | Doubtful, 0 xP, minimal value. |
 
-**Expected total sales revenue: ≈ €7.11M** (sum of market prices).  
-
-**Hold for now:**  
-- **Borja Iglesias** (€8.5M) – High price, may attract clause later. Selling now loses value.  
-- **Jauregizar** – Still starting, low xP but fills squad slot. Keep unless urgent upgrade emerges.  
+**Total expected sales revenue: ~€5.97M**  
+*Note:* We retain Oblak until Santos is secured; then Oblak can be sold later if his trend doesn’t recover. Griezmann is kept for now—his clause potential outweighs a sale at current market price.
 
 ---
 
-## 📈 Long-Term Investments (Watchlist)  
-*Players with strong momentum & value growth potential – consider if balance allows.*  
+### 📈 Long‑Term Investments  
+From our squad, the following are **growth assets** to hold:
 
-| Player | Price (Clause) | MOMENTUM_TREND | Expected Value Growth |
-|--------|----------------|----------------|----------------------|
-| **Álex García (MF, Rayo)** | €20M | +9.95 | Massive upward trend; could be key asset next season. |
-| **Berenguer (FW, Athletic)** | €20M | +7.14 | Experienced, Athletic attack favorited this week. Rising. |
-| **Zakharyan (MF, Real Sociedad)** | €0.48M | +0.4 | Cheap, young, rising. Low risk growth asset. |
+| Player | Price | MOMENTUM_TREND | Expected Value Growth |
+|--------|-------|----------------|----------------------|
+| Aramburu (DF) | €2.2M | +0.41 | Starting regularly, xP 4.0. Price should rise with continued performance. |
+| Darder (MF) | €3.22M | +0.81 | High xP (5.0), consistent starter. Midfield anchor with appreciating value. |
+| Rioja (FW) | €2.94M | +1.0 | Our top xP (5.4); strong upward trend. Prime candidate for future clause profit. |
 
-*Note: Not signing these now due to immediate needs and budget constraint, but monitor closely.*  
+*External watchlist:*  
+- **Adrián López** (target signing) has high growth potential given his momentum and low cost.  
+- **Ángel Ortiz** (Clause list) – €600k, Cost/momentum point only €0.36M. Could be a future midfield bargain if his playing time increases.
 
 ---
 
-## ⚖️ Final Forecast  
-
+### ⚖️ Final Forecast  
 ```
-Current Balance:      €23,083,507
-+ Expected Sales:     €7,110,000  (Oblak 2.62M + Boayar 0.15M + Bartra 2.54M + Pepelu 1.8M)
-- Expected Buys:      €24,750,000 (Remiro 22.5M + Arambarri 2.25M)
-= Projected Balance:  €5,443,507
+Current Balance:    €33,258,507
++ Expected Sales:   €5,970,000  (Catena + Pedraza + Boayar)
+- Expected Buys:    €7,950,000  (Santos €5.25M + Adrián López €2.7M)
+= Projected Balance: €31,278,507
 ```
 
-✅ **Balance remains positive** – no point penalty risk.  
-✅ **Critical GK slot filled** with elite option.  
-✅ **Defense upgraded** with starting DF.  
-🔄 **Squad now has 19 players** (after 4 sales + 2 signings).  
-
----
-
-## 🧩 Post-Operation Squad Snapshot  
-**GK**: Remiro  
-**DF**: Aramburu, Gayà, Arambarri, Catena (backup)  
-**MF**: Fermín, Pablo Torre, Darder, Pol Lozano, Jauregizar  
-**FW**: De Frutos, Rioja, Rashford, Lewandowski (bench), Griezmann (bench)  
-
-**Remaining liquidity**: ~€5.4M – can be used next window for further upgrades (e.g., attacking depth).  
-
-**Next window focus**: Monitor clause offers on Borja Iglesias, consider selling Lewandowski/Griezmann if starter probability remains zero, target growth MF (Zakharyan/Álex García).  
-
-*Execution order: Sales → Clause buyouts → verify balance positive before deadline.*
+**Remaining liquidity: €31.3M** – still strong for future moves. We have reinforced the two weakest positions with efficient, starting‑quality players, shed dead weight, and protected high‑upside assets. The squad is now better balanced for the upcoming Jornada and beyond.

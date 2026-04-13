@@ -125,15 +125,14 @@ class President:
         
         return summary
 
-    def decide(self, coach_report, sporting_director_proposals, df_master, coach_critique="No critique available."):
+    def decide(self, coach_report, sporting_director_proposals, df_master):
         """
         Makes the final decision on all proposals with full context.
         
         Args:
-            coach_report (str): The Coach's analysis and recommendations.
-            sporting_director_proposals (str): The Sporting Director's transfer plan.
+            coach_report (dict): The Coach's analysis and recommendations.
+            sporting_director_proposals (dict): The Sporting Director's transfer plan.
             df_master (pd.DataFrame): The master data for additional context.
-            coach_critique (str): The Coach's critique of the SD's proposals (debate round).
         """
         print_step(22, "President (The Strategist) is reviewing proposals")
         
@@ -177,6 +176,7 @@ class President:
         from src.prompts.president_prompts import get_president_decision_prompt
         from src.prompts.system_roles import PRESIDENT_SYSTEM_ROLE
 
+        import json
         prompt = get_president_decision_prompt(
             my_team=my_team,
             current_time=current_time,
@@ -188,17 +188,18 @@ class President:
             total_players=total_players,
             pos_str=pos_str,
             warnings_str=warnings_str,
-            coach_report=coach_report,
-            sporting_director_proposals=sporting_director_proposals,
-            coach_critique=coach_critique,
+            coach_report=json.dumps(coach_report, indent=2) if isinstance(coach_report, dict) else str(coach_report),
+            sporting_director_proposals=json.dumps(sporting_director_proposals, indent=2) if isinstance(sporting_director_proposals, dict) else str(sporting_director_proposals),
             my_squad_roster=my_squad_roster,
         )
         
-        decision = self.llm.generate_content(prompt, system_prompt=PRESIDENT_SYSTEM_ROLE)
+        from src.utils.json_helper import extract_json_from_llm
         
-        if decision:
-            print("🏛️ Executive Decision Made")
-            return decision
+        decision_text = self.llm.generate_content(prompt, system_prompt=PRESIDENT_SYSTEM_ROLE)
+        
+        if decision_text:
+            print("🏛️ Executive JSON Decision Made")
+            return extract_json_from_llm(decision_text)
         else:
-            return "Error generating Executive Decision."
+            return {"error": "Error generating Executive Decision."}
 

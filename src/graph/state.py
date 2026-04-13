@@ -20,10 +20,9 @@ class AgentState(TypedDict):
     df_master: Optional[pd.DataFrame]
     
     # Agent outputs
-    coach_report: str
-    sd_proposals: str
-    coach_critique: str
-    president_decision: str
+    coach_report: dict
+    sd_proposals: dict
+    president_decision: dict
     approved_actions: Optional[dict]
     execution_results: Optional[list]
     

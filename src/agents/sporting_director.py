@@ -211,6 +211,7 @@ class SportingDirector:
         from src.prompts.sporting_director_prompts import get_sd_proposal_prompt
         from src.prompts.system_roles import SPORTING_DIRECTOR_SYSTEM_ROLE
 
+        import json
         prompt = get_sd_proposal_prompt(
             my_team_name=my_team_name,
             current_time=current_time,
@@ -218,17 +219,19 @@ class SportingDirector:
             clause_status=clause_status,
             clause_deadline=clause_deadline,
             season_context_str=season_context_str,
-            coach_report=coach_report,
+            coach_report=json.dumps(coach_report.get('briefing_direccion_deportiva', coach_report)) if isinstance(coach_report, dict) else str(coach_report),
             market_summary=market_summary,
             clause_summary=clause_summary,
             my_squad_summary=my_squad_summary,
         )
         
-        proposals = self.llm.generate_content(prompt, system_prompt=SPORTING_DIRECTOR_SYSTEM_ROLE)
+        from src.utils.json_helper import extract_json_from_llm
         
-        if proposals:
-            print("💼 Transfer Proposals Generated")
-            return proposals
+        proposals_text = self.llm.generate_content(prompt, system_prompt=SPORTING_DIRECTOR_SYSTEM_ROLE)
+        
+        if proposals_text:
+            print("💼 Transfer Proposals JSON Generated")
+            return extract_json_from_llm(proposals_text)
         else:
-            return "Error generating Transfer Proposals."
+            return {"error": "Error generating Transfer Proposals."}
 

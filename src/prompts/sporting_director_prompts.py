@@ -104,34 +104,42 @@ High Price + Low xP + Negative Trend = SELL
    - **Dead Weight** (declining value, no points contribution → sell)
 
 ---
-## 📄 OUTPUT FORMAT (Markdown)
+## 📄 OUTPUT FORMAT
 
-### 💵 Financial Diagnosis
-Explain current balance status and how you plan to stay positive.
+Debes responder ÚNICAMENTE con un objeto JSON estricto que contenga los nodos requeridos, sin texto de acompañamiento ni bloques Markdown. El formato exacto debe ser:
 
-### 🎯 Target Signings
-Prioritized list of signings (Market bid OR Clause buyout).
-| Player | Type | Price/Clause | Rationale |
-|--------|------|--------------|-----------|
-| Name   | Market/Clause | €X | Why this player |
-
-### 📤 Recommended Sales
-Players to list, suggested price, and expected revenue.
-| Player | Suggested Price | Reason |
-|--------|-----------------|--------|
-| Name   | €X              | Why sell |
-
-### 📈 Long-Term Investments
-Players worth acquiring for squad value growth (even if not immediate starters).
-| Player | Price | MOMENTUM_TREND | Expected Value Growth |
-|--------|-------|----------------|----------------------|
-
-### ⚖️ Final Forecast
-Estimated balance after all operations.
-```
-Current Balance:    €{current_balance:,.0f}
-+ Expected Sales:   €X
-- Expected Buys:    €X
-= Projected Balance: €X
+```json
+{{
+  "analisis_financiero_previo": {{
+    "presupuesto_disponible": 15000000,
+    "valor_mercado_objetivo_ventas": 3200000,
+    "saldo_proyectado_post_operaciones": 2500000 
+  }},
+  "resolucion_ofertas_pendientes": [
+    {{
+      "id_oferta": 998877,
+      "id_jugador": 67890,
+      "accion": "aceptar/rechazar/mantener",
+      "justificacion": "La oferta de la máquina supera su valor."
+    }}
+  ],
+  "operaciones_venta": [
+    {{
+      "id_jugador": 67891,
+      "nombre": "Jugador Descarte",
+      "estrategia_venta": "inmediata/especulativa",
+      "precio_minimo_esperado": 1500000
+    }}
+  ],
+  "operaciones_compra": [
+    {{
+      "id_jugador_mercado": 55443,
+      "nombre": "Delantero Top",
+      "id_necesidad_coach": "req_1",
+      "importe_oferta": 9500000,
+      "tipo_puja": "valor_mercado/sobrepuja_ligera/sobrepuja_agresiva/clausulazo"
+    }}
+  ]
+}}
 ```
 """

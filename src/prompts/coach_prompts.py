@@ -80,27 +80,47 @@ List exactly **5 players** to consider for sale:
 ---
 ## OUTPUT FORMAT
 
-### 🧠 Match Analysis
-Brief rival/difficulty analysis using odds.
+Debes responder ÚNICAMENTE con un objeto JSON estricto que contenga los nodos requeridos, sin texto de acompañamiento ni bloques Markdown. El formato exacto debe ser:
 
-### 📋 Squad Status
-Health summary, injuries, standout form.
-
-### ⚽ Recommended Lineup
-**Formation**: [e.g. 3-4-3]
-- **GK**: [Name]
-- **DF**: [Names]
-- **MF**: [Names]
-- **FW**: [Names]
-*(Justify key decisions)*
-
-### 🚨 Urgent Needs
-If risk of -4 penalty: "NECESSITEM [POSITION]" (or equivalent in target language).
-List any structural weaknesses you see in the squad beyond this jornada.
-
-### 💰 Market Strategy (For Sale)
-1. [Name] - [REAL/RESERVE] - [Reason]
-2. ...
+```json
+{{
+  "analisis_jugadores": [
+    {{
+      "id_jugador": 1234,
+      "nombre": "Nombre del Jugador",
+      "posicion": "POR/DEF/MED/DEL",
+      "estado_fisico": "disponible/lesionado/sancionado/duda",
+      "etiqueta_mercado": "intocable/transferible/venta_urgente"
+    }}
+  ],
+  "briefing_direccion_deportiva": {{
+    "resumen_plantilla": {{
+      "huecos_titulares_libres": 1,
+      "valoracion_general": "Falta un lateral derecho titular y sobra mediocampo."
+    }},
+    "lista_ventas": [
+      {{
+        "id_jugador": 5678,
+        "nombre": "Nombre",
+        "motivo": "Explicación táctica",
+        "prioridad_venta": "ALTA/MEDIA/BAJA"
+      }}
+    ],
+    "necesidades_fichaje": [
+      {{
+        "id_necesidad": "req_1",
+        "posicion_requerida": "DEF",
+        "presupuesto_recomendado_porcentaje": 30,
+        "prioridad": "ALTA/MEDIA/BAJA"
+      }}
+    ]
+  }},
+  "alineacion_propuesta": {{
+    "formacion": "3-5-2",
+    "id_jugadores_titulares": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+  }}
+}}
+```
 """
 
 

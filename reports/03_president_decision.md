@@ -1,50 +1,47 @@
 ### 🏛️ EXECUTIVE SUMMARY
-The club faces an acute goalkeeping crisis and defensive fragility. The financial position is strong, allowing for decisive intervention. The Sporting Director's plan, endorsed by the Coach with a critical procedural adjustment, surgically addresses both urgent needs. We will execute sales to raise funds, then secure two key clause signings to solidify the starting XI and avoid point penalties. Financial prudence will be maintained, leaving a healthy post-operation balance.
+The situation is clear: our squad has two critical, immediate weaknesses at goalkeeper and center-back that threaten our weekly points through potential -4 penalties. Our financial position is strong. The Sporting Director's proposals are precisely targeted, cost-effective, and fully endorsed by the Coach. They resolve our urgent needs, shed dead weight, and leave us with substantial remaining capital for future moves. The strategy is sound and actionable.
 
 ### ✅ APPROVED OPERATIONS
-
-| # | Operation | Player | Amount (€) | Strategic Justification |
-|---|-----------|--------|------------|-------------------------|
-| 1 | **SELL** | Oblak (ID 1897) | 2,620,000 | Injured and unusable. Frees salary and squad slot for a new starting GK. |
-| 2 | **SELL** | Boayar (ID 37709) | 150,000 | Injured, zero xP, dead weight. Minimal recovery of value. |
-| 3 | **SELL** | Pepelu (ID 12221) | 1,800,000 | 0% starter, catastrophic negative momentum, not in plans. |
-| 4 | **CLAUSE** | Remiro (GK, Real Sociedad) | 22,500,000 | **TOP PRIORITY.** Elite, starting GK. Solves the -4 point penalty risk instantly. |
-| 5 | **CLAUSE** | Arambarri (DF, Getafe) | 2,250,000 | **SECOND PRIORITY.** Starting DF with positive momentum and solid xP (3.8). Direct upgrade over the struggling Bartra. Must be secured BEFORE Bartra's sale is finalized. |
-| 6 | **SELL** | Bartra (ID 1125) | 2,540,000 | 0% starter, negative trend. Sale approved **ONLY AFTER** Arambarri's clause is successfully executed, as per the Coach's critical safeguard. |
+| # | Operation | Player | Amount | Reason |
+|---|-----------|--------|--------|--------|
+| 1 | CLAUSE (Buy) | Miguel Santos (GK, Betis) | €5,250,000 | Solves the GK crisis. Highest xP (4.0) among affordable options, positive momentum. Top priority. |
+| 2 | CLAUSE (Buy) | Adrián López (DF, Alavés) | €2,700,000 | Addresses critical DF shortage. Strong xP (3.2), excellent momentum (+1.67). Immediate starter. |
+| 3 | SELL | Catena (DF) | €4,500,000 | Sanctioned, low xP, negative trend. Not in lineup plans. Frees roster slot. |
+| 4 | SELL | Pedraza (DF) | €1,320,000 | 0 xP, not starting, redundant. Frees roster slot. |
+| 5 | SELL | Boayar (FW) | €150,000 | Doubtful, 0 xP, minimal value. Clears roster slot. |
 
 ### ❌ REJECTED OPERATIONS
-*None. All proposed operations are approved with the sequenced execution safeguard.*
+*No operations are rejected. All proposals are approved.*
 
 ### 💰 FINANCIAL PROJECTION
 ```
-Current Balance:     €23,083,507
-+ Approved Sales:    €7,110,000  (Oblak 2.62M + Boayar 0.15M + Pepelu 1.8M + Bartra 2.54M*)
-- Approved Purchases: €24,750,000 (Remiro 22.5M + Arambarri 2.25M)
-= Final Balance:     €5,443,507
-
-*Bartra sale revenue included, pending successful Arambarri clause.
+Current Balance:     €33,258,507
++ Approved Sales:    €5,970,000  (Catena 4.5M + Pedraza 1.32M + Boayar 0.15M)
+- Approved Purchases: €7,950,000  (Santos 5.25M + Adrián López 2.7M)
+= Final Balance:     €31,278,507
 ```
+**Financial Safety:** ✅ Final Balance remains strongly positive (>€31M).
 
 ### 🎯 FINAL ORDERS
-**Execution must follow this exact sequence to mitigate risk:**
-1.  **Immediate Market Actions:** Place Oblak, Boayar, and Pepelu on the transfer list at their stated market prices.
-2.  **Secure Key Signings (Clauses):** Execute the clause purchases for **Arambarri (DF)** first, then **Remiro (GK)**. This order protects against a defensive shortage.
-3.  **Finalize Squad Adjustment:** Once Arambarri's signing is confirmed, place Bartra on the transfer list at his market price.
-4.  **Set Provisional Lineup:** Configure the lineup with current players to prepare for Jornada 33. It will be updated once new signings are integrated.
+**Execution Order is Critical.** Operations must be completed in this sequence to avoid squad gaps:
+1.  **FIRST:** Execute the two CLAUSE purchases: **Miguel Santos (GK)** and **Adrián López (DF)**.
+2.  **SECOND:** Once both new players are confirmed in your squad, execute the voluntary sales of **Catena, Pedraza, and Boayar**.
+3.  **THIRD:** Update the lineup for Jornada 33 to:
+    *   **Formation:** 3-5-2
+    *   **Starters:** GK: Miguel Santos. DF: Gayà, Aramburu, Adrián López. MF: Darder, Fermín, Pol Lozano, Jauregizar, Pepelu. FW: Rioja, Rashford.
+    *   **Bench:** Oblak, Bartra, Lewandowski, De Frutos, Griezmann, Borja Iglesias.
+4.  **MONITOR:** Retain Oblak as backup GK. Do not sell him unless his form recovers or a compelling offer arrives later.
 
 ### 🤖 SYSTEM EXECUTION JSON
-*Note: This JSON executes the immediate, actionable market and lineup orders. Clause purchases are handled separately.*
+For the current moment, we approve the sales of the three identified players. Lineup and bids will be set after the new signings are secured.
 
 ```json
 {
-  "lineup": {
-    "formation": "3-4-3",
-    "player_ids": [32020, 1844, 1125, 31243, 26994, 1769, 30210, 18397, 17442, 38289]
-  },
+  "lineup": {"formation": "3-5-2", "player_ids": [1897, 1844, 32020, 1125, 1769, 31243, 17148, 30210, 12221, 17442, 38289]},
   "sales": [
-    {"player_id": 1897, "price": 2620000},
-    {"player_id": 37709, "price": 150000},
-    {"player_id": 12221, "price": 1800000}
+    {"player_id": 17731, "price": 4500000},
+    {"player_id": 2031, "price": 1320000},
+    {"player_id": 37709, "price": 150000}
   ],
   "bids": []
 }

@@ -24,14 +24,10 @@ def get_president_decision_prompt(
     warnings_str: str,
     coach_report: str,
     sporting_director_proposals: str,
-    coach_critique: str,
     my_squad_roster: str = "",
 ) -> str:
     """
     Main President decision prompt.
-    
-    Now includes the Coach's critique of the SD proposals (debate round)
-    so the President can arbitrate disagreements.
     """
     return f"""
 ROLE: You are the Club President (The Strategist) for "{my_team}".
@@ -73,22 +69,12 @@ Current Date/Time: {current_time}
    - The squad should increase in total value over time.
 
 ---
-## 📋 COACH'S REPORT (Sporting Perspective)
-*The Coach focuses on lineup, tactics, and immediate needs.*
-
+## 📋 COACH'S REPORT (Formato JSON)
 {coach_report}
 
 ---
-## 💼 SPORTING DIRECTOR'S PROPOSALS (Market Perspective)
-*The Sporting Director focuses on market opportunities, financial operations, and long-term value growth.*
-
+## 💼 SPORTING DIRECTOR'S PROPOSALS (Formato JSON)
 {sporting_director_proposals}
-
----
-## 🗣️ COACH'S CRITIQUE OF SD PROPOSALS (Debate Round)
-*The Coach has reviewed the SD's proposals and flagged tactical concerns.*
-
-{coach_critique}
 
 ---
 ## 📖 DECISION RULES
@@ -97,19 +83,11 @@ Current Date/Time: {current_time}
    - Calculate: Current Balance + Sales - Purchases = Final Balance
    - If Final Balance < €0 → REJECT operations until balance is safe.
 
-2. **Resolve Disagreements**:
-   - If the Coach vetoed a sale (needed for lineup) but the SD insists → side with the Coach unless the financial need is critical.
-   - If the Coach approved a sale but flags a concern → require SD to have a replacement lined up first.
-
-3. **Prioritize Urgent Needs**:
+2. **Prioritize Urgent Needs**:
    - If Coach signals "WE NEED [POSITION]" → This signing is HIGH PRIORITY.
    - Avoid -4 penalty at all costs.
 
-4. **Evaluate Value**:
-   - Cheap player with good points > Expensive star with marginal improvement.
-   - Consider `COST_PER_XP` as the key efficiency metric.
-
-5. **Approve in Order**:
+3. **Approve in Order**:
    - First: Sales (to generate liquidity).
    - Second: Signings (using generated liquidity).
 
@@ -128,64 +106,34 @@ Current Date/Time: {current_time}
 
 
 ---
-## 📄 OUTPUT FORMAT (Executive Order)
+## 📄 OUTPUT FORMAT (JSON ESTRÍCTO)
 
-### 🏛️ EXECUTIVE SUMMARY
-Brief assessment of the current situation and overall strategy.
-
-### ✅ APPROVED OPERATIONS
-| # | Operation | Player | Amount | Reason |
-|---|-----------|--------|--------|--------|
-| 1 | SELL / BUY / CLAUSE | Name | €X | Strategic justification |
-
-### ❌ REJECTED OPERATIONS
-| Operation | Player | Reason for Rejection |
-|-----------|--------|---------------------|
-| ... | ... | ... |
-
-### 💰 FINANCIAL PROJECTION
-```
-Current Balance:     €{current_balance:,.0f}
-+ Approved Sales:    €X
-- Approved Purchases: €X
-= Final Balance:     €X
-```
-
-### 🎯 FINAL ORDERS
-Numbered list of SPECIFIC ACTIONS to execute in Biwenger:
-1. [Action 1]
-2. [Action 2]
-...
-
-### 🤖 SYSTEM EXECUTION JSON
-You MUST end your response with a markdown JSON block containing the approved executable actions.
-> [!CAUTION]
-> **PLAYER ID RULE**: You MUST use the REAL `player_id` from the MY SQUAD ROSTER table above.
-> NEVER invent IDs. If you don't have the real ID for an action, DO NOT include it in the JSON.
-> **SALES RULE**: You can ONLY sell players from the MY SQUAD ROSTER. Any player not in that list is NOT yours.
-> **DO NOT INCLUDE COMMENTS** (like // ...) inside the JSON block. It must be valid, pure JSON.
-> **MARKET LIMIT**: You can only have a maximum of **5 players** for sale at the same time. If you already have players for sale, your choices must respect this limit.
-> The JSON will be executed automatically. Include ONLY lineup, voluntary sales, and normal bids.
-
-> [!WARNING]
-> **LINEUP ORDER IS CRITICAL**: The `player_ids` array MUST follow this exact positional order:
-> 1. First: 1 GK
-> 2. Then: DFs (as many as the formation's first number, e.g. 3 for "3-4-3")
-> 3. Then: MFs (as many as the formation's second number, e.g. 4 for "3-4-3")
-> 4. Then: FWs (as many as the formation's third number, e.g. 3 for "3-4-3")
-> Total must be exactly 11 players. Wrong order = API rejection.
-> DO NOT INCLUDE CLAUSE PURCHASES (clausulazos) IN THIS JSON. Clausulazos must ONLY be suggested in the text report above.
+Debes responder ÚNICAMENTE con un objeto JSON estricto que contenga los nodos requeridos, sin texto de acompañamiento ni bloques Markdown. El formato exacto debe ser:
 
 ```json
 {{
-  "lineup": {{"formation": "3-4-3", "player_ids": [GK_ID, DF_ID, DF_ID, DF_ID, MF_ID, MF_ID, MF_ID, MF_ID, FW_ID, FW_ID, FW_ID]}},
-  "sales": [{{"player_id": REAL_ID, "price": 500000}}],
-  "bids": [{{"player_id": REAL_ID, "amount": 1000000, "to_user_id": null}}]
+  "justificacion_ceo": "Breve explicación de las operaciones aprobadas y del saldo resultante.",
+  "lineup": {{"formation": "3-4-3", "player_ids": [11, 22, 33, 44, 55, 66, 77, 88, 99, 101, 102]}},
+  "sales": [
+    {{"player_id": 123, "price": 500000}}
+  ],
+  "bids": [
+    {{"player_id": 456, "amount": 1000000, "to_user_id": null}}
+  ]
 }}
 ```
-If no actions are approved, return empty arrays:
+
+> [!CAUTION]
+> **PLAYER ID RULE**: Tienes que usar el `player_id` REAL que viene en los JSONs anteriores o en tu tabla MY SQUAD ROSTER. NUNCA te inventes IDs.
+> **BIDS RULE**: Si apruebas una compra del SD, DEBE ir en el array `"bids"`.
+> **SALES RULE**: Si apruebas una venta del SD, DEBE ir en el array `"sales"`.
+> **LINEUP RULE**: Utiliza la alineación que te propuso el Coach en su JSON y ponla en `"lineup"`. El array `player_ids` debe tener **exactamente 11 jugadores** y en el orden correcto (1 GK, luego DF, luego MF, luego FW).
+> No incluyas comentarios `//` dentro del JSON.
+
+Si no hay operaciones aprobadas, devuelve:
 ```json
 {{
+  "justificacion_ceo": "Mantenemos el equipo como está.",
   "lineup": {{"formation": "3-4-3", "player_ids": []}},
   "sales": [],
   "bids": []

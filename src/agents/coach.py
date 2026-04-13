@@ -151,12 +151,14 @@ class Coach:
             squad_summary=squad_summary,
         )
         
-        # Generate Report
-        report = self.llm.generate_content(prompt, system_prompt=COACH_SYSTEM_ROLE)
+        from src.utils.json_helper import extract_json_from_llm
         
-        if report:
-            print("📝 Coach Report Generated")
-            return report
+        # Generate Report
+        response_text = self.llm.generate_content(prompt, system_prompt=COACH_SYSTEM_ROLE)
+        
+        if response_text:
+            print("📝 Coach JSON Generated")
+            return extract_json_from_llm(response_text)
         else:
-            return "Error generating Coach Report."
+            return {"error": "Error generating Coach Report."}
 
