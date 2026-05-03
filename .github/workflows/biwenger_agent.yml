@@ -1,8 +1,8 @@
 name: Biwenger Agent Workflow
 
 on:
-  repository_dispatch:
-    types: [external_trigger] # This allows cron-job.org to trigger it
+#  repository_dispatch:
+#    types: [external_trigger] # This allows cron-job.org to trigger it
   workflow_dispatch:          # Still allowing manual trigger from UI
 
 jobs:
