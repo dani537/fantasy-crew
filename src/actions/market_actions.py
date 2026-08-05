@@ -47,6 +47,20 @@ class MarketActions:
             print(f"❌ Failed to accept offer. Status: {response.status_code}, Response: {response.text}")
             return False
 
+    def cancel_offer(self, offer_id: int) -> bool:
+        """
+        Cancels one of our own pending outgoing offers/bids.
+        """
+        url = f"{self.base_url}/offers/{offer_id}"
+        response = self.session.delete(url)
+
+        if response.status_code in [200, 204]:
+            print(f"✅ Offer {offer_id} cancelled successfully.")
+            return True
+        else:
+            print(f"❌ Failed to cancel offer {offer_id}. Status: {response.status_code}, Response: {response.text}")
+            return False
+
     def place_player_on_market(self, player_id: int, price: int) -> bool:
         """
         Puts one of your own players on the market for an initial selling price.
@@ -64,4 +78,18 @@ class MarketActions:
             return True
         else:
             print(f"❌ Failed to place player on market. Status: {response.status_code}, Response: {response.text}")
+            return False
+
+    def remove_player_from_market(self, player_id: int) -> bool:
+        """
+        Removes one of your own players from the transfer market (cancels sale).
+        """
+        url = f"{self.base_url}/market?player={player_id}"
+        response = self.session.delete(url)
+        
+        if response.status_code in [200, 204]:
+            print(f"✅ Player {player_id} removed from the market successfully.")
+            return True
+        else:
+            print(f"❌ Failed to remove player {player_id} from market. Status: {response.status_code}, Response: {response.text}")
             return False

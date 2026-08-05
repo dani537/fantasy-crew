@@ -46,7 +46,7 @@ Workflow:
 """
 
 from src.llm_endpoints.deepseek import DeepseekClient
-from src.data_extraction.pipeline import print_step
+from src.data_extraction.transformers import print_step
 import pandas as pd
 import os
 from datetime import datetime, timedelta
@@ -93,8 +93,8 @@ class SportingDirector:
         Returns a tuple (deadline_str, is_open: bool).
         """
         try:
-            if os.path.exists('./data/next_match.csv'):
-                df_next = pd.read_csv('./data/next_match.csv')
+            if os.path.exists('./data/next_jornada.csv'):
+                df_next = pd.read_csv('./data/next_jornada.csv')
                 if not df_next.empty:
                     # Get the earliest match date
                     first_match_date_str = df_next['NEXT_MATCH_FECHA'].iloc[0]
@@ -143,6 +143,19 @@ class SportingDirector:
         # 1. Financial Context
         current_balance = self.get_budget_info()
         print(f"   💰 Current Balance: €{current_balance:,.0f}")
+
+        # Biwenger rule: max bid = balance - sum(our pending bids). Compute the
+        # effective budget so we never propose bids the API would reject.
+        committed_bids = 0.0
+        if 'MARKET_OFFER_ID' in df_master.columns and 'MARKET_OFFER_AMOUNT' in df_master.columns:
+            df_off = df_master[df_master['MARKET_OFFER_ID'].notna()]
+            if not df_off.empty:
+                if 'MARKET_OFFER_FROM_NAME' in df_off.columns:
+                    df_off = df_off[df_off['MARKET_OFFER_FROM_NAME'] == my_team_name]
+                committed_bids = float(pd.to_numeric(df_off['MARKET_OFFER_AMOUNT'], errors='coerce').fillna(0).sum())
+        effective_budget = max(0.0, current_balance - committed_bids)
+        if committed_bids > 0:
+            print(f"   💳 Committed in pending bids: €{committed_bids:,.0f} → Effective budget: €{effective_budget:,.0f}")
         
         # 2. Clause Deadline
         clause_deadline, clause_window_open = self.get_clause_deadline()
@@ -154,44 +167,54 @@ class SportingDirector:
         # ==========================================================================
         
         # --- A. MARKET (Free Agents) ---
-        market_cols = ['PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 
-                       'AVG_POINTS', 'MARKET_SALE_PRICE', 'FINAL_SCORE', 
-                       'COST_PER_XP', 'COST_PER_POINT', 'COST_PER_MOMENTUM_POINT']
+        market_cols = [
+            'PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 
+            'PLAYER_STATUS', 'COMUNIATE_STARTER', 'PLAYER_PRICE_INCREMENT', 
+            'PLAYER_PRICE', 'MARKET_SALE_PRICE', 'MARKET_SALE_USER_NAME',
+            'AVG_POINTS', 'EXPECTED_POINTS', 'COST_PER_XP',
+            'TEAM_IS_HOME', 'ODDS_1', 'ODDS_2', 'MOMENTUM_TREND'
+        ]
         existing_market_cols = [c for c in market_cols if c in df_master.columns]
         
+        # Filter free agents: on market today AND NOT INJURED
         market_players = df_master[df_master['MARKET_SALE_PRICE'] > 0].copy()
-        if not market_players.empty and 'FINAL_SCORE' in market_players.columns:
-            # Sort by Value Efficiency (Cost per xP) instead of Score
-            if 'COST_PER_XP' in market_players.columns:
-                 market_players = market_players.sort_values(by='COST_PER_XP', ascending=True).head(15)
-            else:
-                 market_players = market_players.sort_values(by='FINAL_SCORE', ascending=False).head(15)
+        if 'PLAYER_STATUS' in market_players.columns:
+            # Filter out injured players for immediate market bids
+            market_players = market_players[market_players['PLAYER_STATUS'] != 'injured']
+
+        if not market_players.empty:
+            if 'PLAYER_PRICE' in market_players.columns:
+                 market_players = market_players.sort_values(by='PLAYER_PRICE', ascending=False).head(20)
             market_summary = market_players[existing_market_cols].to_markdown(index=False)
         else:
-            market_summary = "No free agents on the market."
+            market_summary = "No free agents available on market."
         
         # --- B. CLAUSE TARGETS (Other teams' players with clauses) ---
-        clause_cols = ['PLAYER_ID', 'PLAYER_NAME', 'TEAM_NAME', 'BIWPLAYER_TEAM_NAME',
-                       'BIWPLAYER_CLAUSE', 'COST_PER_XP', 'COST_PER_MOMENTUM_POINT']
+        clause_cols = [
+            'PLAYER_ID', 'PLAYER_NAME', 'TEAM_NAME', 'BIWPLAYER_TEAM_NAME',
+            'PLAYER_STATUS', 'COMUNIATE_STARTER', 'BIWPLAYER_CLAUSE', 'PLAYER_PRICE_INCREMENT'
+        ]
         existing_clause_cols = [c for c in clause_cols if c in df_master.columns]
         
         clause_summary = "No clause opportunities or clause window is closed."
         if clause_window_open and 'BIWPLAYER_CLAUSE' in df_master.columns:
-            # Filter: Has clause, NOT my team, and clause > 0
             clause_targets = df_master[
                 (df_master['BIWPLAYER_CLAUSE'] > 0) & 
                 (df_master['BIWPLAYER_TEAM_NAME'] != my_team_name) &
                 (df_master['BIWPLAYER_TEAM_NAME'].notna())
             ].copy()
+            if 'PLAYER_STATUS' in clause_targets.columns:
+                clause_targets = clause_targets[clause_targets['PLAYER_STATUS'] != 'injured']
             
-            # Sort by lowest Cost/xP (Moneyball efficiency)
-            if not clause_targets.empty and 'COST_PER_XP' in clause_targets.columns:
-                clause_targets = clause_targets.sort_values(by='COST_PER_XP', ascending=True).head(15)
-                clause_summary = clause_targets[existing_clause_cols].to_markdown(index=False)
+            if not clause_targets.empty:
+                clause_summary = clause_targets.head(15)[existing_clause_cols].to_markdown(index=False)
         
         # --- C. MY SQUAD (For Sales) ---
-        squad_cols = ['PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 'EXPECTED_POINTS', 
-                      'PLAYER_PRICE', 'MOMENTUM_TREND']
+        squad_cols = [
+            'PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 
+            'PLAYER_STATUS', 'COMUNIATE_STARTER', 'PLAYER_PRICE', 
+            'PLAYER_PRICE_INCREMENT', 'AVG_POINTS'
+        ]
         existing_squad_cols = [c for c in squad_cols if c in df_master.columns]
         
         my_squad = df_master[df_master['BIWPLAYER_TEAM_NAME'] == my_team_name].copy()
@@ -200,6 +223,23 @@ class SportingDirector:
         else:
             my_squad_summary = "Could not load squad data."
 
+        # --- D. OUR PENDING OUTGOING BIDS (review & cancel if they stopped making sense) ---
+        pending_bids_summary = "No pending outgoing bids."
+        offer_cols = [
+            'MARKET_OFFER_ID', 'PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION',
+            'PLAYER_STATUS', 'MARKET_OFFER_AMOUNT', 'MARKET_OFFER_UNTIL', 'MARKET_OFFER_FROM_NAME'
+        ]
+        existing_offer_cols = [c for c in offer_cols if c in df_master.columns]
+        if 'MARKET_OFFER_ID' in df_master.columns:
+            df_offers = df_master[df_master['MARKET_OFFER_ID'].notna()].copy()
+            if not df_offers.empty:
+                if 'MARKET_OFFER_FROM_NAME' in df_offers.columns:
+                    own = df_offers[df_offers['MARKET_OFFER_FROM_NAME'] == my_team_name]
+                else:
+                    own = df_offers
+                if not own.empty:
+                    pending_bids_summary = own[existing_offer_cols].to_markdown(index=False)
+
         # ==========================================================================
         # 4. CONSTRUCT THE PROMPT
         # ==========================================================================
@@ -207,15 +247,35 @@ class SportingDirector:
         
         active_round_info = self.get_active_round_info()
         season_context_str = f"⚠️ SEASON CONTEXT: {active_round_info}\n" if active_round_info else ""
+        if committed_bids > 0:
+            season_context_str += (
+                f"💳 We already have €{committed_bids:,.0f} committed in pending bids. "
+                f"The usable budget for NEW bids is €{effective_budget:,.0f} (Biwenger rejects anything above).\n"
+            )
+        recent_bids_summary = "No recent rival bids recorded."
+        if os.path.exists('./data/board_bids.csv'):
+            try:
+                df_bids = pd.read_csv('./data/board_bids.csv')
+                if not df_bids.empty:
+                    recent_bids_summary = df_bids.head(10).to_markdown(index=False)
+            except Exception:
+                pass
 
         from src.prompts.sporting_director_prompts import get_sd_proposal_prompt
         from src.prompts.system_roles import SPORTING_DIRECTOR_SYSTEM_ROLE
+        from src.strategy.guardrails import compute_squad_needs
+
+        needs = compute_squad_needs(my_squad)
+        squad_needs_summary = (
+            f"Squad size: {needs['squad_size']} players ({needs['fit_players']} fit). "
+            f"By line: {needs['counts']}. {needs['summary']}"
+        )
 
         import json
         prompt = get_sd_proposal_prompt(
             my_team_name=my_team_name,
             current_time=current_time,
-            current_balance=current_balance,
+            current_balance=effective_budget,
             clause_status=clause_status,
             clause_deadline=clause_deadline,
             season_context_str=season_context_str,
@@ -223,6 +283,9 @@ class SportingDirector:
             market_summary=market_summary,
             clause_summary=clause_summary,
             my_squad_summary=my_squad_summary,
+            squad_needs_summary=squad_needs_summary,
+            pending_bids_summary=pending_bids_summary,
+            recent_bids_summary=recent_bids_summary,
         )
         
         from src.utils.json_helper import extract_json_from_llm

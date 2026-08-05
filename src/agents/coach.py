@@ -44,7 +44,7 @@ Information Used:
 """
 
 from src.llm_endpoints.deepseek import DeepseekClient
-from src.data_extraction.pipeline import print_step
+from src.data_extraction.transformers import print_step
 import pandas as pd
 import os
 
@@ -85,7 +85,7 @@ class Coach:
         my_team_name = self.get_my_team_name()
         if not my_team_name:
             print("❌ Coach Error: 'team_name' not found in ./data/user_info.csv. Cannot proceed.")
-            return "Could not analyze squad: Team name missing in user_info.csv."
+            return {"error": "Could not analyze squad: Team name missing in user_info.csv."}
 
         print(f"   ℹ️ Analyzing squad for team: '{my_team_name}'")
 
@@ -98,7 +98,7 @@ class Coach:
         
         if my_squad.empty:
             print(f"⚠️ Coach Warning: No players found for team '{my_team_name}'.")
-            return f"Could not analyze squad: Team '{my_team_name}' not found."
+            return {"error": f"Could not analyze squad: Team '{my_team_name}' not found."}
 
         # 3. Load Context (Date, Next Match, Jornada)
         from datetime import datetime
@@ -106,9 +106,9 @@ class Coach:
         jornada_info = "Unknown Jornada"
         matches_summary = "No match data available."
         
-        if os.path.exists('./data/next_match.csv'):
+        if os.path.exists('./data/next_jornada.csv'):
             try:
-                df_next = pd.read_csv('./data/next_match.csv')
+                df_next = pd.read_csv('./data/next_jornada.csv')
                 if not df_next.empty:
                     # Get general Jornada info from the first match
                     first_match = df_next.iloc[0]
@@ -121,12 +121,12 @@ class Coach:
                     existing_match_cols = [c for c in match_cols if c in df_next.columns]
                     matches_summary = df_next[existing_match_cols].to_markdown(index=False)
             except Exception as e:
-                print(f"⚠️ Warning reading next_match.csv: {e}")
+                print(f"⚠️ Warning reading next_jornada.csv: {e}")
 
         # 4. Preparing Squad Data for Prompt
         # We need specific columns. If some are missing in df_master, handle gracefully.
         relevant_cols = [
-            'PLAYER_NAME', 'TEAM_NAME', 'TEAM_IS_HOME', 'PLAYER_POSITION', 'PLAYER_ALT_POSITIONS', 
+            'PLAYER_ID', 'PLAYER_NAME', 'TEAM_NAME', 'TEAM_IS_HOME', 'PLAYER_POSITION', 'PLAYER_ALT_POSITIONS', 
             'PLAYER_STATUS', 'COMUNIATE_STARTER', 
             'EXPECTED_POINTS', 'AVG_POINTS_MOMENTUM', 'MOMENTUM_TREND',
             'PLAYER_FITNESS', 'AVG_POINTS', 
@@ -142,6 +142,13 @@ class Coach:
         # 5. Construct the Prompt (loaded from src/prompts/)
         from src.prompts.coach_prompts import get_coach_analysis_prompt
         from src.prompts.system_roles import COACH_SYSTEM_ROLE
+        from src.strategy.guardrails import compute_squad_needs
+
+        needs = compute_squad_needs(my_squad)
+        squad_needs_summary = (
+            f"Squad size: {needs['squad_size']} players ({needs['fit_players']} fit). "
+            f"By line: {needs['counts']}. {needs['summary']}"
+        )
 
         prompt = get_coach_analysis_prompt(
             current_time=current_time,
@@ -149,6 +156,7 @@ class Coach:
             my_team_name=my_team_name,
             matches_summary=matches_summary,
             squad_summary=squad_summary,
+            squad_needs_summary=squad_needs_summary,
         )
         
         from src.utils.json_helper import extract_json_from_llm

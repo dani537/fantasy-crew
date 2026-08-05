@@ -5,6 +5,7 @@ import time
 import random
 import os
 import feedparser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
@@ -19,9 +20,13 @@ class ComuniateData:
 
     def __init__(self, session=None):
         """
-        Inicializa la clase con una sesión de requests opcional.
+        Inicializa la clase con una sesión de requests limpia.
+
+        SECURITY: we ALWAYS use a dedicated, brand-new session for external
+        sites so that the Biwenger Authorization token is never leaked to
+        third-party domains.
         """
-        self.session = session or requests.Session()
+        self.session = requests.Session()
         self.id_jornada = None
         self.teams_map = {} # {id_equipo: nombre_equipo}
 
@@ -239,40 +244,30 @@ class ComuniateData:
         if max_teams:
             teams_to_process = teams_to_process[:max_teams]
             
-        print(f"🚀 Iniciando extracción masiva para {len(teams_to_process)} equipos...")
+        unprocessed_teams = [(tid, tname) for tid, tname in teams_to_process if tid not in processed_teams]
+        print(f"🚀 Iniciando extracción masiva concurrente para {len(unprocessed_teams)} equipos...")
         
-        for i, (team_id, team_name) in enumerate(teams_to_process):
-            if team_id in processed_teams:
-                print(f"⏭️ Saltando {team_name} (ya procesado).")
-                continue
-
-            print(f"📦 [{i+1}/{len(teams_to_process)}] Extrayendo: {team_name}...")
-            
+        def fetch_team_lineup(item):
+            team_id, team_name = item
             html = self.get_probable_lineup(id_jornada=jornada, id_equipo=team_id)
             if html:
                 df = self.parse_lineup_html(html)
                 if df is not None and not df.empty:
                     df['equipo'] = team_name
                     df['id_equipo_comuniate'] = team_id
+                    return df
+            return None
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_team = {executor.submit(fetch_team_lineup, item): item for item in unprocessed_teams}
+            for future in as_completed(future_to_team):
+                df = future.result()
+                if df is not None:
                     all_players.append(df)
-                    
-                    # Guardado incremental
                     if output_file:
-                        # Escribir header solo si el archivo no existe
                         header = not os.path.exists(output_file)
                         df.to_csv(output_file, mode='a', header=header, index=False)
-                        print(f"💾 Guardado incremental en {output_file}")
-                else:
-                    print(f"⚠️ No se pudo parsear la alineación de {team_name}.")
-            else:
-                print(f"❌ Error al obtener HTML de {team_name}.")
-            
-            if i < len(teams_to_process) - 1:
-                wait = random.uniform(1, 2)
-                print(f"💤 Esperando {wait:.2f} segundos...")
-                time.sleep(wait)
-        
-        # Si se usó archivo, recargarlo completo para devolver el total real
+
         if output_file and os.path.exists(output_file):
             return pd.read_csv(output_file)
             
@@ -317,7 +312,8 @@ class JornadaPerfectaData:
     FEED_URL = "https://www.jornadaperfecta.com/feed/"
 
     def __init__(self, session=None):
-        self.session = session or requests.Session()
+        # Dedicated clean session: never leak the Biwenger token to third parties.
+        self.session = requests.Session()
 
     def fetch_news(self) -> pd.DataFrame:
         """
@@ -417,7 +413,8 @@ class EuroClubIndexData:
     REFERER_URL = "https://www.euroclubindex.com/match-odds/"
 
     def __init__(self, session=None):
-        self.session = session or requests.Session()
+        # Dedicated clean session: never leak the Biwenger token to third parties.
+        self.session = requests.Session()
 
     def get_match_odds(self, league_id: int = 67) -> pd.DataFrame:
         """

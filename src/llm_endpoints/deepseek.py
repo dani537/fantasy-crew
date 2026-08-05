@@ -12,7 +12,7 @@ class DeepseekClient:
             base_url="https://api.deepseek.com"
         )
 
-    def generate_content(self, prompt: str, system_prompt: str = "You are a helpful assistant", model: str = "deepseek-reasoner"):
+    def generate_content(self, prompt: str, system_prompt: str = "You are a helpful assistant", model: str = "deepseek-chat"):
         try:
             response = self.client.chat.completions.create(
                 model=model,

@@ -1,101 +1,110 @@
 """
-Fantasy Crew - Multi-Agent System
-==================================
+Fantasy Crew - Multi-Agent System (Simplified Architecture)
+===========================================================
 
-Entry point for running the Fantasy Crew using LangGraph orchestration.
+Entry point for running the Fantasy Crew using the streamlined LangGraph orchestration.
+
+Workflow (action mode):
+  1. DataExtraction (Deterministic Python Pipeline)
+  2. Coach (Tactical Analysis)
+  3. SportingDirector (Executive Decisor)
+  4. ExecuteActions (Biwenger API)
+  5. GenerateReports (JSON & Markdown)
+  6. EmailReport (HTML Notification)
+
+Briefing mode: read-only extraction + morning newspaper email (no actions, 1 LLM call).
 
 Usage:
-    python main.py
+    python main.py                    # action mode (any time of day)
+    python main.py --mode auction     # auction moment (auto-detects the ~7:00 reset,
+                                      # acts if there is margin, then waits and cleans up)
+    python main.py --mode briefing    # morning briefing (post-reset, read-only + cleanup)
 """
 
+import sys
 from datetime import datetime
 from src.graph import fantasy_crew_graph
+from src.config import GeneralSettings
 
 
-def run_fantasy_crew_langgraph():
+def run_fantasy_crew():
     """
-    Runs the Fantasy Crew multi-agent system using LangGraph.
+    Runs the streamlined Fantasy Crew multi-agent workflow.
     """
-    print("=" * 60)
-    print("🚀 FANTASY CREW - LangGraph Multi-Agent System")
+    print("=" * 65)
+    print("🚀 BIWENGER AGENT - Streamlined Multi-Agent Workflow")
     print(f"📅 Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("=" * 60)
+    if GeneralSettings.DRY_RUN:
+        print("🧪 DRY-RUN MODE: no write operations will be sent to Biwenger")
+    print("=" * 65)
     
     # Initial state
     initial_state = {
         "df_master": None,
         "coach_report": {},
-        "sd_proposals": {},
-        "president_decision": {},
+        "sd_decisions": {},
         "approved_actions": None,
         "execution_results": None,
-        "iteration_count": 0,
-        "max_iterations": 2,
-        "decision_status": "pending",
+        "final_report": None,
+        "email_sent": False,
         "error": None
     }
     
-    # Execute the graph
-    print("\n🔄 Executing LangGraph workflow...\n")
+    print("\n🔄 Executing agent workflow...\n")
     
     try:
-        # Stream execution to see progress
         for step in fantasy_crew_graph.stream(initial_state):
-            # Print which node is executing
             for node_name, node_output in step.items():
-                if node_name == "data_analyst":
-                    print("🚀 Node: DataAnalyst - Extracting and processing data...")
-                    if node_output.get("error"):
-                        print(f"   ❌ Error: {node_output['error']}")
-                    else:
-                        rows = len(node_output.get("df_master", [])) if node_output.get("df_master") is not None else 0
-                        print(f"   ✅ df_master generated with {rows} rows")
+                if node_name == "data_extraction":
+                    rows = len(node_output.get("df_master", [])) if node_output.get("df_master") is not None else 0
+                    print(f"   📊 [DataExtraction] Master DataFrame generated with {rows} players.")
                 
                 elif node_name == "coach":
-                    print("🚀 Node: Coach - Analyzing squad...")
-                    if node_output.get("error"):
-                        print(f"   ❌ Error: {node_output['error']}")
-                    else:
-                        print("   📝 Coach Report Generated")
+                    print("   📋 [Coach] Tactical analysis and squad recommendations complete.")
                 
                 elif node_name == "sporting_director":
-                    print("🚀 Node: SportingDirector - Scanning market...")
-                    if node_output.get("error"):
-                        print(f"   ❌ Error: {node_output['error']}")
-                    else:
-                        print("   💼 Transfer Proposals Generated")
-                
-                elif node_name == "president":
-                    print("🚀 Node: President - Making decision...")
-                    status = node_output.get("decision_status", "unknown")
-                    iteration = node_output.get("iteration_count", 0)
-                    print(f"   🏛️ Decision: {status.upper()} (Iteration {iteration})")
+                    print("   💼 [SportingDirector] Executive decisions generated (Lineup, Bids, Sales).")
 
                 elif node_name == "execute_actions":
-                    print("🚀 Node: Execute Actions - Running API operations...")
                     results = node_output.get("execution_results", [])
+                    print(f"   ⚡ [ExecuteActions] Executed {len(results)} operations in Biwenger API.")
                     for res in results:
-                        print(f"   ⚙️ {res}")
+                        print(f"      • {res}")
                 
                 elif node_name == "generate_reports":
-                    print("🚀 Node: GenerateReports - Saving reports...")
+                    print("   📄 [GenerateReports] Final reports generated in ./reports/")
+
+                elif node_name == "send_email":
+                    sent = node_output.get("email_sent", False)
+                    print(f"   📧 [EmailReport] Report email sent: {sent}")
         
-        print("\n" + "=" * 60)
-        print("✅ FANTASY CREW LANGGRAPH RUN COMPLETE!")
-        print("=" * 60)
+        print("\n" + "=" * 65)
+        print("✅ BIWENGER AGENT RUN COMPLETE!")
+        print("=" * 65)
         print("📂 Reports saved in ./reports/:")
-        print("   • 00_final_report.md (consolidated)")
-        print("   • 01_coach_report.json")
-        print("   • 02_sporting_director_proposals.json")
-        print("   • 03_president_decision.json")
-        print("=" * 60)
+        print("   • 00_final_report.md (Consolidated Report)")
+        print("   • 01_coach_report.json (Tactical Analysis)")
+        print("   • 02_sporting_director_decisions.json (Executive Operations)")
+        print("=" * 65)
         
     except Exception as e:
         print(f"\n❌ Fatal Error: {e}")
         import traceback
         traceback.print_exc()
-        return None
 
 
 if __name__ == "__main__":
-    run_fantasy_crew_langgraph()
+    mode = "action"
+    if "--mode" in sys.argv:
+        idx = sys.argv.index("--mode")
+        if idx + 1 < len(sys.argv):
+            mode = sys.argv[idx + 1].strip().lower()
+
+    if mode == "briefing":
+        from src.briefing import run_briefing
+        run_briefing()
+    elif mode == "auction":
+        from src.auction import run_auction
+        run_auction()
+    else:
+        run_fantasy_crew()

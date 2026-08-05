@@ -11,25 +11,19 @@ import pandas as pd
 
 class AgentState(TypedDict):
     """
-    Shared state for the Fantasy Crew agent workflow.
-    
-    This state is passed between all nodes in the graph and accumulates
-    the results from each agent's analysis.
+    Shared state for the simplified Fantasy Crew agent workflow.
     """
     # Data
     df_master: Optional[pd.DataFrame]
     
     # Agent outputs
     coach_report: dict
-    sd_proposals: dict
-    president_decision: dict
+    sd_decisions: dict
     approved_actions: Optional[dict]
     execution_results: Optional[list]
-    
-    # Control flow
-    iteration_count: int
-    max_iterations: int
-    decision_status: str  # "approved", "rejected", "pending"
+    final_report: Optional[str]
+    email_sent: Optional[bool]
     
     # Metadata
     error: Optional[str]
+

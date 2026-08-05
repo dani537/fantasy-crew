@@ -3,6 +3,7 @@ import pandas as pd
 import datetime
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -293,7 +294,14 @@ class UserLeagueData:
              # Estructura basada en el JSON proporcionado
              # "id": 509423665, "amount": 1512400, "status": "waiting", "from": null (mercado), "requestedPlayers": [17148]
              offer_from = offer.get('from')
-             
+
+             # requestedPlayers items can be plain ints or dicts {'id': ..., ...}
+             requested_id = None
+             req_players = offer.get('requestedPlayers') or []
+             if req_players:
+                 first = req_players[0]
+                 requested_id = first.get('id') if isinstance(first, dict) else first
+
              data_list.append({
                  'offer_id': offer.get('id'),
                  'amount': offer.get('amount'),
@@ -303,7 +311,7 @@ class UserLeagueData:
                  'type': offer.get('type'),
                  'from_id': offer_from.get('id') if offer_from else None,
                  'from_name': offer_from.get('name') if offer_from else 'Mercado', # Si 'from' es null, es oferta del Mercado
-                 'requested_player_id': offer.get('requestedPlayers')[0] if offer.get('requestedPlayers') else None
+                 'requested_player_id': requested_id
              })
 
         self.df_market_offers = pd.DataFrame(data_list)
@@ -352,32 +360,38 @@ class UserLeagueData:
         return self.df_league_table
 
     def all_teams_details(self, session) -> dict:
-        """Extrae los datos de todos los equipos de la liga de forma individual"""
+        """Extrae los datos de todos los equipos de la liga de forma concurrente para mayor velocidad"""
         if not self.league_info:
             self._league_table_data(session)
         
         all_details = {}
-        for user in self.league_info:
+        
+        def fetch_user_detail(user):
             user_id = user.get('id')
-            
-            # Pausa aleatoria para simular comportamiento humano (entre 1 y 3 segundos)
-            time.sleep(random.uniform(1, 3))
-            
-            # URL detallada con filtros específicos para obtener toda la información relevante
             url = f"https://biwenger.as.com/api/v2/user/{user_id}?fields=*,account(id),players(id,owner),lineups(round,points,count,position),league(id,name,competition,type,mode,marketMode,scoreID),market,seasons,offers,lastPositions"
-            
             headers = {
                 'authorization': "Bearer " + self.token,
                 'x-league': str(self.league_id),
                 'x-user': str(self.user_id),
                 'referer': "https://biwenger.as.com/league"
             }
-            response = session.get(url, headers=headers)
-            if response.status_code == 200:
-                all_details[user_id] = response.json().get('data', {})
-                print(f"Datos obtenidos para el usuario {user_id}")
-            else:
-                print(f"Error al obtener datos del usuario {user_id}: {response.status_code}")
+            try:
+                response = session.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    return user_id, response.json().get('data', {})
+                else:
+                    print(f"⚠️ Error al obtener datos del usuario {user_id}: {response.status_code}")
+            except Exception as e:
+                print(f"⚠️ Excepción al obtener datos del usuario {user_id}: {e}")
+            return user_id, None
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_user = {executor.submit(fetch_user_detail, user): user for user in self.league_info}
+            for future in as_completed(future_to_user):
+                user_id, data = future.result()
+                if data:
+                    all_details[user_id] = data
+                    print(f"✅ Datos obtenidos para el usuario {user_id}")
         
         return all_details
 
@@ -409,9 +423,129 @@ class UserLeagueData:
         self.df_league_players = pd.DataFrame(players_list)
         return self.df_league_players
 
+    def league_board_info(self, session, limit: int = 100) -> dict:
+        """
+        Extrae el histórico del muro de la liga (/api/v2/league/{league_id}/board)
+        y lo procesa en:
+          - df_board_transfers: Compras, ventas y clausulazos realizados.
+          - df_board_bids: Registro de pujas no ganadoras de rivales.
+          - df_rival_financials: Resumen estimado de gasto e ingresos de cada manager.
+        """
+        url = f"https://biwenger.as.com/api/v2/league/{self.league_id}/board?limit={limit}"
+        extra_headers = {
+            'authorization': "Bearer " + self.token,
+            'x-league': str(self.league_id),
+            'x-user': str(self.user_id),
+            'referer': "https://biwenger.as.com/board"
+        }
+        try:
+            response = session.get(url, headers=extra_headers)
+            if response.status_code != 200:
+                print(f"⚠️ Error obteniendo el muro de la liga: {response.status_code}")
+                return {'transfers': pd.DataFrame(), 'bids': pd.DataFrame(), 'financials': pd.DataFrame()}
+            
+            raw_items = response.json().get('data', [])
+            transfers_list = []
+            bids_list = []
+            financials_map = {}
+
+            for item in raw_items:
+                item_type = item.get('type')
+                item_date = pd.to_datetime(item.get('date'), unit='s') if item.get('date') else None
+
+                if item_type == 'market':
+                    content = item.get('content', [])
+                    for entry in content:
+                        buyer = entry.get('to', {})
+                        buyer_id = buyer.get('id') if buyer else None
+                        buyer_name = buyer.get('name') if buyer else 'Desconocido'
+                        player_id = entry.get('player')
+                        amount = entry.get('amount', 0)
+
+                        transfers_list.append({
+                            'date': item_date,
+                            'type': 'market_buy',
+                            'player_id': player_id,
+                            'buyer_id': buyer_id,
+                            'buyer_name': buyer_name,
+                            'seller_id': None,
+                            'seller_name': 'Mercado',
+                            'amount': amount
+                        })
+
+                        if buyer_id:
+                            if buyer_id not in financials_map:
+                                financials_map[buyer_id] = {'user_name': buyer_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0}
+                            financials_map[buyer_id]['total_spent'] += amount
+                            financials_map[buyer_id]['bids_placed'] += 1
+
+                        bids = entry.get('bids', [])
+                        for bid in bids:
+                            user = bid.get('user', {})
+                            u_id = user.get('id') if user else None
+                            u_name = user.get('name') if user else 'Desconocido'
+                            bid_amount = bid.get('amount', 0)
+
+                            bids_list.append({
+                                'date': item_date,
+                                'player_id': player_id,
+                                'bidder_id': u_id,
+                                'bidder_name': u_name,
+                                'bid_amount': bid_amount,
+                                'winning_amount': amount,
+                                'won': False
+                            })
+
+                            if u_id:
+                                if u_id not in financials_map:
+                                    financials_map[u_id] = {'user_name': u_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0}
+                                financials_map[u_id]['bids_placed'] += 1
+
+                elif item_type == 'transfer':
+                    content = item.get('content', [])
+                    for entry in content:
+                        seller = entry.get('from', {})
+                        seller_id = seller.get('id') if seller else None
+                        seller_name = seller.get('name') if seller else 'Desconocido'
+                        player_id = entry.get('player')
+                        amount = entry.get('amount', 0)
+
+                        transfers_list.append({
+                            'date': item_date,
+                            'type': 'user_sale',
+                            'player_id': player_id,
+                            'buyer_id': None,
+                            'buyer_name': 'Mercado/Comprador',
+                            'seller_id': seller_id,
+                            'seller_name': seller_name,
+                            'amount': amount
+                        })
+
+                        if seller_id:
+                            if seller_id not in financials_map:
+                                financials_map[seller_id] = {'user_name': seller_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0}
+                            financials_map[seller_id]['total_income'] += amount
+
+            df_transfers = pd.DataFrame(transfers_list)
+            df_bids = pd.DataFrame(bids_list)
+            fin_rows = [{'user_id': k, **v, 'net_balance_change': v['total_income'] - v['total_spent']} for k, v in financials_map.items()]
+            df_financials = pd.DataFrame(fin_rows)
+
+            self.df_board_transfers = df_transfers
+            self.df_board_bids = df_bids
+            self.df_rival_financials = df_financials
+
+            return {'transfers': df_transfers, 'bids': df_bids, 'financials': df_financials}
+        except Exception as e:
+            print(f"⚠️ Excepción al extraer el muro de la liga: {e}")
+            self.df_board_transfers = pd.DataFrame()
+            self.df_board_bids = pd.DataFrame()
+            self.df_rival_financials = pd.DataFrame()
+            return {'transfers': pd.DataFrame(), 'bids': pd.DataFrame(), 'financials': pd.DataFrame()}
+
     def run(self, session):
         """
-        Ejecuta y devuelve todos los DataFrames generados por la clase, incluyendo la extracción pesada de detalles de equipos.
+        Ejecuta y devuelve todos los DataFrames generados por la clase, incluyendo el muro de noticias de la liga.
         """
         print("🎬 Obteniendo datos completos de la liga del usuario...")
         
@@ -439,7 +573,15 @@ class UserLeagueData:
              df_offers = pd.DataFrame()
              print("⚠️ No hay datos de ofertas en mercado.")
 
-        # 4. Jugadores de todos los equipos (Lento)
+        # 4. Muro de la liga (Transacciones y Pujas)
+        try:
+            print("⏳ Extraídos datos del muro de la liga (transacciones y pujas de rivales)...")
+            board_res = self.league_board_info(session)
+            print(f"✅ Board extracted: {len(board_res['transfers'])} transacciones, {len(board_res['bids'])} pujas perdedoras de rivales")
+        except Exception as e:
+            print(f"⚠️ Error al extraer el muro de la liga: {e}")
+
+        # 5. Jugadores de todos los equipos (Lento)
         try:
             print("⏳ Extrayendo detalles de todos los equipos (esto puede tardar)...")
             df_league_players = self.league_players_info(session)
@@ -452,5 +594,8 @@ class UserLeagueData:
             'league_table': df_league,
             'market_sales': df_sales,
             'market_offers': df_offers,
+            'board_transfers': getattr(self, 'df_board_transfers', pd.DataFrame()),
+            'board_bids': getattr(self, 'df_board_bids', pd.DataFrame()),
+            'rival_financials': getattr(self, 'df_rival_financials', pd.DataFrame()),
             'league_players': df_league_players
         }

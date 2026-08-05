@@ -1,144 +1,110 @@
 """
 Email Templates
 ===============
-Contains Jinja2 HTML templates for the Fantasy Crew reports.
+Newspaper-style Jinja2 HTML template for the Biwenger Agent reports.
+
+IMPORTANT: email clients (especially Gmail) strip <style> blocks and modern CSS,
+so everything here uses tables and inline styles only.
 """
 
 BASE_HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="es">
+<html lang="{{ lang }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            background-color: #f4f7f6;
-            margin: 0;
-            padding: 0;
-        }
-        .container {
-            max-width: 600px;
-            margin: 20px auto;
-            background: #ffffff;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-        }
-        .header {
-            background-color: #1a2a6c;
-            color: #ffffff;
-            padding: 30px 20px;
-            text-align: center;
-        }
-        .header h1 {
-            margin: 0;
-            font-size: 24px;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-        }
-        .content {
-            padding: 30px 20px;
-        }
-        .headline {
-            font-size: 22px;
-            font-weight: bold;
-            color: #1a2a6c;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #f2a900;
-            padding-bottom: 10px;
-        }
-        .section {
-            margin-bottom: 25px;
-        }
-        .section-title {
-            font-size: 18px;
-            font-weight: bold;
-            color: #b21f1f;
-            margin-bottom: 10px;
-            display: flex;
-            align-items: center;
-        }
-        .section-content {
-            background: #f9f9f9;
-            padding: 15px;
-            border-left: 4px solid #1a2a6c;
-            border-radius: 0 4px 4px 0;
-        }
-        .actions-box {
-            background-color: #eef2f3;
-            border: 1px dashed #1a2a6c;
-            padding: 15px;
-            border-radius: 6px;
-        }
-        .footer {
-            background-color: #1a2a6c;
-            color: #ffffff;
-            text-align: center;
-            padding: 20px;
-            font-size: 12px;
-        }
-        .badge {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 10px;
-            font-weight: bold;
-            text-transform: uppercase;
-            margin-right: 5px;
-        }
-        .badge-buy { background-color: #28a745; color: white; }
-        .badge-sell { background-color: #dc3545; color: white; }
-        .badge-lineup { background-color: #007bff; color: white; }
-        
-        ul { padding-left: 20px; margin: 0; }
-        li { margin-bottom: 8px; }
-        b, strong { color: #1a2a6c; }
-    </style>
 </head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🏆 FANTASY CREW</h1>
-            <p>Reporte de Análisis Multiagente</p>
-        </div>
-        
-        <div class="content">
-            <div class="headline">
-                {{ headline }}
-            </div>
-            
-            <p>{{ introduction }}</p>
-            
-            <div class="section">
-                <div class="section-title">📊 El Debate (Míster vs Broker)</div>
-                <div class="section-content">
-                    {{ debate_summary }}
-                </div>
-            </div>
-            
-            <div class="section">
-                <div class="section-title">🏛️ El Veredicto del Presidente</div>
-                <div class="section-content">
-                    {{ president_verdict }}
-                </div>
-            </div>
-            
-            <div class="section">
-                <div class="section-title">⚡ Acciones Ejecutadas</div>
-                <div class="actions-box">
-                    {{ actions_html }}
-                </div>
-            </div>
-        </div>
-        
-        <div class="footer">
-            <p>Generado automáticamente por tu equipo de agentes de Fantasy Crew</p>
-            <p>&copy; 2024 Biwenger Agent Manager</p>
-        </div>
-    </div>
+<body style="margin:0;padding:0;background-color:#ece7df;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#ece7df;">
+        <tr>
+            <td align="center" style="padding:20px 10px;">
+                <table role="presentation" width="620" cellpadding="0" cellspacing="0" style="background-color:#fdfbf7;border:1px solid #d8d2c4;">
+
+                    <!-- MASTHEAD -->
+                    <tr>
+                        <td align="center" style="padding:24px 20px 8px 20px;border-bottom:3px double #1a1a1a;">
+                            <div style="font-family:Georgia,'Times New Roman',serif;font-size:34px;font-weight:bold;color:#1a1a1a;letter-spacing:2px;">
+                                ⚽ {{ newspaper_name }}
+                            </div>
+                            <div style="font-family:Georgia,serif;font-size:12px;color:#6b655a;font-style:italic;padding-top:6px;">
+                                {{ edition_line }}
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- HEADLINE -->
+                    <tr>
+                        <td align="center" style="padding:22px 28px 6px 28px;">
+                            <div style="font-family:Georgia,'Times New Roman',serif;font-size:26px;font-weight:bold;color:#1a1a1a;line-height:1.25;">
+                                {{ headline }}
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align="center" style="padding:0 34px 18px 34px;border-bottom:1px solid #c9c2b2;">
+                            <div style="font-family:Georgia,serif;font-size:15px;color:#4a463e;font-style:italic;line-height:1.5;">
+                                {{ lede }}
+                            </div>
+                        </td>
+                    </tr>
+
+                    <!-- KEY FIGURES STRIP -->
+                    {% if stats_html %}
+                    <tr>
+                        <td style="padding:14px 28px;border-bottom:1px solid #c9c2b2;background-color:#f5f1e8;">
+                            <div style="font-family:Georgia,serif;font-size:13px;color:#1a1a1a;">
+                                {{ stats_html }}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endif %}
+
+                    <!-- SECTIONS -->
+                    {% for section in sections %}
+                    <tr>
+                        <td style="padding:18px 28px 4px 28px;">
+                            <div style="font-family:Georgia,serif;font-size:17px;font-weight:bold;color:#7a1f1f;border-bottom:2px solid #7a1f1f;padding-bottom:4px;text-transform:uppercase;letter-spacing:1px;">
+                                {{ section.title }}
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding:10px 28px 6px 28px;">
+                            <div style="font-family:Georgia,serif;font-size:14px;color:#2b2b2b;line-height:1.65;">
+                                {{ section.body_html }}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+
+                    <!-- ACTIONS BOX -->
+                    {% if actions_html %}
+                    <tr>
+                        <td style="padding:14px 28px 20px 28px;">
+                            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f1e8;border:1px dashed #7a1f1f;">
+                                <tr>
+                                    <td style="padding:14px 16px;font-family:Georgia,serif;font-size:13px;color:#2b2b2b;line-height:1.6;">
+                                        {{ actions_html }}
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                    {% endif %}
+
+                    <!-- FOOTER -->
+                    <tr>
+                        <td align="center" style="padding:14px 20px;background-color:#1a1a1a;">
+                            <div style="font-family:Georgia,serif;font-size:11px;color:#c9c2b2;">
+                                {{ footer_line }}
+                            </div>
+                        </td>
+                    </tr>
+
+                </table>
+            </td>
+        </tr>
+    </table>
 </body>
 </html>
 """
