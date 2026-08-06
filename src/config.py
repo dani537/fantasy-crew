@@ -30,6 +30,8 @@ class GeneralSettings:
     LANGUAGE = (os.getenv("LANGUAGE") or "es").strip().lower()
     # Priority: SCORE_TYPE env var > default (5: Media Picas AS + SofaScore)
     SCORE_TYPE = os.getenv("SCORE_TYPE") or DEFAULT_SCORE_TYPE
+    # DeepSeek LLM Model (default: deepseek-v4-flash)
+    DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL") or "deepseek-v4-flash"
     # When True, no write operation is sent to the Biwenger API (safe testing)
     DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
 

@@ -1,5 +1,5 @@
 from openai import OpenAI
-from src.config import Credentials
+from src.config import Credentials, GeneralSettings
 
 class DeepseekClient:
     def __init__(self):
@@ -12,7 +12,9 @@ class DeepseekClient:
             base_url="https://api.deepseek.com"
         )
 
-    def generate_content(self, prompt: str, system_prompt: str = "You are a helpful assistant", model: str = "deepseek-chat"):
+    def generate_content(self, prompt: str, system_prompt: str = "You are a helpful assistant", model: str = None):
+        if not model:
+            model = GeneralSettings.DEEPSEEK_MODEL
         try:
             response = self.client.chat.completions.create(
                 model=model,
@@ -24,5 +26,5 @@ class DeepseekClient:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Error generating content: {e}")
+            print(f"Error generating content with model {model}: {e}")
             return None
