@@ -117,8 +117,8 @@ Información extraída del muro `/api/v2/league/{id}/board?limit=100`:
 
 ### 7. 🏆 Consolidado y Feature Engineering: `_master.csv` (`df_master`)
 Es el DataFrame maestro resultante que combina todas las fuentes en 45 métricas clave:
-* **`EXPECTED_POINTS (xP)`**: Puntos esperados para la jornada activa. Calculado como:
-  $$\text{xP} = \text{AVG\_POINTS\_MOMENTUM} \times (\text{COMUNIATE\_STARTER} + 0.8 \times \text{COMUNIATE\_SUB})$$
+* **`EXPECTED_POINTS (xP)`**: Puntos esperados para la jornada activa. Calculado mediante una fórmula avanzada que combina rendimiento medio por split local/visitante, racha reciente (*Momentum*), probabilidad de minutos (titular/suplente en Comuniate), ajuste por cuotas de apuestas de victoria (`ODDS_1`/`ODDS_2`) y penalización por estado físico (`doubt` / lesionado):
+  $$\text{xP} = \text{Base\_Rating} \times (\text{COMUNIATE\_STARTER} + 0.75 \times \text{COMUNIATE\_SUB}) \times \text{Match\_Factor(Odds)} \times \text{Penalty(Doubt)}$$
 * **`COST_PER_XP`**: Métricas Moneyball de eficiencia ($€ / \text{xP}$). Mide cuántos millones de euros pagamos por cada punto esperado. **Cuanto más bajo, más rentable**.
 * **`COST_PER_MOMENTUM_POINT`**: Coste en millones por punto de racha reciente.
 * **`MOMENTUM_TREND`**: Tendencia de rendimiento e incremento de valor en el mercado.
@@ -128,7 +128,7 @@ Es el DataFrame maestro resultante que combina todas las fuentes en 45 métricas
 ## 🧠 Estructura de Agentes y Toma de Decisiones
 
 ### 📋 Agente 1: El Coach / El Míster (`src/agents/coach.py`)
-* **Misión**: Análisis estrictamente deportivo para maximizar puntos en la jornada.
+* **Misión**: Análisis strictly deportivo para maximizar puntos en la jornada.
 * **Sistema de Puntuación**: Media Picas AS + SofaScore (`SCORE_TYPE = 5`).
 * **Regla de Protección de Titulares (`STARTER PROTECTION RULE`)**: Prohibido recomendar la venta de cualquier jugador con titularidad $\ge$ 70% en Comuniate (`COMUNIATE_STARTER`) o alineado en el 11 titular salvo lesión grave.
 * **Resultados**:
@@ -140,17 +140,18 @@ Es el DataFrame maestro resultante que combina todas las fuentes en 45 métricas
 ---
 
 ### 💼 Agente 2: Director Deportivo / Decisor Final (`src/agents/sporting_director.py`)
+* **Modelo LLM**: **`DeepSeek-V4-Flash`** (`deepseek-v4-flash`), rápido, preciso en formato JSON y optimizado para contextos extensos.
 * **Misión**: Control financiero, pujas estratégicas en el mercado, ventas y retiro de ofertas erróneas.
 * **Señales que evalúa para cada jugador del mercado**:
   * `COMUNIATE_STARTER` — probabilidad de titularidad (la señal más fuerte a corto plazo).
-  * `EXPECTED_POINTS` / `COST_PER_XP` — puntos esperados y eficiencia €/xP (Moneyball).
+  * `EXPECTED_POINTS` / `COST_PER_XP` — puntos esperados avanzados y eficiencia €/xP (Moneyball).
   * `MOMENTUM_TREND` — forma reciente vs media de temporada.
-  * `TEAM_IS_HOME` + `ODDS_1/ODDS_2` — dificultad del próximo partido (cuotas reales).
-  * `PLAYER_PRICE_INCREMENT` — hype del mercado (comprar activos al alza = plusvalía).
+  * `TEAM_IS_HOME` + `ODDS_1/ODDS_2` — dificultad del próximo partido (cuotas reales de apuestas).
+  * `PLAYER_PRICE_INCREMENT` — hype del mercado (comprar activos en alza para trading/plusvalía).
   * `PLAYER_STATUS` — lesionados descartados automáticamente.
-  * `board_bids.csv` — histórico de sobrepujas de rivales para calibrar el importe.
-* **Jerarquía de decisión en pujas**: (1) cubrir huecos estructurales antes que fichar estrellas en líneas cubiertas, (2) titularidad > forma > cuotas favorables, (3) tendencia de precio positiva justifica competir la subasta, (4) pagar por encima del valor de mercado solo en posiciones escasas (p. ej. porteros titulares) o con hype fuerte.
-* **Reglas financieras duras**: suma de pujas ≤ presupuesto disponible real (saldo − pujas ya comprometidas, replicando la "puja máxima" de Biwenger) · puja individual ≤ 50% del presupuesto · cobertura de subastas (2 objetivos para gaps críticos como el portero) · anti-duplicados (no pujar dos veces por el mismo jugador) · auto-cancelación de pujas sobre lesionados.
+  * `board_bids.csv` — histórico de sobrepujas de rivales para calibrar el importe empírico por posición.
+* **Jerarquía de decisión en pujas**: (1) cubrir huecos estructurales antes que fichar estrellas en líneas cubiertas, (2) titularidad > forma > cuotas favorables, (3) tendencia de precio positiva justifica competir la subasta, (4) libre disposición del 100% del presupuesto para fichar cracks o estrellas justificadas.
+* **Reglas financieras duras**: suma de pujas ≤ presupuesto disponible real (saldo − pujas ya comprometidas) · puja individual hasta el 100% del saldo libre · cobertura de subastas (2 objetivos para gaps críticos como el portero) · anti-duplicados (no pujar dos veces por el mismo jugador) · auto-cancelación de pujas sobre lesionados.
 
 ---
 
@@ -166,10 +167,10 @@ Los LLMs son brillantes razonando, pero cometen errores de conteo, alucinan IDs 
 
 ### Guardrails de mercado (`guardrails.py`)
 * **Ventas bloqueadas si**: la plantilla quedaría con menos de 11 jugadores sanos · es nuestro único portero · es titular probable (≥70%) y sano · el precio realiza una pérdida >30% vs lo pagado (protección de cláusulas).
-* **Pujas bloqueadas si**: el jugador está lesionado · la puja es inferior al precio mínimo de subasta · supera el 50% del saldo · la suma total de pujas excede el **presupuesto disponible real** (saldo − pujas ya comprometidas, replicando la regla de "puja máxima" de Biwenger) · ya tenemos una puja pendiente por ese jugador (anti-duplicados).
+* **Pujas bloqueadas si**: el jugador está lesionado · la puja es inferior al precio mínimo de subasta · la suma total de pujas excede el **presupuesto disponible real** (saldo − pujas ya comprometidas) · ya tenemos una puja pendiente por ese jugador (anti-duplicados).
 * **Limpieza de pujas pendientes**: se auto-cancela cualquier puja nuestra sobre un jugador lesionado/sancionado, y el Director Deportivo puede cancelar pujas que ya no tengan sentido (`operaciones_cancelar_pujas`).
 * **Priorización por necesidades**: las pujas que cubren posiciones sin cubrir (auditoría determinista de plantilla) van primero; el resto solo si queda presupuesto.
-* **Ofertas a rivales**: si el vendedor es otro manager, la oferta se dirige automáticamente a su `user_id` (requisito de la API de Biwenger).
+* **Ofertas a rivales**: si el vendedor es otro manager (fase `post_auction`), la oferta se dirige automáticamente a su `user_id` negociando a la baja.
 
 ---
 
@@ -237,13 +238,14 @@ El workflow ya viene configurado con los dos disparos diarios (**el cron de GitH
 │   │   ├── state.py            # Esquema del TypedDict AgentState
 │   │   ├── nodes.py            # Definición de nodos de ejecución
 │   │   └── graph.py            # Grafo compilado StateGraph
-│   ├── llm_endpoints/          # Cliente API DeepSeek (deepseek-chat)
+│   ├── llm_endpoints/          # Cliente API DeepSeek (deepseek-v4-flash)
 │   ├── prompts/                # Prompts modulares para Coach, SD y Email
 │   └── utils/                  # Plantillas HTML Jinja2 y cliente SMTP
 ├── data/                       # CSVs y Excel generados durante la extracción
 ├── test/                       # Scripts de prueba y suite de validación
 │   ├── test_live_extraction.py # Test de la extracción determinista
-│   └── test_full_workflow.py   # Test del flujo completo de los agentes
+│   ├── test_full_workflow.py   # Test del flujo completo de los agentes
+│   └── test_auction_phases.py  # Suite de prueba de fases (Pre-7:00 vs Post-7:00) con email
 └── reports/                    # Informes finales generados en cada ejecución
 ```
 
@@ -257,6 +259,7 @@ Crea o verifica el archivo `.env` en la raíz del proyecto:
 BIWENGER_USERNAME=tu_email@ejemplo.com
 BIWENGER_PASSWORD=tu_contraseña
 DEEPSEEK_API_KEY=tu_api_key_deepseek
+DEEPSEEK_MODEL=deepseek-v4-flash # Modelo de IA (por defecto deepseek-v4-flash)
 GMAIL_ADRESS=tu_email_gmail@gmail.com
 GMAIL_PASSWORD=tu_app_password_gmail
 SCORE_TYPE=5  # 5: Media Picas AS y SofaScore (por defecto 5 si se omite)
@@ -264,18 +267,28 @@ LANGUAGE=es   # Idioma del email periódico: es, en, ca, fr, de, it, pt
 DRY_RUN=false # true: simula toda la ejecución sin escribir nada en Biwenger
 ```
 
-### 2. Ejecutar la Extracción de Datos (Test Rápido)
+### 2. Pruebas y Validación por Fases
+Puedes probar la toma de decisiones y el envío de emails para las distintas fases del mercado a cualquier hora:
+
 ```bash
-.venv/bin/python test/test_live_extraction.py
+# Probar ambas fases (Pre-7:00 AM y Post-7:00 AM) y enviar informes por email
+.venv/bin/python test/test_auction_phases.py --all
+
+# Probar únicamente la fase Pre-7:00 AM (Subastas libres con Mercado/banca)
+.venv/bin/python test/test_auction_phases.py --phase pre_auction
+
+# Probar únicamente la fase Post-7:00 AM (Ofertas a rivales a la baja)
+.venv/bin/python test/test_auction_phases.py --phase post_auction
 ```
 
 ### 3. Ejecutar el Flujo Completo del Agente
 ```bash
-.venv/bin/python main.py                    # Modo acción (antes del reset de mercado)
+.venv/bin/python main.py                    # Modo acción autónomo
+.venv/bin/python main.py --phase pre_auction# Modo acción simulando fase Pre-7:00 AM
+.venv/bin/python main.py --phase post_auction# Modo acción simulando fase Post-7:00 AM
 .venv/bin/python main.py --mode briefing    # Modo briefing matutino (tras el reset)
-DRY_RUN=true .venv/bin/python main.py       # Simulación segura (no escribe en Biwenger)
+DRY_RUN=true .venv/bin/python main.py       # Simulación segura (sin escrituras en API)
 ```
-*(O mediante el script de test completo: `.venv/bin/python test/test_full_workflow.py`)*
 
 ---
 *Biwenger Agent Manager — Sistema Agéntico de Inteligencia Competitiva.*
