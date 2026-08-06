@@ -21,6 +21,7 @@ class AgentState(TypedDict):
     sd_decisions: dict
     approved_actions: Optional[dict]
     execution_results: Optional[list]
+    projected_balance: Optional[float]
     final_report: Optional[str]
     email_sent: Optional[bool]
     

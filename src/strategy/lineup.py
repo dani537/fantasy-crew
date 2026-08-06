@@ -18,14 +18,22 @@ import pandas as pd
 
 # Valid Biwenger formations: name -> (n_defenders, n_midfielders, n_forwards)
 FORMATIONS = {
-    "3-4-3": (3, 4, 3),
-    "3-5-2": (3, 5, 2),
-    "4-3-3": (4, 3, 3),
-    "4-4-2": (4, 4, 2),
     "4-5-1": (4, 5, 1),
-    "5-3-2": (5, 3, 2),
+    "3-5-2": (3, 5, 2),
+    "4-4-2": (4, 4, 2),
+    "4-3-3": (4, 3, 3),
+    "3-4-3": (3, 4, 3),
     "5-4-1": (5, 4, 1),
+    "5-3-2": (5, 3, 2),
 }
+
+# Offensive preference: formations with more midfielders are preferred (a MF goal
+# outscores a FW goal, so we want more of our scorers sitting one line back).
+_FORMATION_PREF = {name: n_mf for name, (_, n_mf, _) in FORMATIONS.items()}
+
+# Line rank: lower = further back (defensive). A multi-position player earns more
+# per goal when fielded in the lowest (most-back) line they can play.
+_LINE_RANK = {"GK": 0, "DF": 1, "MF": 2, "FW": 3}
 
 _UNAVAILABLE_STATUS = {"injured", "suspended", "sanctioned"}
 
@@ -91,6 +99,11 @@ def select_best_lineup(squad: pd.DataFrame):
 
     available["_score"] = _score_players(available)
     available["_positions"] = available.apply(_player_positions, axis=1)
+    # Deepest (most-defensive) valid line for each player, for the multi-position
+    # "play him as far back as possible" rule (more points per goal).
+    available["_deepest"] = available["_positions"].apply(
+        lambda p: min((_LINE_RANK.get(x, 9) for x in p), default=9)
+    )
 
     # --- Goalkeeper (mandatory, exactly 1) ---
     gks = available[available["_positions"].apply(lambda p: "GK" in p)]
@@ -108,12 +121,17 @@ def select_best_lineup(squad: pd.DataFrame):
         ok = True
         # Fill scarcest pools first to avoid greedy dead-ends
         for line, count in sorted(slots, key=lambda s: len(field[field["_positions"].apply(lambda p: s[0] in p)])):
+            line_rank = _LINE_RANK[line]
             pool = field[
                 field["_positions"].apply(lambda p: line in p) & ~field["PLAYER_ID"].isin(used)
-            ].sort_values("_score", ascending=False)
+            ].copy()
             if len(pool) < count:
                 ok = False
                 break
+            # Multi-position rule: prefer fielding a player in their most-back valid
+            # line (deduct depth so lower rank = further back = preferred), then score.
+            pool["_pref"] = (pool["_deepest"] == line_rank).astype(int)
+            pool = pool.sort_values(["_pref", "_score"], ascending=[False, False])
             picked = pool.head(count)
             chosen.extend([(line, r["PLAYER_ID"], r["_score"]) for _, r in picked.iterrows()])
             used.update(picked["PLAYER_ID"].tolist())
@@ -121,13 +139,21 @@ def select_best_lineup(squad: pd.DataFrame):
             continue
 
         total = best_gk["_score"] + sum(s for _, _, s in chosen)
-        if best_lineup is None or total > best_lineup["_total"]:
-            best_lineup = {
-                "formation": formation,
-                "player_ids": [int(best_gk["PLAYER_ID"])]
-                + [int(pid) for line, pid, _ in sorted(chosen, key=lambda c: ("DF", "MF", "FW").index(c[0]))],
-                "_total": total,
-            }
+        candidate = {
+            "formation": formation,
+            "player_ids": [int(best_gk["PLAYER_ID"])]
+            + [int(pid) for line, pid, _ in sorted(chosen, key=lambda c: _LINE_RANK[c[0]])],
+            "_total": total,
+        }
+        if best_lineup is None:
+            best_lineup = candidate
+            continue
+        # Prefer more fantasy goals; break ties toward a more offensive formation
+        # (more midfielders / attackers), so our FW/MF scorers slot one line back.
+        cur_pref = _FORMATION_PREF.get(best_lineup["formation"], 0)
+        new_pref = _FORMATION_PREF.get(formation, 0)
+        if (total, new_pref) > (best_lineup["_total"], cur_pref):
+            best_lineup = candidate
 
     if best_lineup:
         best_lineup.pop("_total", None)

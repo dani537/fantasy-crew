@@ -14,11 +14,21 @@ catastrophic decisions (observed in real runs):
 import pandas as pd
 
 # --- Tunable strategy parameters ---
-STARTER_PROTECTION_THRESHOLD = 0.70   # COMUNIATE_STARTER >= 70% -> do not sell
+STARTER_PROTECTION_THRESHOLD = 0.70   # COMUNIATE_STARTER >= 70% -> do not sell / starter premium allowed
 MIN_SALE_PRICE_RATIO = 0.70           # Never list below 70% of purchase price
 MIN_SQUAD_SIZE = 11                   # Never drop below this many fit players
 MAX_SINGLE_BID_BUDGET_RATIO = 0.50    # One bid may not exceed 50% of balance
 MIN_BALANCE_RESERVE = 0               # Balance must stay >= 0 (Biwenger rule)
+# Value caps: never pay more than MARKET_PRICE * (1 + cap) for a player.
+MAX_OVERPAY_STARTER = 0.20            # Probable starters can carry a limited hype premium
+MAX_OVERPAY_BACKUP = 0.08             # Rotational/backup players: barely any premium
+# Negotiation floor vs a rival's asking price (direct offers can go below asking).
+MIN_RIVAL_BID_FLOOR = 0.60
+
+# --- Goalkeeper strategy (per user's manager logic) ---
+GK_PLACEHOLDER_PRICE = 150_000        # absolute minimum bid to cover the GK position urgently
+GK_BACKUP_MAX = 1_000_000             # a backup/insurance GK is only worth it if cheap
+GK_STARTER_THRESHOLD = 0.80           # a "titular" GK must be a near-certain starter
 
 
 def _squad_index(squad: pd.DataFrame) -> dict:
@@ -107,13 +117,30 @@ def filter_sales(sales: list, squad: pd.DataFrame):
     return approved, blocked
 
 
+def _value_cap(player_row) -> float:
+    """
+    Maximum justified bid for a player: market value adjusted by starter status.
+    Paying beyond this means overpaying (especially dangerous for backups).
+    """
+    market_price = player_row.get("PLAYER_PRICE")
+    if not pd.notna(market_price) or not market_price:
+        return float("inf")
+    starter = float(player_row.get("COMUNIATE_STARTER") or 0.0)
+    cap_ratio = MAX_OVERPAY_STARTER if starter >= STARTER_PROTECTION_THRESHOLD else MAX_OVERPAY_BACKUP
+    return float(market_price) * (1 + cap_ratio)
+
+
 def filter_bids(bids: list, market: pd.DataFrame, balance: float, squad: pd.DataFrame):
     """
     Validates bid operations proposed by the LLM.
 
     Rules:
     - Player must be on the market and not injured.
-    - Bid must be >= minimum sale price.
+    - Computer (Mercado) auctions: bid must be >= minimum sale price.
+      Rival direct offers: bid must be >= MIN_RIVAL_BID_FLOOR * sale price
+      (i.e. we can negotiate downwards instead of paying the asking price).
+    - Bid must never exceed the justified value cap (market price adjusted by
+      starter status) -> stops overpaying for backups/rotational players.
     - Bid must be <= MAX_SINGLE_BID_BUDGET_RATIO * balance.
     - Total bids must fit within (balance - MIN_BALANCE_RESERVE);
       bids are prioritized by squad needs (missing positions first).
@@ -155,9 +182,77 @@ def filter_bids(bids: list, market: pd.DataFrame, balance: float, squad: pd.Data
             blocked.append({**bid, "blocked_reason": f"{name} is injured"})
             continue
 
+        is_gk = (player.get("PLAYER_POSITION") == "GK")
+
+        seller_id = player.get("MARKET_SALE_USER_ID")
+        seller_name = player.get("MARKET_SALE_USER_NAME")
+        to_user_id = None
+        is_rival = bool(
+            pd.notna(seller_id) and seller_name not in (None, "Mercado")
+        )
+        if is_rival:
+            to_user_id = int(seller_id)
+
         sale_price = player.get("MARKET_SALE_PRICE")
-        if pd.notna(sale_price) and amount < int(sale_price):
-            blocked.append({**bid, "blocked_reason": f"Bid {amount:,}€ below sale price {int(sale_price):,}€"})
+        if pd.notna(sale_price):
+            sale_price = int(sale_price)
+            if is_rival:
+                # Negotiate DOWN: never bid more than a rival asks, only ever less.
+                floor = int(sale_price * MIN_RIVAL_BID_FLOOR)
+                if amount < floor:
+                    blocked.append({
+                        **bid,
+                        "blocked_reason": f"Bid {amount:,}€ too low to negotiate vs asking {sale_price:,}€ (floor {floor:,}€)",
+                    })
+                    continue
+                if amount > sale_price:
+                    blocked.append({
+                        **bid,
+                        "blocked_reason": f"Bid {amount:,}€ exceeds rival's asking price {sale_price:,}€ — negotiate DOWN, never overbid a rival",
+                    })
+                    continue
+            elif amount < sale_price:
+                blocked.append({**bid, "blocked_reason": f"Bid {amount:,}€ below sale price {sale_price:,}€"})
+                continue
+
+        # Goalkeeper strategy: the GK must be a STARTER (or a cheap cover/insurance).
+        if is_gk:
+            starter = float(player.get("COMUNIATE_STARTER") or 0.0)
+            has_gk = "GK" not in needed_positions
+            if not has_gk:
+                # We have NO starting GK: only accept clear starters, or a cheap
+                # placeholder to cover the position. NEVER burn money on a backup
+                # GK when we have no starter yet (wait for a starter to appear).
+                if starter < GK_STARTER_THRESHOLD and amount > GK_PLACEHOLDER_PRICE:
+                    blocked.append({
+                        **bid,
+                        "blocked_reason": (f"{name} no es portero titular (start {starter:.0%}); "
+                                           f"no gastamos en suplentes. Si no hay titular, puja mínima de cubrimiento ({GK_PLACEHOLDER_PRICE:,}€)"),
+                    })
+                    continue
+                if sale_price and starter < GK_STARTER_THRESHOLD and sale_price > GK_PLACEHOLDER_PRICE:
+                    blocked.append({
+                        **bid,
+                        "blocked_reason": f"{name} es portero suplente caro; esperamos a un titular",
+                    })
+                    continue
+            else:
+                # We already own a starter: a cheap SUB goalkeeper is only worth
+                # it as injury insurance (same-team backup).
+                if starter < STARTER_PROTECTION_THRESHOLD and amount > GK_BACKUP_MAX:
+                    blocked.append({
+                        **bid,
+                        "blocked_reason": f"{name} es portero suplente por {amount:,}€; solo interesa como seguro barato (<={GK_BACKUP_MAX:,}€)",
+                    })
+                    continue
+
+        cap = _value_cap(player)
+        if cap != float("inf") and amount > cap:
+            blocked.append({
+                **bid,
+                "blocked_reason": f"Bid {amount:,}€ exceeds justified value {cap:,.0f}€ "
+                                  f"(overpaying for this player's profile)",
+            })
             continue
 
         if amount > balance * MAX_SINGLE_BID_BUDGET_RATIO:
@@ -167,18 +262,16 @@ def filter_bids(bids: list, market: pd.DataFrame, balance: float, squad: pd.Data
             })
             continue
 
-        seller_id = player.get("MARKET_SALE_USER_ID")
-        seller_name = player.get("MARKET_SALE_USER_NAME")
-        to_user_id = None
-        if pd.notna(seller_id) and seller_name not in (None, "Mercado"):
-            to_user_id = int(seller_id)
-
         enriched.append({
             "player_id": pid,
             "amount": amount,
             "nombre": name,
             "position": player.get("PLAYER_POSITION"),
             "to_user_id": to_user_id,
+            "seller_is_rival": is_rival,
+            "sale_price": sale_price,
+            "market_price": player.get("PLAYER_PRICE"),
+            "starter": float(player.get("COMUNIATE_STARTER") or 0.0),
         })
 
     # Prioritize needs, then keep insertion order (stable sort)

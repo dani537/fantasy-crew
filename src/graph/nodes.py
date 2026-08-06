@@ -113,6 +113,7 @@ def execute_actions_node(state: AgentState) -> dict:
     from src.config import GeneralSettings
     from src.strategy import select_best_lineup, filter_sales, filter_bids
     from src.strategy.lineup import validate_lineup, order_lineup_for_api
+    from src.strategy.market_intel import adjust_bids_to_competitive
 
     dry_run = GeneralSettings.DRY_RUN
     approved_actions = state.get("approved_actions")
@@ -266,11 +267,47 @@ def execute_actions_node(state: AgentState) -> dict:
                 cancel_ids.add(int(row['MARKET_OFFER_ID']))
                 results.append(f"Auto-cancel bid on {row.get('PLAYER_NAME')} (now {row['PLAYER_STATUS']}) 🛡️")
 
+        # Resolve REAL offer ids from our own pending offers in the data, NEVER from the
+        # LLM output (the LLM invents offer_ids -> DELETE /offers/{id} fails).
+        offer_id_by_player = {}
+        if (
+            df_master is not None and not df_master.empty
+            and 'MARKET_OFFER_ID' in df_master.columns
+            and 'PLAYER_ID' in df_master.columns
+        ):
+            df_offers = df_master[df_master['MARKET_OFFER_ID'].notna()]
+            if not df_offers.empty:
+                if my_team_name and 'MARKET_OFFER_FROM_NAME' in df_offers.columns:
+                    df_offers = df_offers[df_offers['MARKET_OFFER_FROM_NAME'] == my_team_name]
+                for _, row in df_offers.iterrows():
+                    try:
+                        offer_id_by_player[int(row['PLAYER_ID'])] = int(row['MARKET_OFFER_ID'])
+                    except (TypeError, ValueError):
+                        continue
+
         cancellations = approved_actions.get("operaciones_cancelar_pujas") or []
         for c in cancellations:
-            oid = c.get("offer_id") or c.get("id_oferta")
-            if oid:
-                cancel_ids.add(int(oid))
+            pid = c.get("player_id") or c.get("id_jugador_mercado") or c.get("id_jugador")
+            resolved = None
+            if pid is not None:
+                try:
+                    resolved = offer_id_by_player.get(int(pid))
+                except (TypeError, ValueError):
+                    resolved = None
+            if resolved is None:
+                oid = c.get("offer_id") or c.get("id_oferta")
+                try:
+                    oid = None if oid is None or int(oid) <= 0 else int(oid)
+                except (TypeError, ValueError):
+                    oid = None
+                if oid is not None:
+                    resolved = oid
+                    print(f"   ⚠️ LLM-supplied offer_id {resolved} NOT verified against our offers; using it as-is")
+                else:
+                    print(f"   ⚠️ Cannot resolve a real offer for cancel decision on player {pid}; skipping")
+                    results.append(f"Cancel bid on player {pid}: SKIPPED ⏭️ (no real offer_id found)")
+                    continue
+            cancel_ids.add(resolved)
 
         for oid in sorted(cancel_ids):
             print(f"   ✖️ Cancelling offer {oid}")
@@ -329,18 +366,37 @@ def execute_actions_node(state: AgentState) -> dict:
             results.append(f"Bid for {b.get('nombre', '?')}: BLOCKED 🛡️ ({b['blocked_reason']})")
             print(f"   🛡️ Bid blocked: {b.get('nombre')} -> {b['blocked_reason']}")
 
-        for bid in approved_bids:
+        # ---- MARKET-AUCTION PHASE (pre-7:00) ----
+        # User rule: before 7:00 we ONLY place MARKET bids (computer/free agents).
+        # Offers to RIVAL managers are negotiated AFTER the auction resolves (post-7:00),
+        # to avoid revealing our intentions and inflating the price on players we want.
+        market_bids = [b for b in approved_bids if not b.get("seller_is_rival")]
+        rival_offers = [b for b in approved_bids if b.get("seller_is_rival")]
+
+        # Bidding intelligence: this league pays +X% over the current price per line.
+        # Raise our market bids to a competitive level so we stop underbidding/losing.
+        market_bids = adjust_bids_to_competitive(market_bids, pd.read_csv('./data/board_bids.csv') if os.path.exists('./data/board_bids.csv') else None, df_master, auction=True)
+
+        for bid in market_bids:
             pid = bid["player_id"]
             amount = bid["amount"]
-            to_user = bid.get("to_user_id")
-            print(f"   💰 Bidding {amount:,}€ for player {pid}" + (f" (offer to rival {to_user})" if to_user else ""))
-            success = True if dry_run else actions.market.place_offer(amount, pid, to_user)
+            raised = " ⬆️" if bid.get("competitive_raise") else ""
+            print(f"   💰 Bidding {amount:,}€ for player {pid}{raised}")
+            success = True if dry_run else actions.market.place_offer(amount, pid, None)
             results.append(f"Bid {amount:,}€ for Player {pid}: {_tag(success)}")
+
+        if rival_offers:
+            pending = ", ".join(str(b.get('nombre', b['player_id'])) for b in rival_offers)
+            results.append(f"Rival offer deferred to post-7:00 negotiation — {pending} (⏭️ evitamos inflar precio)")
 
         if not results:
             results.append("No active operations triggered.")
 
-        return {"execution_results": results}
+        # Deterministic projected balance: current free cash minus the NEW bids we
+        # are placing now. (LLM-reported projections are unreliable -> override.)
+        projected_balance = available_budget - sum(b["amount"] for b in market_bids)
+
+        return {"execution_results": results, "projected_balance": projected_balance}
 
     except Exception as e:
         print(f"   ❌ Execution Error: {e}")
@@ -402,14 +458,18 @@ def email_report_node(state: AgentState) -> dict:
     """
     Node: Email Report
     ------------------
-    Sends a newspaper-style HTML summary via email, in the configured LANGUAGE.
-    Also saves a local HTML preview to ./reports/email_preview.html.
+    Sends the executive summary email in the configured LANGUAGE.
+
+    The BODY is built deterministically from the agents' JSON reports
+    (see src/utils/email_builder.py), so the manager always sees a clear,
+    schematic picture: Míster diagnosis/recommendations, Director Deportivo
+    actions and API execution results. No LLM is needed for the body.
     """
-    from src.llm_endpoints.deepseek import DeepseekClient
-    from src.prompts.email_prompts import get_email_summary_prompt, EMAIL_SUMMARY_SYSTEM_ROLE
+    from src.utils.email_builder import render_action_email
     from src.utils.email_templates import BASE_HTML_TEMPLATE
     from src.utils.email_sender import send_report_email
-    from src.config import GeneralSettings, get_language_name
+    from src.config import GeneralSettings
+    from jinja2 import Template
 
     final_report = state.get("final_report", "")
 
@@ -420,9 +480,7 @@ def email_report_node(state: AgentState) -> dict:
         except Exception:
             final_report = "No documentation available for this run."
 
-    print("🚀 Node: EmailReport - Generating LLM Email Summary...")
-    friendly_summary = "Aquí tienes el informe de hoy de tu Biwenger Agent."
-    html_content = None
+    print("🚀 Node: EmailReport - Building deterministic schematic summary...")
 
     _FOOTERS = {
         "es": "Generado por tu Biwenger Agent",
@@ -435,47 +493,43 @@ def email_report_node(state: AgentState) -> dict:
     }
     footer_text = f"Biwenger Chronicle · {_FOOTERS.get(GeneralSettings.LANGUAGE, _FOOTERS['es'])}"
 
+    my_team = None
     try:
-        llm = DeepseekClient()
-        summary_prompt = get_email_summary_prompt(final_report, get_language_name())
-        llm_output = llm.generate_content(summary_prompt, system_prompt=EMAIL_SUMMARY_SYSTEM_ROLE)
+        if os.path.exists('./data/user_info.csv'):
+            my_team = pd.read_csv('./data/user_info.csv')['team_name'].iloc[0]
+    except Exception:
+        pass
 
-        from src.utils.json_helper import extract_json_from_llm
-        segments = extract_json_from_llm(llm_output)
+    segments = render_action_email(
+        state.get("coach_report", {}),
+        state.get("sd_decisions", {}),
+        state.get("execution_results", []),
+        state.get("df_master"),
+        my_team,
+        projected_balance=state.get("projected_balance"),
+    )
 
-        if segments and "error" not in segments:
-            sections = segments.get("sections", [])
-            if isinstance(sections, list):
-                sections = [s for s in sections if isinstance(s, dict)]
-            else:
-                sections = []
-
-            template = Template(BASE_HTML_TEMPLATE)
-            html_content = template.render(
-                lang=GeneralSettings.LANGUAGE,
-                newspaper_name="BIWENGER CHRONICLE",
-                edition_line=f"{datetime.now().strftime('%A, %d %B %Y')} · Fantasy Edition",
-                headline=segments.get("headline", "Reporte de Biwenger Agent"),
-                lede=segments.get("lede", ""),
-                stats_html=segments.get("stats_html", ""),
-                sections=sections,
-                actions_html=segments.get("actions_html", ""),
-                footer_line=footer_text,
-            )
-            friendly_summary = f"{segments.get('headline')}\n\n{segments.get('lede')}\n\n{segments.get('stats_html', '')}"
-        else:
-            print("   ⚠️ LLM did not return valid JSON for summary.")
+    html_content = None
+    try:
+        template = Template(BASE_HTML_TEMPLATE)
+        html_content = template.render(
+            lang=GeneralSettings.LANGUAGE,
+            newspaper_name="BIWENGER CHRONICLE",
+            edition_line=f"{datetime.now().strftime('%A, %d %B %Y')} · Fantasy Edition",
+            headline=segments.get("headline", "Reporte de Biwenger Agent"),
+            lede=segments.get("lede", ""),
+            stats_html=segments.get("stats_html", ""),
+            sections=segments.get("sections", []),
+            actions_html=segments.get("actions_html", ""),
+            footer_line=footer_text,
+        )
+        with open("./reports/email_preview.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print("   💾 Email preview saved to ./reports/email_preview.html")
     except Exception as e:
         print(f"   ⚠️ HTML content generation failed: {e}")
 
-    # Always save a local preview of the email design
-    if html_content:
-        try:
-            with open("./reports/email_preview.html", "w", encoding="utf-8") as f:
-                f.write(html_content)
-            print("   💾 Email preview saved to ./reports/email_preview.html")
-        except Exception:
-            pass
+    friendly_summary = f"{segments.get('headline')}\n\n{segments.get('lede')}\n\n{segments.get('stats_html', '')}"
 
     attachments = []
     for fpath in ["./reports/00_final_report.md", "./reports/01_coach_report.json", "./reports/02_sporting_director_decisions.json", "./data/_master.xlsx"]:

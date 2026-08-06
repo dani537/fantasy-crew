@@ -176,11 +176,18 @@ class SportingDirector:
         ]
         existing_market_cols = [c for c in market_cols if c in df_master.columns]
         
-        # Filter free agents: on market today AND NOT INJURED
+        # Filter free agents: on market today AND NOT INJURED.
         market_players = df_master[df_master['MARKET_SALE_PRICE'] > 0].copy()
         if 'PLAYER_STATUS' in market_players.columns:
             # Filter out injured players for immediate market bids
             market_players = market_players[market_players['PLAYER_STATUS'] != 'injured']
+        # PRE-7 phase: only Mercado (computer) free agents are bid here. Rival-owned
+        # sellers are negotiated AFTER 7:00 so we don't reveal our targets early.
+        if 'MARKET_SALE_USER_NAME' in market_players.columns:
+            market_players = market_players[
+                (market_players['MARKET_SALE_USER_NAME'].isna())
+                | (market_players['MARKET_SALE_USER_NAME'] == 'Mercado')
+            ]
 
         if not market_players.empty:
             if 'PLAYER_PRICE' in market_players.columns:
@@ -253,11 +260,14 @@ class SportingDirector:
                 f"The usable budget for NEW bids is €{effective_budget:,.0f} (Biwenger rejects anything above).\n"
             )
         recent_bids_summary = "No recent rival bids recorded."
+        market_intel_summary = ""
         if os.path.exists('./data/board_bids.csv'):
             try:
                 df_bids = pd.read_csv('./data/board_bids.csv')
                 if not df_bids.empty:
                     recent_bids_summary = df_bids.head(10).to_markdown(index=False)
+                from src.strategy.market_intel import build_market_intel_summary
+                market_intel_summary = build_market_intel_summary(df_bids, df_master)
             except Exception:
                 pass
 
@@ -286,6 +296,8 @@ class SportingDirector:
             squad_needs_summary=squad_needs_summary,
             pending_bids_summary=pending_bids_summary,
             recent_bids_summary=recent_bids_summary,
+            market_intel_summary=market_intel_summary,
+            phase="pre_auction",
         )
         
         from src.utils.json_helper import extract_json_from_llm

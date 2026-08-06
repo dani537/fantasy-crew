@@ -215,6 +215,45 @@ def run_auction():
     if not cleanup and won:
         print("\n✅ No redundant bids to cancel.")
 
+    # 7. Send the schematic auction-close email
+    _send_auction_close_email(won, lost, cleanup, post_master, my_team)
+
     print("\n" + "=" * 65)
     print("✅ AUCTION MODE COMPLETE!")
     print("=" * 65)
+
+
+def _send_auction_close_email(won, lost, cleanup, post_master, my_team):
+    """Deterministic schematic email right after the 7:00 auction resolution."""
+    from src.utils.email_builder import render_auction_close_email
+    from src.utils.email_templates import BASE_HTML_TEMPLATE
+    from src.utils.email_sender import send_report_email
+    from jinja2 import Template
+
+    segments = render_auction_close_email(None, None, won, lost, cleanup, post_master, my_team)
+
+    html_content = None
+    try:
+        html_content = Template(BASE_HTML_TEMPLATE).render(
+            lang=GeneralSettings.LANGUAGE,
+            newspaper_name="BIWENGER CHRONICLE",
+            edition_line=f"{datetime.now().strftime('%A, %d %B %Y')} · Auction Close Edition",
+            headline=segments.get("headline", "Cierre de subasta"),
+            lede=segments.get("lede", ""),
+            stats_html=segments.get("stats_html", ""),
+            sections=segments.get("sections", []),
+            actions_html=segments.get("actions_html", ""),
+            footer_line=f"Biwenger Chronicle · {datetime.now().strftime('%d/%m/%Y')}",
+        )
+        with open("./reports/email_auction_close.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+        print("   💾 Auction-close email preview saved to ./reports/email_auction_close.html")
+    except Exception as e:
+        print(f"   ⚠️ Auction-close email HTML failed: {e}")
+
+    summary = f"{segments.get('headline')}\n\n{segments.get('lede')}"
+    subject = f"🔁 Cierre de subasta - {datetime.now().strftime('%d/%m')}"
+    try:
+        send_report_email(summary, subject=subject, attachments=[], html_content=html_content)
+    except Exception as e:
+        print(f"   ⚠️ Auction-close email send failed: {e}")

@@ -27,6 +27,127 @@ from src.utils.email_sender import send_report_email
 from src.utils.json_helper import extract_json_from_llm
 from src.config import GeneralSettings, get_language_name
 
+# Offer sizing for post-7:00 rival negotiations (we always negotiate DOWN from value)
+RIVAL_OFFER_RATIO = 0.70          # offer ~70% of market value
+MAX_RIVAL_OFFERS = 3
+_POS_OFFENSIVE_RANK = {"FW": 0, "MF": 1, "DF": 2, "GK": 3}
+
+
+def _negotiated_amount(player_row, budget):
+    """Bids BELOW the player's market value (negotiation a la baja)."""
+    try:
+        value = float(player_row.get("PLAYER_PRICE") or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        return None
+    offer = int(value * RIVAL_OFFER_RATIO)
+    # Never exceed what we can actually pay today.
+    offer = min(offer, int(budget * 0.5))
+    # Round down to a "clean" figure to look like a deliberate lowball.
+    return int(offer / 100_000) * 100_000
+
+
+def build_rival_offers(df_master, my_team, budget):
+    """
+    POST-7:00 phase. Targets players owned by rival managers (not on our market
+    auction) and proposes a DIRECT offer, negotiating DOWN from market value.
+    Covers structural needs first; prefers probable starters and more offensive
+    lines (FW > MF > DF > GK) since those score more long-term.
+    """
+    if df_master is None or df_master.empty:
+        return []
+    if my_team is None:
+        return []
+
+    squad = df_master[df_master.get("BIWPLAYER_TEAM_NAME") == my_team]
+    from src.strategy.guardrails import compute_squad_needs
+    missing = set(compute_squad_needs(squad).get("missing_positions", []))
+
+    rival = df_master[
+        (df_master.get("BIWPLAYER_TEAM_ID").notna())
+        & (df_master.get("BIWPLAYER_TEAM_NAME").notna())
+        & (df_master.get("BIWPLAYER_TEAM_NAME") != my_team)
+    ].copy()
+    if rival.empty:
+        return []
+
+    # Skip injured; skip players already on the market auction (those are bids, not offers).
+    if "PLAYER_STATUS" in rival.columns:
+        rival = rival[rival["PLAYER_STATUS"].fillna("ok") != "injured"]
+    rival = rival[rival.get("MARKET_SALE_PRICE", 0).fillna(0) <= 0]
+
+    candidates = []
+    for _, r in rival.iterrows():
+        starter = float(r.get("COMUNIATE_STARTER") or 0.0)
+        pos = r.get("PLAYER_POSITION")
+        momentum = float(r.get("MOMENTUM_TREND") or 0.0)
+        value = float(r.get("PLAYER_PRICE") or 0)
+        if value <= 0:
+            continue
+        need_bonus = 10 if pos in missing else 0
+        # Offensive lines rank higher; starters rank higher; momentum helps.
+        score = (
+            need_bonus
+            + _POS_OFFENSIVE_RANK.get(pos, 3) * 1.0
+            + starter * 4.0
+            + min(max(momentum, -2), 2) * 0.5
+        )
+        candidates.append({"row": r, "score": score})
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates[:MAX_RIVAL_OFFERS]
+
+
+def execute_rival_offers(df_master) -> list:
+    """Builds + executes POST-7:00 rival offers. Deterministic (no LLM)."""
+    results = []
+    if df_master is None or df_master.empty:
+        return results
+
+    my_team = pd.read_csv('./data/user_info.csv')['team_name'].iloc[0]
+    try:
+        budget = float(pd.read_csv('./data/user_info.csv')['balance'].iloc[0])
+    except Exception:
+        budget = 0.0
+
+    targets = build_rival_offers(df_master, my_team, budget)
+    if not targets:
+        print("   ℹ️ No rival offers to negotiate this run.")
+        return results
+
+    dry_run = GeneralSettings.DRY_RUN
+    actions = None
+    if not dry_run:
+        from src.data_extraction.auth import BiwengerAuth
+        from src.actions import BiwengerActions
+        from src.config import Credentials
+        auth = BiwengerAuth(Credentials.BIWENGER_USERNAME, Credentials.BIWENGER_PASSWORD)
+        auth.login()
+        info = auth.get_user_info()
+        session = auth.get_session()
+        session.headers.update({'x-league': str(info.league_id), 'x-user': str(info.team_id)})
+        actions = BiwengerActions(session)
+
+    spent = 0.0
+    for t in targets:
+        r = t["row"]
+        amount = _negotiated_amount(r, budget - spent)
+        if amount is None or amount <= 0:
+            continue
+        owner_id = int(r["BIWPLAYER_TEAM_ID"])
+        name = r.get("PLAYER_NAME", "?")
+        value = int(r.get("PLAYER_PRICE") or 0)
+        starter = float(r.get("COMUNIATE_STARTER") or 0.0)
+        print(f"   🤝 Offer to rival: {name} @ {amount:,}€ (value {value:,}€, start {starter:.0%})")
+        ok = True if dry_run else actions.market.place_offer(amount, int(r["PLAYER_ID"]), owner_id)
+        tag = "DRY-RUN 🧪" if dry_run else ("SUCCESS ✅" if ok else "FAILED ❌")
+        results.append(f"Oferta a <b>{name}</b> por {amount:,}€ (valor {value:,}€ — negociado a la baja) · {tag}")
+        spent += amount
+
+    return results
+
+
 
 def _compact_table(df: pd.DataFrame, cols: list, max_rows: int = 12) -> str:
     if df is None or df.empty:
@@ -136,12 +257,21 @@ def run_briefing():
     #    our remaining pending bids on those same positions (hedge bids).
     cleanup_results = cleanup_redundant_hedge_bids(df_master)
 
-    # 3. Build compact context
+    # 3. POST-7:00 RIVAL NEGOTIATIONS: once we know how the auction went, we make
+    #    direct offers to rival-owned players, negotiating DOWN. (Market bids were
+    #    already placed pre-7:00 to avoid tipping off rivals / inflating prices.)
+    offer_results = execute_rival_offers(df_master)
+    for line in offer_results:
+        print(f"   🤝 {line}")
+
+    # 4. Build compact context
     context = build_briefing_context(df_master)
     if cleanup_results:
         context += "\n\nPOST-AUCTION CLEANUP DONE THIS RUN:\n" + "\n".join(cleanup_results)
+    if offer_results:
+        context += "\n\nRIVAL OFFERS PLACED THIS RUN (negociadas a la baja):\n" + "\n".join(offer_results)
 
-    # 4. Single LLM call: newspaper morning edition
+    # 5. Single LLM call: newspaper morning edition
     print("🗞️  Generating morning edition...")
     html_content = None
     friendly_summary = "Morning briefing from your Biwenger Agent."
