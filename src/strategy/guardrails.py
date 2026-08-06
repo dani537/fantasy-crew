@@ -17,7 +17,7 @@ import pandas as pd
 STARTER_PROTECTION_THRESHOLD = 0.70   # COMUNIATE_STARTER >= 70% -> do not sell / starter premium allowed
 MIN_SALE_PRICE_RATIO = 0.70           # Never list below 70% of purchase price
 MIN_SQUAD_SIZE = 11                   # Never drop below this many fit players
-MAX_SINGLE_BID_BUDGET_RATIO = 0.50    # One bid may not exceed 50% of balance
+MAX_SINGLE_BID_BUDGET_RATIO = 1.00    # A single bid may use up to 100% of balance (allows signing top players/stars)
 MIN_BALANCE_RESERVE = 0               # Balance must stay >= 0 (Biwenger rule)
 # Value caps: never pay more than MARKET_PRICE * (1 + cap) for a player.
 MAX_OVERPAY_STARTER = 0.20            # Probable starters can carry a limited hype premium
@@ -330,3 +330,46 @@ def compute_squad_needs(squad: pd.DataFrame) -> dict:
     result["missing_positions"] = missing
     result["summary"] = "; ".join(notes) if notes else "Squad structure is complete."
     return result
+
+
+def get_speculative_trading_targets(df_master: pd.DataFrame, available_budget: float, max_targets: int = 3) -> list:
+    """
+    Identifies players with high daily price increments (speculative market hype)
+    that can be signed to generate capital gains (trading/flipping).
+    """
+    if df_master is None or df_master.empty or available_budget <= 0:
+        return []
+        
+    if 'MARKET_SALE_PRICE' not in df_master.columns or 'PLAYER_PRICE_INCREMENT' not in df_master.columns:
+        return []
+        
+    status = df_master.get('PLAYER_STATUS', pd.Series('ok', index=df_master.index)).fillna('ok')
+    on_market = df_master[
+        (df_master['MARKET_SALE_PRICE'] > 0) & 
+        (status != 'injured') &
+        (df_master['PLAYER_PRICE_INCREMENT'] > 30000)
+    ].copy()
+    
+    if on_market.empty:
+        return []
+        
+    on_market['SPEC_SCORE'] = on_market['PLAYER_PRICE_INCREMENT'] / on_market['MARKET_SALE_PRICE']
+    targets = on_market.sort_values(by=['SPEC_SCORE', 'PLAYER_PRICE_INCREMENT'], ascending=[False, False])
+    
+    proposed_bids = []
+    spent = 0.0
+    for _, r in targets.head(10).iterrows():
+        sale_price = float(r['MARKET_SALE_PRICE'])
+        bid_amount = int(sale_price * 1.02)
+        if spent + bid_amount <= available_budget:
+            proposed_bids.append({
+                "player_id": int(r['PLAYER_ID']),
+                "nombre": r['PLAYER_NAME'],
+                "amount": bid_amount,
+                "reason": f"Speculative flip: rising +{int(r['PLAYER_PRICE_INCREMENT']):,}€/day",
+            })
+            spent += bid_amount
+            if len(proposed_bids) >= max_targets:
+                break
+                
+    return proposed_bids

@@ -27,13 +27,15 @@ from src.graph import fantasy_crew_graph
 from src.config import GeneralSettings
 
 
-def run_fantasy_crew():
+def run_fantasy_crew(phase: str = None):
     """
     Runs the streamlined Fantasy Crew multi-agent workflow.
     """
     print("=" * 65)
     print("🚀 BIWENGER AGENT - Streamlined Multi-Agent Workflow")
     print(f"📅 Run Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if phase:
+        print(f"⏱️ Simulated Phase: {phase.upper()}")
     if GeneralSettings.DRY_RUN:
         print("🧪 DRY-RUN MODE: no write operations will be sent to Biwenger")
     print("=" * 65)
@@ -47,6 +49,7 @@ def run_fantasy_crew():
         "execution_results": None,
         "final_report": None,
         "email_sent": False,
+        "phase": phase,
         "error": None
     }
     
@@ -95,10 +98,16 @@ def run_fantasy_crew():
 
 if __name__ == "__main__":
     mode = "action"
+    phase = None
     if "--mode" in sys.argv:
         idx = sys.argv.index("--mode")
         if idx + 1 < len(sys.argv):
             mode = sys.argv[idx + 1].strip().lower()
+
+    if "--phase" in sys.argv:
+        idx = sys.argv.index("--phase")
+        if idx + 1 < len(sys.argv):
+            phase = sys.argv[idx + 1].strip().lower()
 
     if mode == "briefing":
         from src.briefing import run_briefing
@@ -107,4 +116,4 @@ if __name__ == "__main__":
         from src.auction import run_auction
         run_auction()
     else:
-        run_fantasy_crew()
+        run_fantasy_crew(phase=phase)

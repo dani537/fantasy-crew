@@ -26,5 +26,6 @@ class AgentState(TypedDict):
     email_sent: Optional[bool]
     
     # Metadata
+    phase: Optional[str]
     error: Optional[str]
 

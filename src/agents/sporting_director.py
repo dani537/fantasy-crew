@@ -128,11 +128,15 @@ class SportingDirector:
             print(f"⚠️ Warning: Could not read budget from user_info.csv: {e}")
         return 0.0
 
-    def propose(self, coach_report, df_master):
+    def propose(self, coach_report, df_master, phase: str = None):
         """
         Generates transfer proposals based on coach needs and financial constraints.
         """
         print_step(21, "Sporting Director (The Broker) is scanning the market")
+        
+        if not phase:
+            phase = "pre_auction" if datetime.now().hour < 7 else "post_auction"
+        print(f"   ⏱️ Operating Phase: {phase.upper()}")
         
         # 0. Get My Team Name
         my_team_name = self.get_my_team_name()
@@ -166,7 +170,7 @@ class SportingDirector:
         # 3. SEGMENTED DATA VIEWS
         # ==========================================================================
         
-        # --- A. MARKET (Free Agents) ---
+        # --- A. MARKET (Free Agents vs Rival Players according to phase) ---
         market_cols = [
             'PLAYER_ID', 'PLAYER_NAME', 'PLAYER_POSITION', 'TEAM_NAME', 
             'PLAYER_STATUS', 'COMUNIATE_STARTER', 'PLAYER_PRICE_INCREMENT', 
@@ -176,22 +180,48 @@ class SportingDirector:
         ]
         existing_market_cols = [c for c in market_cols if c in df_master.columns]
         
-        # Filter free agents: on market today AND NOT INJURED.
+        # Filter on-market players AND NOT INJURED.
         market_players = df_master[df_master['MARKET_SALE_PRICE'] > 0].copy()
         if 'PLAYER_STATUS' in market_players.columns:
-            # Filter out injured players for immediate market bids
             market_players = market_players[market_players['PLAYER_STATUS'] != 'injured']
-        # PRE-7 phase: only Mercado (computer) free agents are bid here. Rival-owned
-        # sellers are negotiated AFTER 7:00 so we don't reveal our targets early.
-        if 'MARKET_SALE_USER_NAME' in market_players.columns:
-            market_players = market_players[
-                (market_players['MARKET_SALE_USER_NAME'].isna())
-                | (market_players['MARKET_SALE_USER_NAME'] == 'Mercado')
-            ]
+            
+        if phase == "pre_auction":
+            # PRE-7 phase: only Mercado (computer) free agents
+            if 'MARKET_SALE_USER_NAME' in market_players.columns:
+                market_players = market_players[
+                    (market_players['MARKET_SALE_USER_NAME'].isna())
+                    | (market_players['MARKET_SALE_USER_NAME'] == 'Mercado')
+                ]
+        else:
+            # POST-7 phase: rival-owned players listed on market
+            if 'MARKET_SALE_USER_NAME' in market_players.columns:
+                rival_players = market_players[
+                    (market_players['MARKET_SALE_USER_NAME'].notna())
+                    & (market_players['MARKET_SALE_USER_NAME'] != 'Mercado')
+                ]
+                if not rival_players.empty:
+                    market_players = rival_players
 
         if not market_players.empty:
+            candidates = []
+            if 'EXPECTED_POINTS' in market_players.columns and market_players['EXPECTED_POINTS'].sum() > 0:
+                top_xp = market_players.sort_values(by='EXPECTED_POINTS', ascending=False).head(10)
+                candidates.append(top_xp)
+            if 'COST_PER_XP' in market_players.columns:
+                valid_cpxp = market_players[market_players['COST_PER_XP'] > 0]
+                if not valid_cpxp.empty:
+                    top_value = valid_cpxp.sort_values(by='COST_PER_XP', ascending=True).head(10)
+                    candidates.append(top_value)
+            if 'PLAYER_PRICE_INCREMENT' in market_players.columns:
+                top_trend = market_players.sort_values(by='PLAYER_PRICE_INCREMENT', ascending=False).head(10)
+                candidates.append(top_trend)
             if 'PLAYER_PRICE' in market_players.columns:
-                 market_players = market_players.sort_values(by='PLAYER_PRICE', ascending=False).head(20)
+                top_price = market_players.sort_values(by='PLAYER_PRICE', ascending=False).head(10)
+                candidates.append(top_price)
+            if candidates:
+                market_players = pd.concat(candidates).drop_duplicates(subset=['PLAYER_ID']).head(30)
+            else:
+                market_players = market_players.head(25)
             market_summary = market_players[existing_market_cols].to_markdown(index=False)
         else:
             market_summary = "No free agents available on market."
@@ -297,7 +327,7 @@ class SportingDirector:
             pending_bids_summary=pending_bids_summary,
             recent_bids_summary=recent_bids_summary,
             market_intel_summary=market_intel_summary,
-            phase="pre_auction",
+            phase=phase,
         )
         
         from src.utils.json_helper import extract_json_from_llm

@@ -74,9 +74,8 @@ def sporting_director_node(state: AgentState) -> dict:
     
     try:
         sd = SportingDirector()
-        df_master = state["df_master"]
-        coach_report = state["coach_report"]
-        decisions = sd.propose(coach_report, df_master)
+        phase = state.get("phase")
+        decisions = sd.propose(coach_report, df_master, phase=phase)
         
         # Structure approved actions for execution node
         approved_actions = decisions if isinstance(decisions, dict) else {}

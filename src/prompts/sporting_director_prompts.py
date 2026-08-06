@@ -25,7 +25,7 @@ def get_sd_proposal_prompt(
     Main Sporting Director executive prompt.
     """
     current_bal_int = int(current_balance)
-    max_single_bid = int(current_balance * 0.5)
+    max_single_bid = int(current_balance * 1.0)
 
     if phase == "post_auction":
         budget_banner = (
@@ -52,7 +52,7 @@ Scoring System: Media Picas AS + SofaScore (SCORE_TYPE = 5). Evaluates consisten
 ---
 ## 💰 FINANCIAL STATUS
 - **Current Balance (MUST USE EXACTLY THIS VALUE IN JSON)**: €{current_bal_int:,} ({current_bal_int})
-- **Hard cap per single bid**: €{max_single_bid:,} (50% of balance — never risk it all on one player)
+- **Max Single Bid Limit**: Up to 100% of available balance (€{max_single_bid:,}) — feel free to invest heavily in top stars/cracks when justified.
 - **Clause Window**: {clause_status} (Deadline: {clause_deadline})
 {season_context_str}
 > [!CAUTION]

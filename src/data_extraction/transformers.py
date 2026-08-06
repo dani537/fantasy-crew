@@ -458,13 +458,43 @@ def feature_engineering(df):
     mask_cpmp = (df['IS_AVAILABLE']) & (df['AVG_POINTS_MOMENTUM'] > 0)
     df.loc[mask_cpmp, 'COST_PER_MOMENTUM_POINT'] = (df.loc[mask_cpmp, 'REAL_SALE_PRICE'] / 1_000_000) / df.loc[mask_cpmp, 'AVG_POINTS_MOMENTUM']
 
-    # 9. Expected Points (xP)
+    # 9. Advanced Expected Points (xP)
     if 'COMUNIATE_SUPPLENT' in df.columns:
         df['COMUNIATE_SUPPLENT'] = df['COMUNIATE_SUPPLENT'].apply(clean_percentage)
     else:
         df['COMUNIATE_SUPPLENT'] = 0.0
+
+    def calculate_advanced_xp(row):
+        starter_prob = float(row.get('COMUNIATE_STARTER') or 0.0)
+        sub_prob = float(row.get('COMUNIATE_SUPPLENT') or 0.0)
         
-    df['EXPECTED_POINTS'] = df['AVG_POINTS_MOMENTUM'] * (df['COMUNIATE_STARTER'] + (df['COMUNIATE_SUPPLENT'] * 0.8))
+        # 1. Base rating using home/away split and momentum
+        is_home = bool(row.get('TEAM_IS_HOME'))
+        avg_split = float(row.get('AVG_POINTS_HOME') if is_home else row.get('AVG_POINTS_AWAY') or 0.0)
+        avg_base = avg_split if avg_split > 0 else float(row.get('AVG_POINTS') or 0.0)
+        momentum = float(row.get('AVG_POINTS_MOMENTUM') or 0.0)
+        
+        base_rating = (momentum * 0.7 + avg_base * 0.3) if (momentum > 0 and avg_base > 0) else max(momentum, avg_base)
+        
+        # 2. Match difficulty factor based on betting odds
+        match_factor = 1.0
+        odds_win = float(row.get('ODDS_1') if is_home else row.get('ODDS_2') or 0.0)
+        if odds_win > 0:
+            match_factor = float(np.clip(2.5 / odds_win, 0.80, 1.20))
+            
+        expected_minutes_weight = starter_prob + (sub_prob * 0.75)
+        xp = base_rating * expected_minutes_weight * match_factor
+        
+        # Status penalties
+        status = str(row.get('PLAYER_STATUS') or 'ok').lower()
+        if status == 'doubt':
+            xp *= 0.65
+        elif status in ('injured', 'sanctioned', 'suspended'):
+            xp = 0.0
+            
+        return round(xp, 2)
+
+    df['EXPECTED_POINTS'] = df.apply(calculate_advanced_xp, axis=1)
     
     df['COST_PER_XP'] = 0.0
     mask_cpxp = (df['IS_AVAILABLE']) & (df['EXPECTED_POINTS'] > 0)
