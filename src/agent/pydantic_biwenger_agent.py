@@ -17,19 +17,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+from src.config import Credentials, GeneralSettings, _get_config_var
+
+
 def get_agent_model():
-    """Configura el modelo LLM para Pydantic AI según las claves del .env."""
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    env_model = os.getenv("LLM_MODEL", "openai/gpt-5.6-luna")
+    """Configura el modelo LLM para Pydantic AI según las claves dinámicas."""
+    openrouter_key = Credentials.OPENROUTER_API_KEY
+    env_model = GeneralSettings.LLM_MODEL or "openai/gpt-5.6-luna"
 
     if openrouter_key:
         os.environ["OPENROUTER_API_KEY"] = openrouter_key
         model_name = env_model if env_model.startswith("openrouter:") else f"openrouter:{env_model}"
         return model_name
-    elif os.getenv("DEEPSEEK_API_KEY"):
+    elif Credentials.DEEPSEEK_API_KEY:
+        os.environ["DEEPSEEK_API_KEY"] = Credentials.DEEPSEEK_API_KEY
         return "deepseek:deepseek-chat"
-    elif os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
-        os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    elif _get_config_var("GEMINI_API_KEY") or _get_config_var("GOOGLE_API_KEY"):
+        g_key = _get_config_var("GEMINI_API_KEY") or _get_config_var("GOOGLE_API_KEY")
+        os.environ["GOOGLE_API_KEY"] = g_key
         return "google:gemini-2.5-flash"
     else:
         return "openai/gpt-5.6-luna"

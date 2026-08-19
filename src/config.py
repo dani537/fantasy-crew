@@ -1,34 +1,63 @@
+"""
+Configuration and Credentials Manager
+=====================================
+Centralized, dynamic loading of environment variables and Streamlit Cloud secrets.
+"""
+
 import os
 from dotenv import load_dotenv
 
-# 1. Load local .env
+# Load local .env
 load_dotenv()
 
-# 2. Bridge Streamlit Cloud Secrets (if running in Streamlit Cloud)
-try:
-    import streamlit as st
-    if hasattr(st, "secrets"):
-        for k, v in st.secrets.items():
-            if isinstance(v, (str, int, float, bool)):
-                os.environ[k] = str(v)
-except Exception:
-    pass
 
-# Biwenger score IDs: 1 = Picas AS, 2 = SofaScore, 5 = Media AS + SofaScore
-DEFAULT_SCORE_TYPE = "5"
+def _get_config_var(key: str, default: str = "") -> str:
+    """
+    Dynamically retrieves a configuration variable:
+    1. Checks os.environ
+    2. Checks streamlit.secrets (if running in Streamlit Cloud)
+    3. Returns default
+    """
+    val = os.getenv(key)
+    if val:
+        return str(val).strip()
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key]).strip()
+    except Exception:
+        pass
+    return default
 
 
-class Credentials:
-    BIWENGER_USERNAME = os.getenv("BIWENGER_USERNAME")
-    BIWENGER_PASSWORD = os.getenv("BIWENGER_PASSWORD")
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    LLM_API_KEY = os.getenv("LLM_API_KEY")
-    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+class _CredentialsMeta(type):
+    """Metaclass allowing class-level property access (e.g. Credentials.BIWENGER_USERNAME)."""
+    @property
+    def BIWENGER_USERNAME(cls) -> str:
+        return _get_config_var("BIWENGER_USERNAME")
 
+    @property
+    def BIWENGER_PASSWORD(cls) -> str:
+        return _get_config_var("BIWENGER_PASSWORD")
+
+    @property
+    def OPENROUTER_API_KEY(cls) -> str:
+        return _get_config_var("OPENROUTER_API_KEY")
+
+    @property
+    def LLM_API_KEY(cls) -> str:
+        return _get_config_var("LLM_API_KEY")
+
+    @property
+    def DEEPSEEK_API_KEY(cls) -> str:
+        return _get_config_var("DEEPSEEK_API_KEY")
+
+
+class Credentials(metaclass=_CredentialsMeta):
     @classmethod
     def get_llm_api_key(cls) -> str:
         """Returns active LLM API Key based on LLM_PROVIDER selection."""
-        provider = (os.getenv("LLM_PROVIDER") or "openrouter").strip().lower()
+        provider = _get_config_var("LLM_PROVIDER", "openrouter").lower()
         if provider == "deepseek":
             return cls.DEEPSEEK_API_KEY or cls.LLM_API_KEY or cls.OPENROUTER_API_KEY or ""
         elif provider == "openrouter":
@@ -39,9 +68,9 @@ class Credentials:
     def validate(cls) -> list:
         """Returns a list of missing required credential names (empty = all OK)."""
         missing = []
-        if not cls.BIWENGER_USERNAME:
+        if not _get_config_var("BIWENGER_USERNAME"):
             missing.append("BIWENGER_USERNAME")
-        if not cls.BIWENGER_PASSWORD:
+        if not _get_config_var("BIWENGER_PASSWORD"):
             missing.append("BIWENGER_PASSWORD")
         if not cls.get_llm_api_key():
             missing.append("OPENROUTER_API_KEY (or LLM_API_KEY / DEEPSEEK_API_KEY)")
@@ -55,52 +84,50 @@ PROVIDER_BASE_URLS = {
 }
 
 DEFAULT_PROVIDER_MODELS = {
-    "openrouter": "meta-llama/llama-3.3-70b-instruct",
+    "openrouter": "openai/gpt-5.6-luna",
     "deepseek": "deepseek-chat",
     "openai": "gpt-4o-mini",
 }
 
 
-class GeneralSettings:
-    # Email/report language: es, en, ca... (default: es)
-    LANGUAGE = (os.getenv("LANGUAGE") or "es").strip().lower()
-    # Priority: SCORE_TYPE env var > default (5: Media Picas AS + SofaScore)
-    SCORE_TYPE = os.getenv("SCORE_TYPE") or DEFAULT_SCORE_TYPE
-    # When True, no write operation is sent to the Biwenger API (safe testing)
-    DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
+class _GeneralSettingsMeta(type):
+    """Metaclass allowing dynamic access to general settings."""
+    @property
+    def LANGUAGE(cls) -> str:
+        return _get_config_var("LANGUAGE", "es").lower()
 
-    # LLM Provider configuration (default: openrouter)
-    LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "openrouter").strip().lower()
+    @property
+    def SCORE_TYPE(cls) -> str:
+        return _get_config_var("SCORE_TYPE", "5")
 
-    # Base URL: explicit env var > provider default
-    LLM_BASE_URL = os.getenv("LLM_BASE_URL") or PROVIDER_BASE_URLS.get(LLM_PROVIDER, "https://openrouter.ai/api/v1")
+    @property
+    def DRY_RUN(cls) -> bool:
+        return _get_config_var("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
-    # Model resolution order: LLM_MODEL > OPENROUTER_MODEL > DEEPSEEK_MODEL > provider default
-    LLM_MODEL = (
-        os.getenv("LLM_MODEL")
-        or os.getenv("OPENROUTER_MODEL")
-        or os.getenv("DEEPSEEK_MODEL")
-        or DEFAULT_PROVIDER_MODELS.get(LLM_PROVIDER, "deepseek/deepseek-chat")
-    )
+    @property
+    def LLM_PROVIDER(cls) -> str:
+        return _get_config_var("LLM_PROVIDER", "openrouter").lower()
 
-    # Google Sheets Tracker
-    GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk")
-    GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "./credentials_google.json")
+    @property
+    def LLM_MODEL(cls) -> str:
+        return _get_config_var("LLM_MODEL", "openai/gpt-5.6-luna")
 
-
-
-LANGUAGE_NAMES = {
-    "es": "Spanish",
-    "en": "English",
-    "ca": "Catalan",
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "pt": "Portuguese",
-}
+    @property
+    def LLM_BASE_URL(cls) -> str:
+        return PROVIDER_BASE_URLS.get(cls.LLM_PROVIDER, "https://openrouter.ai/api/v1")
 
 
-def get_language_name() -> str:
-    """Returns the full language name for LLM prompts (e.g. 'Spanish')."""
-    return LANGUAGE_NAMES.get(GeneralSettings.LANGUAGE, "Spanish")
+class GeneralSettings(metaclass=_GeneralSettingsMeta):
+    pass
 
+
+class GoogleSheetsConfig:
+    @classmethod
+    @property
+    def SHEET_ID(cls) -> str:
+        return _get_config_var("GOOGLE_SHEET_ID")
+
+    @classmethod
+    @property
+    def SERVICE_ACCOUNT_FILE(cls) -> str:
+        return _get_config_var("GOOGLE_SERVICE_ACCOUNT_FILE", "./credentials_google.json")
