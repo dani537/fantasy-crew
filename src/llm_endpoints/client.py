@@ -129,6 +129,15 @@ class LLMClient:
             temperature=temperature
         )
 
+    def get_token_usage(self) -> dict:
+        """Returns the accumulated token usage."""
+        return self._usage.copy()
+
+
+def get_llm_client(api_key: str = None, base_url: str = None, default_model: str = None) -> LLMClient:
+    """Factory helper to obtain an instance of LLMClient."""
+    return LLMClient(api_key=api_key, base_url=base_url, default_model=default_model)
+
 
 # Alias for compatibility with FollowFit client naming
 OpenAICompatibleClient = LLMClient
