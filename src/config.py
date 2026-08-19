@@ -14,19 +14,37 @@ load_dotenv()
 def _get_config_var(key: str, default: str = "") -> str:
     """
     Dynamically retrieves a configuration variable:
-    1. Checks os.environ
-    2. Checks streamlit.secrets (if running in Streamlit Cloud)
+    1. Checks os.environ (case-insensitive)
+    2. Checks streamlit.secrets (case-insensitive, top level or nested sections)
     3. Returns default
     """
-    val = os.getenv(key)
-    if val:
-        return str(val).strip()
+    # 1. os.environ check
+    for k in (key, key.upper(), key.lower()):
+        val = os.getenv(k)
+        if val is not None and str(val).strip() != "":
+            return str(val).strip()
+
+    # 2. streamlit.secrets check
     try:
         import streamlit as st
-        if hasattr(st, "secrets") and key in st.secrets:
-            return str(st.secrets[key]).strip()
+        if hasattr(st, "secrets") and st.secrets is not None:
+            # Direct key match
+            for k in (key, key.upper(), key.lower()):
+                if k in st.secrets:
+                    val = st.secrets[k]
+                    if val is not None and str(val).strip() != "":
+                        return str(val).strip()
+
+            # Nested sections check (e.g. [biwenger], [openrouter], etc.)
+            for sec_name, sec_dict in st.secrets.items():
+                if isinstance(sec_dict, dict) or hasattr(sec_dict, "items"):
+                    for sk, sv in sec_dict.items():
+                        if sk.lower() == key.lower():
+                            if sv is not None and str(sv).strip() != "":
+                                return str(sv).strip()
     except Exception:
         pass
+
     return default
 
 
@@ -68,9 +86,9 @@ class Credentials(metaclass=_CredentialsMeta):
     def validate(cls) -> list:
         """Returns a list of missing required credential names (empty = all OK)."""
         missing = []
-        if not _get_config_var("BIWENGER_USERNAME"):
+        if not cls.BIWENGER_USERNAME:
             missing.append("BIWENGER_USERNAME")
-        if not _get_config_var("BIWENGER_PASSWORD"):
+        if not cls.BIWENGER_PASSWORD:
             missing.append("BIWENGER_PASSWORD")
         if not cls.get_llm_api_key():
             missing.append("OPENROUTER_API_KEY (or LLM_API_KEY / DEEPSEEK_API_KEY)")

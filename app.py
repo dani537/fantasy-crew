@@ -197,6 +197,18 @@ if st.sidebar.button("🔄 Actualizar Datos (Extracción)", type="primary", use_
 
 st.sidebar.markdown("---")
 
+with st.sidebar.expander("🔑 Estado de Secretos / Credenciales", expanded=False):
+    from src.config import _get_config_var
+    u = bool(_get_config_var("BIWENGER_USERNAME"))
+    p = bool(_get_config_var("BIWENGER_PASSWORD"))
+    k = bool(_get_config_var("OPENROUTER_API_KEY") or _get_config_var("DEEPSEEK_API_KEY") or _get_config_var("LLM_API_KEY"))
+    
+    st.write(f"• **BIWENGER_USERNAME:** {'✅ Detectado' if u else '❌ Falta'}")
+    st.write(f"• **BIWENGER_PASSWORD:** {'✅ Detectado' if p else '❌ Falta'}")
+    st.write(f"• **LLM API KEY:** {'✅ Detectado' if k else '❌ Falta'}")
+    if not (u and p and k):
+        st.caption("Asegúrate de pegar tus claves en Streamlit Cloud -> App Settings -> Secrets.")
+
 
 # =============================================================================
 # TOP KPI BANNER (If Data Available)
