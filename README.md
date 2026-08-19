@@ -242,10 +242,11 @@ El workflow ya viene configurado con los dos disparos diarios (**el cron de GitH
 │   ├── prompts/                # Prompts modulares para Coach, SD y Email
 │   └── utils/                  # Plantillas HTML Jinja2 y cliente SMTP
 ├── data/                       # CSVs y Excel generados durante la extracción
-├── test/                       # Scripts de prueba y suite de validación
-│   ├── test_live_extraction.py # Test de la extracción determinista
-│   ├── test_full_workflow.py   # Test del flujo completo de los agentes
-│   └── test_auction_phases.py  # Suite de prueba de fases (Pre-7:00 vs Post-7:00) con email
+├── test/                       # Suites de prueba ordenadas por componente
+│   ├── 01_data_extraction/run.py # Test de la extracción determinista (online/offline)
+│   ├── 02_coach/run.py          # Test del Entrenador (Mister) y generación de prompt/veredicto
+│   ├── 03_director/run.py       # Test del Director Deportivo (Broker) y plano financiero
+│   └── 99_pujas/run.py          # Estudio analítico de sobrepujas y modelo econométrico OLS
 └── reports/                    # Informes finales generados en cada ejecución
 ```
 
@@ -258,8 +259,16 @@ Crea o verifica el archivo `.env` en la raíz del proyecto:
 ```env
 BIWENGER_USERNAME=tu_email@ejemplo.com
 BIWENGER_PASSWORD=tu_contraseña
-DEEPSEEK_API_KEY=tu_api_key_deepseek
-DEEPSEEK_MODEL=deepseek-v4-flash # Modelo de IA (por defecto deepseek-v4-flash)
+
+# Configuración LLM Multi-Proveedor (OpenRouter, DeepSeek direct, OpenAI, custom)
+LLM_PROVIDER=openrouter                 # openrouter, deepseek, openai, custom
+OPENROUTER_API_KEY=tu_openrouter_key    # API Key para OpenRouter
+LLM_MODEL=deepseek/deepseek-chat        # Modelo LLM (ej: deepseek/deepseek-chat, anthropic/claude-3.5-sonnet)
+
+# Alternativa legacy / DeepSeek directo:
+# DEEPSEEK_API_KEY=tu_deepseek_key
+# DEEPSEEK_MODEL=deepseek-chat
+
 GMAIL_ADRESS=tu_email_gmail@gmail.com
 GMAIL_PASSWORD=tu_app_password_gmail
 SCORE_TYPE=5  # 5: Media Picas AS y SofaScore (por defecto 5 si se omite)
@@ -267,18 +276,21 @@ LANGUAGE=es   # Idioma del email periódico: es, en, ca, fr, de, it, pt
 DRY_RUN=false # true: simula toda la ejecución sin escribir nada en Biwenger
 ```
 
-### 2. Pruebas y Validación por Fases
-Puedes probar la toma de decisiones y el envío de emails para las distintas fases del mercado a cualquier hora:
+### 2. Pruebas y Validación por Componentes
+Puedes ejecutar la prueba de cada módulo haciendo correr su correspondiente `run.py`:
 
 ```bash
-# Probar ambas fases (Pre-7:00 AM y Post-7:00 AM) y enviar informes por email
-.venv/bin/python test/test_auction_phases.py --all
+# Test 1: Extracción de Datos
+.venv/bin/python test/01_data_extraction/run.py [--offline | --online]
 
-# Probar únicamente la fase Pre-7:00 AM (Subastas libres con Mercado/banca)
-.venv/bin/python test/test_auction_phases.py --phase pre_auction
+# Test 2: Entrenador (Mister)
+.venv/bin/python test/02_coach/run.py
 
-# Probar únicamente la fase Post-7:00 AM (Ofertas a rivales a la baja)
-.venv/bin/python test/test_auction_phases.py --phase post_auction
+# Test 3: Director Deportivo (Broker)
+.venv/bin/python test/03_director/run.py
+
+# Test 99: Estudio Analítico y Predictivo de Pujas
+.venv/bin/python test/99_pujas/run.py
 ```
 
 ### 3. Ejecutar el Flujo Completo del Agente

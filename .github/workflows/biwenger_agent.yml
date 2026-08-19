@@ -70,10 +70,14 @@ jobs:
           # Secrets (Configurar en GitHub > Settings > Secrets and variables > Actions > Secrets)
           BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
           BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
 
           # Variables (Configurar en GitHub > Settings > Secrets and variables > Actions > Variables)
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           GMAIL_ADRESS: ${{ vars.GMAIL_ADRESS }}
           LANGUAGE: ${{ vars.LANGUAGE }}
           SCORE_TYPE: ${{ vars.SCORE_TYPE }}
