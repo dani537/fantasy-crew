@@ -1,7 +1,18 @@
 import os
 from dotenv import load_dotenv
 
+# 1. Load local .env
 load_dotenv()
+
+# 2. Bridge Streamlit Cloud Secrets (if running in Streamlit Cloud)
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, (str, int, float, bool)):
+                os.environ[k] = str(v)
+except Exception:
+    pass
 
 # Biwenger score IDs: 1 = Picas AS, 2 = SofaScore, 5 = Media AS + SofaScore
 DEFAULT_SCORE_TYPE = "5"

@@ -10,12 +10,27 @@ Run:
 
 import os
 import sys
+
+# 1. Bridge Streamlit Cloud Secrets into os.environ before any imports
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, (str, int, float, bool)):
+                os.environ[k] = str(v)
+except Exception:
+    pass
+
+# Ensure directories exist
+os.makedirs("./data/raw", exist_ok=True)
+os.makedirs("./test/02_coach", exist_ok=True)
+os.makedirs("./test/04_pydantic_agent", exist_ok=True)
+
 import json
 import datetime
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 
 # Ensure root in sys.path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -24,13 +39,13 @@ if PROJECT_ROOT not in sys.path:
 
 # Page configuration
 st.set_page_config(
-    page_title="Biwenger Smart Hub | Dani SR",
+    page_title="Biwenger Smart Hub",
     page_icon="⚽",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for polished aesthetic
+# Custom CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -66,151 +81,181 @@ st.markdown("""
 
 
 # =============================================================================
-# DATA LOADERS (Cached for performance)
+# DATA LOADERS (100% Dynamic, Zero Hardcoding)
 # =============================================================================
 
 @st.cache_data(ttl=60)
 def load_user_info():
     path = "./data/user_info.csv"
     if os.path.exists(path):
-        df = pd.read_csv(path)
-        if not df.empty:
-            return df.iloc[0].to_dict()
-    return {
-        "user_name": "Dani SR",
-        "team_name": "Dani SR",
-        "league_name": "AZ Finance",
-        "balance": -5010300.0,
-        "team_id": 9878097
-    }
+        try:
+            df = pd.read_csv(path)
+            if not df.empty:
+                return df.iloc[0].to_dict()
+        except Exception:
+            pass
+    return None
 
 @st.cache_data(ttl=60)
 def load_master_players():
     path = "./data/players_transformed.csv"
     if os.path.exists(path):
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            pass
     return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def load_rival_financials():
     path = "./data/rival_financials.csv"
     if os.path.exists(path):
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            pass
     return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def load_market_offers():
     path = "./data/raw/market_offers.csv"
     if os.path.exists(path):
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            pass
     return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def load_next_jornada():
     path = "./data/raw/next_jornada.csv"
     if os.path.exists(path):
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            pass
     return pd.DataFrame()
 
 @st.cache_data(ttl=60)
 def load_transfers():
     path = "./data/raw/board_transfers.csv"
     if os.path.exists(path):
-        return pd.read_csv(path)
+        try:
+            return pd.read_csv(path)
+        except Exception:
+            pass
     return pd.DataFrame()
 
 
 # =============================================================================
-# HEADER & KPI BANNER
+# SIDEBAR & EXTRACTION TRIGGER
 # =============================================================================
 
+st.sidebar.title("⚽ BIWENGER AI HUB")
+
 user_ctx = load_user_info()
-df_players = load_master_players()
-df_rivals = load_rival_financials()
-df_offers = load_market_offers()
+
+if user_ctx:
+    my_team_name = str(user_ctx.get("team_name", "Mi Equipo"))
+    league_name = str(user_ctx.get("league_name", "Liga Biwenger"))
+    balance = float(user_ctx.get("balance", 0.0))
+    st.sidebar.markdown(f"**Mánager:** `{my_team_name}`")
+    st.sidebar.markdown(f"**Liga:** `{league_name}`")
+else:
+    my_team_name = "Sin datos"
+    league_name = "Sin datos"
+    balance = 0.0
+    st.sidebar.warning("⚠️ No hay datos cargados todavía.")
+
+# Next matchday info
 df_next_j = load_next_jornada()
-
-my_team_name = user_ctx.get("team_name", "Dani SR")
-balance = float(user_ctx.get("balance", -5010300.0))
-league_name = user_ctx.get("league_name", "AZ Finance")
-
-# Calculate squad metrics
-my_squad = df_players[df_players["BIWPLAYER_TEAM_NAME"] == my_team_name] if not df_players.empty else pd.DataFrame()
-squad_value = my_squad["PLAYER_PRICE"].sum() if not my_squad.empty else 0.0
-total_equity = balance + squad_value
-squad_count = len(my_squad)
-
-# Active offers sum
-active_offers_sum = my_squad["MARKET_OFFER_AMOUNT"].dropna().sum() if not my_squad.empty and "MARKET_OFFER_AMOUNT" in my_squad.columns else 0.0
-
-# Next kickoff info
-next_kickoff_str = "Mañana 21:00"
+next_kickoff_str = "Próximamente"
 if not df_next_j.empty:
     f_date = df_next_j.iloc[0].get("fecha")
     if pd.notna(f_date):
         try:
             dt = pd.to_datetime(f_date).tz_localize(None)
-            next_kickoff_str = dt.strftime("%d/%m a las %H:%M")
+            next_kickoff_str = dt.strftime("%d/%m %H:%M")
         except Exception:
             pass
-
-# Top Title & Sidebar
-st.sidebar.title("⚽ BIWENGER AI HUB")
-st.sidebar.markdown(f"**Mánager:** `{my_team_name}`")
-st.sidebar.markdown(f"**Liga:** `{league_name}`")
 st.sidebar.markdown(f"**Próxima Jornada:** `{next_kickoff_str}`")
 st.sidebar.markdown("---")
 
-# Quick Action: Re-run extraction
-if st.sidebar.button("🔄 Actualizar Datos (Extracción)", use_container_width=True):
-    with st.sidebar.status("Extrayendo datos de Biwenger y Comuniate..."):
-        from src.tools.data_extraction.runner import orchestrate_pipeline
-        orchestrate_pipeline(extract=True)
-        st.cache_data.clear()
-        st.success("¡Datos actualizados!")
-        st.rerun()
+# Extraction Action Button
+if st.sidebar.button("🔄 Actualizar Datos (Extracción)", type="primary", use_container_width=True):
+    with st.sidebar.status("Conectando con Biwenger y extrayendo datos...", expanded=True) as status:
+        try:
+            st.write("1. Autenticando con Biwenger...")
+            from src.tools.data_extraction.runner import orchestrate_pipeline
+            orchestrate_pipeline(extract=True)
+            st.cache_data.clear()
+            status.update(label="¡Extracción completada con éxito!", state="complete", expanded=False)
+            st.rerun()
+        except Exception as e:
+            status.update(label="Error en la extracción", state="error", expanded=True)
+            st.error(f"❌ Error al extraer datos: {e}")
 
-# Top KPI Metric Row
-kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+st.sidebar.markdown("---")
 
-with kpi1:
-    balance_color = "normal" if balance >= 0 else "inverse"
-    st.metric(
-        label="💰 Saldo Bancario",
-        value=f"{balance:,.0f} €",
-        delta="SALDO POSITIVO ✅" if balance >= 0 else "NÚMEROS ROJOS ⚠️",
-        delta_color=balance_color
-    )
 
-with kpi2:
-    st.metric(
-        label="👥 Valor Plantilla",
-        value=f"{squad_value/1_000_000:.2f} M€",
-        delta=f"{squad_count} jugadores"
-    )
+# =============================================================================
+# TOP KPI BANNER (If Data Available)
+# =============================================================================
 
-with kpi3:
-    st.metric(
-        label="🏦 Patrimonio Total",
-        value=f"{total_equity/1_000_000:.2f} M€",
-        delta="Capital Total"
-    )
+df_players = load_master_players()
+df_rivals = load_rival_financials()
 
-with kpi4:
-    st.metric(
-        label="📑 Ofertas en Firme",
-        value=f"{active_offers_sum/1_000_000:.2f} M€",
-        delta="Liquidez Inmediata"
-    )
+if user_ctx and not df_players.empty:
+    my_squad = df_players[df_players["BIWPLAYER_TEAM_NAME"] == my_team_name]
+    squad_value = my_squad["PLAYER_PRICE"].sum() if not my_squad.empty else 0.0
+    total_equity = balance + squad_value
+    squad_count = len(my_squad)
+    active_offers_sum = my_squad["MARKET_OFFER_AMOUNT"].dropna().sum() if "MARKET_OFFER_AMOUNT" in my_squad.columns else 0.0
 
-with kpi5:
-    st.metric(
-        label="⏳ Próximo Inicio",
-        value=next_kickoff_str,
-        delta="Deadline Saldo > 0€"
-    )
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
-st.markdown("---")
+    with kpi1:
+        balance_color = "normal" if balance >= 0 else "inverse"
+        st.metric(
+            label="💰 Saldo Bancario",
+            value=f"{balance:,.0f} €",
+            delta="SALDO POSITIVO ✅" if balance >= 0 else "NÚMEROS ROJOS ⚠️",
+            delta_color=balance_color
+        )
+
+    with kpi2:
+        st.metric(
+            label="👥 Valor Plantilla",
+            value=f"{squad_value/1_000_000:.2f} M€",
+            delta=f"{squad_count} jugadores"
+        )
+
+    with kpi3:
+        st.metric(
+            label="🏦 Patrimonio Total",
+            value=f"{total_equity/1_000_000:.2f} M€",
+            delta="Capital Total"
+        )
+
+    with kpi4:
+        st.metric(
+            label="📑 Ofertas en Firme",
+            value=f"{active_offers_sum/1_000_000:.2f} M€",
+            delta="Liquidez Inmediata"
+        )
+
+    with kpi5:
+        st.metric(
+            label="⏳ Próximo Inicio",
+            value=next_kickoff_str,
+            delta="Deadline Saldo > 0€"
+        )
+
+    st.markdown("---")
+
+else:
+    st.info("👋 **¡Bienvenido a Biwenger AI Hub!** Pulsa el botón **'🔄 Actualizar Datos (Extracción)'** en la barra lateral izquierda para descargar tu liga y comenzar.")
+    my_squad = pd.DataFrame()
 
 
 # =============================================================================
@@ -237,7 +282,6 @@ with tab_squad:
         col_sq1, col_sq2 = st.columns([3, 2])
 
         with col_sq1:
-            # Format dataframe for display
             display_cols = [
                 "PLAYER_ID", "PLAYER_NAME", "PLAYER_POSITION", "PLAYER_PRICE",
                 "PLAYER_PRICE_INCREMENT", "COMUNIATE_STARTER", "CAN_SELL_TODAY",
@@ -257,7 +301,6 @@ with tab_squad:
                 "BIWPLAYER_CLAUSE": "Cláusula (€)"
             }, inplace=True)
 
-            # Format formatting
             if "Titularidad %" in df_sq_display.columns:
                 df_sq_display["Titularidad %"] = (df_sq_display["Titularidad %"] * 100).astype(int).astype(str) + "%"
 
@@ -292,7 +335,6 @@ with tab_squad:
                 default=[]
             )
 
-            # Calculate simulation
             sim_income = 0.0
             blocked_selected = []
             for label in selected_labels:
@@ -315,7 +357,7 @@ with tab_squad:
                 st.warning(f"🚨 **Atención:** Has seleccionado jugadores con venta bloqueada hoy: **{', '.join(blocked_selected)}**")
 
     else:
-        st.info("No hay datos de plantilla disponibles. Ejecuta la extracción primero.")
+        st.info("No hay datos de plantilla disponibles. Pulsa '🔄 Actualizar Datos (Extracción)'.")
 
 
 # -----------------------------------------------------------------------------
@@ -327,7 +369,6 @@ with tab_market:
     if not df_players.empty and "MARKET_SALE_PRICE" in df_players.columns:
         mkt_players = df_players[df_players["MARKET_SALE_PRICE"] > 0].copy()
 
-        # Filter bar
         f_col1, f_col2, f_col3 = st.columns(3)
         with f_col1:
             pos_filter = st.multiselect("Posición:", options=["GK", "DF", "MF", "FW"], default=["GK", "DF", "MF", "FW"])
@@ -336,7 +377,6 @@ with tab_market:
         with f_col3:
             max_price_mkt = st.slider("Precio Máximo (€):", min_value=150_000, max_value=25_000_000, value=25_000_000, step=250_000)
 
-        # Apply filters
         if pos_filter:
             mkt_players = mkt_players[mkt_players["PLAYER_POSITION"].isin(pos_filter)]
         if seller_filter == "Solo Mercado (Computer)":
@@ -345,7 +385,6 @@ with tab_market:
             mkt_players = mkt_players[~mkt_players["MARKET_SALE_USER_NAME"].isin(["Mercado", "None", None]) & mkt_players["MARKET_SALE_USER_NAME"].notna()]
         mkt_players = mkt_players[mkt_players["MARKET_SALE_PRICE"] <= max_price_mkt]
 
-        # Display market table
         mkt_cols = [
             "PLAYER_ID", "PLAYER_NAME", "TEAM_NAME", "PLAYER_POSITION",
             "MARKET_SALE_PRICE", "PLAYER_PRICE_INCREMENT", "COMUNIATE_STARTER",
@@ -376,14 +415,13 @@ with tab_market:
             height=400
         )
 
-        # Recent transfers feed
         df_transfers = load_transfers()
         if not df_transfers.empty:
             st.markdown("### 📜 Últimos Movimientos y Fichajes de la Liga")
             st.dataframe(df_transfers.head(10), use_container_width=True)
 
     else:
-        st.info("No hay datos de mercado disponibles.")
+        st.info("No hay datos de mercado disponibles. Pulsa '🔄 Actualizar Datos (Extracción)'.")
 
 
 # -----------------------------------------------------------------------------
@@ -397,8 +435,6 @@ with tab_rivals:
 
         with r_col1:
             st.markdown("#### 🏆 Clasificación Financiera de la Liga")
-            
-            # Format rivals table
             df_rf_view = df_rivals[[
                 "posicion_liga", "manager", "saldo_disponible", "patrimonio_total",
                 "num_jugadores", "fichajes", "ventas"
@@ -436,7 +472,6 @@ with tab_rivals:
                 st.success("No hay rivales en números rojos actualmente.")
 
             st.markdown("---")
-            # Scouting by rival
             st.markdown("#### 🔍 Explorar Plantilla de un Rival")
             selected_manager = st.selectbox(
                 "Selecciona un Mánager:",
@@ -452,6 +487,8 @@ with tab_rivals:
                     }),
                     use_container_width=True
                 )
+    else:
+        st.info("No hay datos de rivales disponibles. Pulsa '🔄 Actualizar Datos (Extracción)'.")
 
 
 # -----------------------------------------------------------------------------
@@ -487,7 +524,6 @@ with tab_player_scan:
     scan_col1, scan_col2 = st.columns([2, 1])
 
     with scan_col1:
-        # Search by player name or ID
         if not df_players.empty:
             player_choices = {f"{r['PLAYER_NAME']} ({r.get('TEAM_NAME', 'Sin Equipo')}) - ID: {r['PLAYER_ID']}": int(r['PLAYER_ID']) for _, r in df_players.iterrows()}
             selected_choice = st.selectbox("Selecciona un jugador de LaLiga:", options=list(player_choices.keys()), index=0)
@@ -507,10 +543,7 @@ with tab_player_scan:
             try:
                 p_data = fetch_player_detail(target_player_id)
                 md_report = format_player_detail_md(p_data)
-                
-                # Render formatted report
                 st.markdown(md_report)
-                
             except Exception as e:
                 st.error(f"Error al obtener los datos del jugador: {e}")
 
@@ -542,7 +575,6 @@ with tab_agent:
             result = asyncio.run(agent.run(prompt))
             output_text = getattr(result, 'output', getattr(result, 'data', str(result)))
 
-            # Save report
             report_path = "./test/04_pydantic_agent/04_sporting_director_response.md"
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write(f"# 👔 PLAN ESTRATÉGICO DEL DIRECTOR DEPORTIVO\n\n{output_text}")
@@ -551,7 +583,6 @@ with tab_agent:
             st.markdown(output_text)
 
     else:
-        # Load latest saved agent response if available
         agent_report_path = "./test/04_pydantic_agent/04_sporting_director_response.md"
         if os.path.exists(agent_report_path):
             with open(agent_report_path, "r", encoding="utf-8") as f:
@@ -560,7 +591,6 @@ with tab_agent:
         else:
             st.info("Pulsa 'Ejecutar Agente Director Deportivo' para iniciar la simulación.")
 
-    # Execution log expander
     log_path = "./test/04_pydantic_agent/04_agent_execution_log.md"
     if os.path.exists(log_path):
         with st.expander("📜 Ver Log de Trazabilidad y Herramientas Invocadas por el Agente"):
