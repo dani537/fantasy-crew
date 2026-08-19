@@ -1,5 +1,6 @@
 import requests
 import random
+import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pydantic import BaseModel
@@ -8,9 +9,6 @@ BASE_URL = "https://biwenger.as.com/"
 LOGIN_URL = BASE_URL + 'api/v2/auth/login'
 USER_INFO_URL = BASE_URL + 'api/v2/account'
 
-
-# NOTA: Aquest codi només està preparat per quan l'usuari té una sola lliga (com és el meu cas), resta pendent
-#       per a gestionar múltiples ligues a get_user_info, ara mateix només retorna la primera lliga
 
 class PlayerInfo(BaseModel):
     user_id: int
@@ -38,11 +36,7 @@ def get_random_user_agent() -> str:
 
 def get_random_language() -> str:
     """Returns a random Accept-Language string."""
-    languages = [
-        "es",
-        "ca"
-    ]
-    return random.choice(languages)
+    return random.choice(["es", "ca"])
 
 
 def random_headers() -> dict:
@@ -57,28 +51,15 @@ def random_headers() -> dict:
 
 class BiwengerAuth:
     """
-    Handles authentication with Biwenger using a persistent session.
+    Handles authentication with Biwenger using a persistent session or direct Bearer Token.
     """
-    def __init__(self, email: str, password: str):
+    def __init__(self, email: str = None, password: str = None, token: str = None):
         self.email = email
         self.password = password
+        self.token = token
         self.session = requests.Session()
-        self._setup_retries()
         self._setup_headers()
-        self.token = None
         self.player_info = None
-
-    def _setup_retries(self):
-        """Configures requests to automatically retry on network failures or temporary 5xx errors."""
-        retries = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
-        )
-        adapter = HTTPAdapter(max_retries=retries)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
 
     def _setup_headers(self):
         """Sets up the base headers for the session to mimic a real browser."""
@@ -88,36 +69,32 @@ class BiwengerAuth:
     def login(self) -> str:
         """
         Performs the login process and returns the bearer token.
-        
-        Returns:
-            str: The bearer token if login is successful.
-            
-        Raises:
-            Exception: If login fails or token is not found.
         """
-        # 1. Visit home to initialize cookies (optional but recommended)
         try:
-            self.session.get(BASE_URL)
-        except requests.RequestException as e:
-            print(f"Warning: Error connecting to home page: {e}")
+            self.session.get(BASE_URL, timeout=15)
+        except Exception:
+            pass
 
-        # 2. Login
         login_payload = {
             "email": self.email,
             "password": self.password
         }
     
         try:
-            response = self.session.post(LOGIN_URL, json=login_payload)
+            response = self.session.post(LOGIN_URL, json=login_payload, timeout=20)
             
             if response.status_code == 200:
                 self.token = response.json().get("token")
                 if self.token:
-                    # Update session headers with the token
                     self.session.headers.update({"Authorization": f"Bearer {self.token}"})
                     return self.token
                 else:
                     raise Exception("Login successful but no token found in response.")
+            elif response.status_code == 429:
+                raise Exception(
+                    "Biwenger ha limitado temporalmente el endpoint de login (429 Rate Limit). "
+                    "Usa tu BIWENGER_TOKEN directamente en Secrets para evitar el login por contraseña."
+                )
             else:
                 raise Exception(f"Login failed with status code: {response.status_code}. Response: {response.text}")
 
@@ -129,24 +106,30 @@ class BiwengerAuth:
         return self.session
 
     def get_user_info(self):
-        # Añadimos el token y el referer al header base
+        """
+        Retrieves user information from Biwenger using the bearer token.
+        """
         extra_headers = {
             "Authorization": f"Bearer {self.token}",
             "Referer": "https://biwenger.as.com/"
         }
-        response = self.session.get(USER_INFO_URL, headers=extra_headers)
+        response = self.session.get(USER_INFO_URL, headers=extra_headers, timeout=20)
         
         if response.status_code == 200:
             response_json = response.json()
-            user_id = response_json.get('data').get('account').get('id')
-            user_name = response_json.get('data').get('account').get('name')
+            user_id = response_json.get('data', {}).get('account', {}).get('id')
+            user_name = response_json.get('data', {}).get('account', {}).get('name')
 
-            league_id = response_json.get('data').get('leagues')[0].get('id')
-            league_name = response_json.get('data').get('leagues')[0].get('name')
-            competition_slug = response_json.get('data').get('leagues')[0].get('competition')
-            team_id = response_json.get('data').get('leagues')[0].get('user').get('id')
-            team_name = response_json.get('data').get('leagues')[0].get('user').get('name')
-            balance = response_json.get('data').get('leagues')[0].get('user').get('balance')
+            leagues = response_json.get('data', {}).get('leagues', [])
+            if not leagues:
+                raise Exception("No leagues found in user account.")
+
+            league_id = leagues[0].get('id')
+            league_name = leagues[0].get('name')
+            competition_slug = leagues[0].get('competition')
+            team_id = leagues[0].get('user', {}).get('id')
+            team_name = leagues[0].get('user', {}).get('name')
+            balance = leagues[0].get('user', {}).get('balance', 0)
 
             self.player_info = PlayerInfo(
                 user_id=user_id,
@@ -158,27 +141,23 @@ class BiwengerAuth:
                 balance=balance,
                 competition_slug=competition_slug
             )
-
             return self.player_info
-
+        elif response.status_code == 429:
+            raise Exception("Rate limit (429) en /api/v2/account.")
         else:
-            raise Exception(f"Failed to get user info: {response.text}")
+            raise Exception(f"Failed to get user info: HTTP {response.status_code}")
 
-    def run(self):
+    def run(self) -> requests.Session:
         """
-        Ejecuta login y obtiene la información del usuario.
-        
-        Returns:
-            dict: Diccionario con 'token' y 'player_info'
+        Runs authentication flow. If token exists, uses it directly; otherwise performs login.
         """
-        token = self.login()
-        print(f"Token obtenido: {token[:20]}...")
-        player_info = self.get_user_info()
-        print(f"Usuario: {player_info.user_name}")
-        print(f"Liga: {player_info.league_name} ({player_info.competition_slug})")
-        print(f"Equipo: {player_info.team_name}")
-        print(f"Balance: {player_info.balance:,}€")
-        return {
-            'token': token,
-            'player_info': player_info
-        }
+        if self.token:
+            self.session.headers.update({"Authorization": f"Bearer {self.token}"})
+            self.get_user_info()
+            return self.session
+        elif self.email and self.password:
+            self.login()
+            self.get_user_info()
+            return self.session
+        else:
+            raise ValueError("Debes proporcionar BIWENGER_TOKEN o BIWENGER_USERNAME y BIWENGER_PASSWORD.")

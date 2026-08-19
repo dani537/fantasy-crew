@@ -59,7 +59,11 @@ def extract_and_save_data():
         # Step 3: User Authentication (Only required for Private League Data)
         print_step(3, "Authenticating with Biwenger for Private League Data")
         with redirect_stdout(f):
-            auth = BiwengerAuth(email=Credentials.BIWENGER_USERNAME, password=Credentials.BIWENGER_PASSWORD)
+            auth = BiwengerAuth(
+                email=Credentials.BIWENGER_USERNAME,
+                password=Credentials.BIWENGER_PASSWORD,
+                token=Credentials.BIWENGER_TOKEN
+            )
             auth.run()
         
         # Save User Info/Metadata

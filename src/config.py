@@ -51,6 +51,10 @@ def _get_config_var(key: str, default: str = "") -> str:
 class _CredentialsMeta(type):
     """Metaclass allowing class-level property access (e.g. Credentials.BIWENGER_USERNAME)."""
     @property
+    def BIWENGER_TOKEN(cls) -> str:
+        return _get_config_var("BIWENGER_TOKEN")
+
+    @property
     def BIWENGER_USERNAME(cls) -> str:
         return _get_config_var("BIWENGER_USERNAME")
 
@@ -86,10 +90,11 @@ class Credentials(metaclass=_CredentialsMeta):
     def validate(cls) -> list:
         """Returns a list of missing required credential names (empty = all OK)."""
         missing = []
-        if not cls.BIWENGER_USERNAME:
-            missing.append("BIWENGER_USERNAME")
-        if not cls.BIWENGER_PASSWORD:
-            missing.append("BIWENGER_PASSWORD")
+        has_token = bool(_get_config_var("BIWENGER_TOKEN"))
+        has_creds = bool(_get_config_var("BIWENGER_USERNAME") and _get_config_var("BIWENGER_PASSWORD"))
+        
+        if not (has_token or has_creds):
+            missing.append("BIWENGER_TOKEN (o BIWENGER_USERNAME y BIWENGER_PASSWORD)")
         if not cls.get_llm_api_key():
             missing.append("OPENROUTER_API_KEY (or LLM_API_KEY / DEEPSEEK_API_KEY)")
         return missing

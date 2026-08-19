@@ -199,15 +199,19 @@ st.sidebar.markdown("---")
 
 with st.sidebar.expander("🔑 Estado de Secretos / Credenciales", expanded=False):
     from src.config import _get_config_var
+    tok = bool(_get_config_var("BIWENGER_TOKEN"))
     u = bool(_get_config_var("BIWENGER_USERNAME"))
     p = bool(_get_config_var("BIWENGER_PASSWORD"))
     k = bool(_get_config_var("OPENROUTER_API_KEY") or _get_config_var("DEEPSEEK_API_KEY") or _get_config_var("LLM_API_KEY"))
     
-    st.write(f"• **BIWENGER_USERNAME:** {'✅ Detectado' if u else '❌ Falta'}")
-    st.write(f"• **BIWENGER_PASSWORD:** {'✅ Detectado' if p else '❌ Falta'}")
+    if tok:
+        st.write("• **BIWENGER_TOKEN:** ✅ Direct Bearer Token (Anti-429)")
+    else:
+        st.write(f"• **BIWENGER_USERNAME:** {'✅ Detectado' if u else '❌ Falta'}")
+        st.write(f"• **BIWENGER_PASSWORD:** {'✅ Detectado' if p else '❌ Falta'}")
     st.write(f"• **LLM API KEY:** {'✅ Detectado' if k else '❌ Falta'}")
-    if not (u and p and k):
-        st.caption("Asegúrate de pegar tus claves en Streamlit Cloud -> App Settings -> Secrets.")
+    if not ((tok or (u and p)) and k):
+        st.caption("Configura tus secretos en Streamlit Cloud -> App Settings -> Secrets.")
 
 
 # =============================================================================
