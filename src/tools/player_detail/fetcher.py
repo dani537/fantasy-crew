@@ -9,12 +9,30 @@ Comuniate tactical forecasts, and private league clause/financial feasibility.
 
 import os
 import requests
+import random
 import datetime
 import pandas as pd
 from typing import Dict, Any, Optional, List
 
-from src.tools.data_extraction.auth import random_headers
 from src.config import GeneralSettings
+
+
+def _get_random_user_agent() -> str:
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
+    return random.choice(user_agents)
+
+
+def random_headers() -> dict:
+    return {
+        "User-Agent": _get_random_user_agent(),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-ES,es;q=0.9,ca;q=0.8",
+        "Origin": "https://biwenger.as.com",
+    }
 
 
 POSITION_MAP = {
@@ -238,7 +256,7 @@ def fetch_player_detail(
 
     url = (
         f"https://cf.biwenger.com/api/v2/players/{competition_slug}/{player_id}"
-        f"?fields=*,fitness,prices,reports,seasons,team"
+        f"?fields=*,analysis,fitness,prices,reports,seasons,team"
     )
 
     response = requests.get(url, headers=headers, timeout=10)
@@ -249,6 +267,20 @@ def fetch_player_detail(
         )
 
     raw_data = response.json().get("data", {})
+
+    # 1.1 Analysis & Community Market Metrics
+    analysis_data = raw_data.get("analysis", {})
+    market_sentiment = {
+        "pct_compras_24h": analysis_data.get("purchases", 0),
+        "pct_ventas_24h": analysis_data.get("sales", 0),
+        "pct_uso_en_ligas": analysis_data.get("owned", 0),
+    }
+    ranking_data = analysis_data.get("ranking", {})
+    rankings_dict = {
+        "ranking_global": ranking_data.get("global"),
+        "ranking_posicion": ranking_data.get("position"),
+        "ranking_ultima_temporada": ranking_data.get("lastSeason"),
+    }
 
     # 2. Extract Profile
     name = raw_data.get("name", "Desconocido")
@@ -491,6 +523,8 @@ def fetch_player_detail(
         "comuniate": comuniate_data,
         "proximo_partido": next_game_dict,
         "situacion_liga": league_info,
+        "sentimiento_mercado": market_sentiment,
+        "rankings": rankings_dict,
         "dictamen_analista": {
             "puntuacion_especulativa_trading": f"{trading_score}/10",
             "puntuacion_deportiva_fantasy": f"{sports_score}/10",
@@ -541,6 +575,20 @@ def format_player_detail_md(data: Dict[str, Any]) -> str:
     md.append(f"- **Revalorización Total de Temporada:** 🟢 **`+{curva.get('subida_acumulada_temporada', 0):,.0f} €` (+{curva.get('pct_subida_temporada', 0)}%)**")
     md.append(f"- **Fase de Mercado:** {curva.get('fase_curva')}")
     md.append(f"- **Estrategia de Mercado:** *{curva.get('estrategia_fase')}*\n")
+
+    sentimiento = data.get("sentimiento_mercado", {})
+    rankings = data.get("rankings", {})
+    if sentimiento or rankings:
+        md.append("### 📊 Sentimiento de Mercado y Penetración Global (Biwenger)")
+        p_buy = sentimiento.get("pct_compras_24h", 0)
+        p_sell = sentimiento.get("pct_ventas_24h", 0)
+        p_use = sentimiento.get("pct_uso_en_ligas", 0)
+        md.append(f"- 🛒 **Compras (24h):** **`{p_buy}%`** (Usuarios que han pujado por él en el mercado)")
+        md.append(f"- 🏷️ **Ventas (24h):** **`{p_sell}%`** (Ligas donde ha sido puesto en venta)")
+        md.append(f"- 👥 **Uso / Posesión:** **`{p_use}%`** (Ligas donde al menos un equipo lo tiene)")
+        if rankings.get("ranking_global") is not None:
+            md.append(f"- 🏆 **Rankings:** General: **`#{rankings.get('ranking_global')}`** | Posición: **`#{rankings.get('ranking_posicion')}`** | Última temporada: **`#{rankings.get('ranking_ultima_temporada')}`**")
+        md.append("\n")
 
     md.append("### ⏱️ Variaciones Temporales Relevantes")
     md.append("| Periodo | Precio Anterior | Variación Absoluta | Variación Porcentual |")
