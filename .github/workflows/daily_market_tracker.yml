@@ -32,6 +32,7 @@ jobs:
 
       - name: 🚀 Run Daily Market Capture & Google Sheets Sync
         env:
+          PYTHONUNBUFFERED: "1"
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_ID_MARKET: ${{ secrets.GOOGLE_SHEET_ID_MARKET }}
           BIWENGER_TOKEN: ${{ secrets.BIWENGER_TOKEN }}
@@ -41,10 +42,10 @@ jobs:
           BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID }}
         run: |
           # 1. Update general league context if credentials are provided
-          python -m src.tools.data_extraction.runner || true
+          python -u -m src.tools.data_extraction.runner || true
 
           # 2. Run master 40-dimensional market tracker & sync to Google Sheets
-          python src/tools/data_extraction/daily_market_tracker.py
+          python -u src/tools/data_extraction/daily_market_tracker.py
 
       - name: 💾 Commit and Push Updated Data
         run: |
