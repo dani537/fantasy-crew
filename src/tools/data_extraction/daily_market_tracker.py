@@ -1,7 +1,7 @@
 """
 Daily Biwenger Master Market & Intelligence Tracker
 ====================================================
-Captures the complete 40-dimensional snapshot of player metrics:
+Captures the complete 40-dimensional snapshot of ALL LaLiga players (577+):
 - Demographics, Identity, Position, Status
 - Pricing, 24h/7d/14d/30d Variations, 1y Min/Max, Season Gain
 - Community Market Sentiment (% Compras, % Ventas, % Uso, Presión Neta)
@@ -115,7 +115,7 @@ def calculate_age(birthday_val):
     except Exception:
         return None
 
-def run_daily_market_capture(max_players: int = 140):
+def run_daily_market_capture(max_players: int = None):
     print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -132,7 +132,8 @@ def run_daily_market_capture(max_players: int = 140):
     raw_players = comp_data.get("players", {})
     raw_teams = comp_data.get("teams", {})
     team_map = {int(tid): t["name"] for tid, t in raw_teams.items()}
-    print(f"✅ Obtenidos {len(raw_players)} jugadores base de LaLiga.")
+    total_comp_players = len(raw_players)
+    print(f"✅ Obtenidos {total_comp_players} jugadores base y {len(raw_teams)} equipos de LaLiga.")
 
     # 2. Local League & Comuniate context
     league_owners = {}
@@ -172,29 +173,35 @@ def run_daily_market_capture(max_players: int = 140):
         except Exception:
             pass
 
-    # 3. Target priority players (all league + market + top fantasy value)
+    # 3. Target players: ALL 577 players of LaLiga
     sorted_pids = sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
         reverse=True
     )
-    target_pids = [int(p) for p in sorted_pids[:max_players]]
+    if max_players is not None and max_players > 0:
+        target_pids = [int(p) for p in sorted_pids[:max_players]]
+    else:
+        target_pids = [int(p) for p in sorted_pids]
 
-    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para {len(target_pids)} jugadores clave...")
+    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para TODOS los {len(target_pids)} jugadores de LaLiga...")
     details_map = {}
     for idx, pid in enumerate(target_pids, 1):
-        time.sleep(random.uniform(0.12, 0.22))
+        time.sleep(random.uniform(0.10, 0.18))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 r = requests.get(url, headers=get_headers(), timeout=5)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
                     break
                 elif r.status_code == 429:
-                    time.sleep(1.5)
+                    time.sleep(1.5 + attempt * 1.5)
             except Exception:
                 time.sleep(0.5)
+        
+        if idx % 50 == 0 or idx == len(target_pids):
+            print(f"   Progreso: {idx}/{len(target_pids)} ({idx/len(target_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
 
     print(f"✅ {len(details_map)}/{len(target_pids)} fichas exhaustivas extraídas con éxito.")
 
@@ -352,13 +359,13 @@ def run_daily_market_capture(max_players: int = 140):
             # Ensure tabs exist
             ws_titles = [w.title for w in sh.worksheets()]
             if TAB_HISTORICO not in ws_titles:
-                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=5000, cols=len(HEADERS)+2)
+                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=10000, cols=len(HEADERS)+2)
                 ws_hist.append_row(HEADERS)
             else:
                 ws_hist = sh.worksheet(TAB_HISTORICO)
 
             if TAB_HOY not in ws_titles:
-                ws_hoy = sh.add_worksheet(title=TAB_HOY, rows=500, cols=len(HEADERS)+2)
+                ws_hoy = sh.add_worksheet(title=TAB_HOY, rows=1000, cols=len(HEADERS)+2)
                 ws_hoy.append_row(HEADERS)
             else:
                 ws_hoy = sh.worksheet(TAB_HOY)

@@ -35,6 +35,8 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SHEET_ID_MARKET: ${{ secrets.GOOGLE_SHEET_ID_MARKET }}
           BIWENGER_TOKEN: ${{ secrets.BIWENGER_TOKEN }}
+          BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
+          BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
           BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID }}
           BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID }}
         run: |
