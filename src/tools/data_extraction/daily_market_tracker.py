@@ -26,8 +26,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 POSITION_MAP = {1: "Portero", 2: "Defensa", 3: "Centrocampista", 4: "Delantero"}
-SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID_MARKET", "1FsuSJr5k7BkPJa6vIL1zRK0qvIJGlaoSFIPxAUx8wr0")
-CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "credentials_google.json")
+DEFAULT_SPREADSHEET_ID = "1FsuSJr5k7BkPJa6vIL1zRK0qvIJGlaoSFIPxAUx8wr0"
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID_MARKET") or DEFAULT_SPREADSHEET_ID
+CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "credentials_google.json"
 TAB_HISTORICO = "Historico_Continuo"
 TAB_HOY = "Mercado_Hoy"
 
@@ -81,19 +82,22 @@ def get_headers():
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if creds_json_str:
+    if creds_json_str and creds_json_str.strip():
         try:
-            creds_dict = json.loads(creds_json_str)
+            print("🔑 Cargando credenciales de Google Sheets desde GOOGLE_SERVICE_ACCOUNT_JSON...")
+            creds_dict = json.loads(creds_json_str.strip())
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             return gspread.authorize(creds)
         except Exception as e:
             print(f"⚠️ Error cargando GOOGLE_SERVICE_ACCOUNT_JSON env var: {e}")
     if os.path.exists(CREDS_FILE):
         try:
+            print(f"🔑 Cargando credenciales de Google Sheets desde archivo local: {CREDS_FILE}...")
             creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
             return gspread.authorize(creds)
         except Exception as e:
             print(f"⚠️ Error cargando {CREDS_FILE}: {e}")
+    print("❌ No se encontraron credenciales válidas (GOOGLE_SERVICE_ACCOUNT_JSON o credentials_google.json).")
     return None
 
 def calculate_age(birthday_val):
@@ -120,13 +124,15 @@ def run_daily_market_capture(max_players: int = 140):
     comp_url = "https://cf.biwenger.com/api/v2/competitions/la-liga/data?score=5"
     r_comp = requests.get(comp_url, headers=get_headers(), timeout=10)
     if r_comp.status_code != 200:
-        print(f"⚠️ Error obteniendo datos de competición: {r_comp.status_code}")
+        print(f"⚠️ Error obteniendo datos de competición de Biwenger: HTTP {r_comp.status_code}")
+        print(f"Respuesta: {r_comp.text[:200]}")
         return False
 
     comp_data = r_comp.json().get("data", {})
     raw_players = comp_data.get("players", {})
     raw_teams = comp_data.get("teams", {})
     team_map = {int(tid): t["name"] for tid, t in raw_teams.items()}
+    print(f"✅ Obtenidos {len(raw_players)} jugadores base de LaLiga.")
 
     # 2. Local League & Comuniate context
     league_owners = {}
@@ -179,12 +185,16 @@ def run_daily_market_capture(max_players: int = 140):
     for idx, pid in enumerate(target_pids, 1):
         time.sleep(random.uniform(0.12, 0.22))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        try:
-            r = requests.get(url, headers=get_headers(), timeout=5)
-            if r.status_code == 200:
-                details_map[pid] = r.json().get("data", {})
-        except Exception:
-            pass
+        for attempt in range(2):
+            try:
+                r = requests.get(url, headers=get_headers(), timeout=5)
+                if r.status_code == 200:
+                    details_map[pid] = r.json().get("data", {})
+                    break
+                elif r.status_code == 429:
+                    time.sleep(1.5)
+            except Exception:
+                time.sleep(0.5)
 
     print(f"✅ {len(details_map)}/{len(target_pids)} fichas exhaustivas extraídas con éxito.")
 
@@ -336,15 +346,28 @@ def run_daily_market_capture(max_players: int = 140):
     gc = get_gspread_client()
     if gc:
         try:
+            print(f"☁️ Abriendo libro Google Sheets: {SPREADSHEET_ID}...")
             sh = gc.open_by_key(SPREADSHEET_ID)
 
+            # Ensure tabs exist
+            ws_titles = [w.title for w in sh.worksheets()]
+            if TAB_HISTORICO not in ws_titles:
+                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=5000, cols=len(HEADERS)+2)
+                ws_hist.append_row(HEADERS)
+            else:
+                ws_hist = sh.worksheet(TAB_HISTORICO)
+
+            if TAB_HOY not in ws_titles:
+                ws_hoy = sh.add_worksheet(title=TAB_HOY, rows=500, cols=len(HEADERS)+2)
+                ws_hoy.append_row(HEADERS)
+            else:
+                ws_hoy = sh.worksheet(TAB_HOY)
+
             # 5.1 Append to Historico_Continuo
-            ws_hist = sh.worksheet(TAB_HISTORICO)
             ws_hist.append_rows(rows_to_append)
             print(f"☁️ Añadidos {len(rows_to_append)} registros completos a '{TAB_HISTORICO}'")
 
             # 5.2 Refresh Mercado_Hoy
-            ws_hoy = sh.worksheet(TAB_HOY)
             ws_hoy.clear()
             ws_hoy.append_row(HEADERS)
             ws_hoy.append_rows(rows_to_append)
@@ -356,6 +379,7 @@ def run_daily_market_capture(max_players: int = 140):
             print(f"☁️ Actualizada pestaña '{TAB_HOY}' con {len(rows_to_append)} registros del día")
         except Exception as e:
             print(f"⚠️ Error sincronizando con Google Sheets: {e}")
+            raise e
     else:
         print("ℹ️ No se configuraron credenciales de Google Sheets, omitiendo subida a la nube.")
 
