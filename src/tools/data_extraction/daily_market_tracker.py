@@ -129,7 +129,7 @@ def calculate_age(birthday_val):
     except Exception:
         return ""
 
-def run_daily_market_capture(max_deep_enrich: int = 150):
+def run_daily_market_capture(max_players: int = 140):
     print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -187,42 +187,38 @@ def run_daily_market_capture(max_deep_enrich: int = 150):
         except Exception:
             pass
 
-    # 3. Target ALL players in LaLiga (100% of the census, no exceptions)
-    target_deep_pids = [int(p) for p in sorted(
+    # 3. Target players: Top 140 players (all league + market + top values) to stay safely under Biwenger's 200 limit
+    sorted_pids = [int(p) for p in sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
         reverse=True
     )]
+    target_pids = sorted_pids[:max_players] if max_players else sorted_pids
 
-    print(f"⏳ Extrayendo fichas exhaustivas completas para TODOS los {len(target_deep_pids)} jugadores de LaLiga...")
-    print(f"ℹ️ Ritmo sostenido (0.45s/jugador) para recargar el token-bucket de Biwenger y evitar bloqueos 429 (~4.5 min)...")
+    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para {len(target_pids)} jugadores clave...")
     details_map = {}
-    for idx, pid in enumerate(target_deep_pids, 1):
-        # 0.40s - 0.55s sustained pacing matches Biwenger's refill rate (~2 req/s)
-        time.sleep(random.uniform(0.40, 0.55))
+    for idx, pid in enumerate(target_pids, 1):
+        time.sleep(random.uniform(0.12, 0.18))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                r = requests.get(url, headers=get_headers(), timeout=6)
+                r = requests.get(url, headers=get_headers(), timeout=5)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
                     break
                 elif r.status_code == 429:
-                    # If 429 occurs, pause 15s to let bucket fully replenish
-                    wait_time = 15.0 + attempt * 5.0
-                    print(f"   ⚠️ Rate limit 429 en jugador {idx}/{len(target_deep_pids)}. Pausa de {wait_time}s para recargar cuota...")
-                    time.sleep(wait_time)
+                    time.sleep(1.5 + attempt * 1.5)
             except Exception:
-                time.sleep(1.0)
+                time.sleep(0.5)
         
-        if idx % 50 == 0 or idx == len(target_deep_pids):
-            print(f"   Progreso: {idx}/{len(target_deep_pids)} ({idx/len(target_deep_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
+        if idx % 50 == 0 or idx == len(target_pids):
+            print(f"   Progreso: {idx}/{len(target_pids)} ({idx/len(target_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
 
-    print(f"✅ {len(details_map)}/{len(target_deep_pids)} fichas exhaustivas extraídas con éxito.")
+    print(f"✅ {len(details_map)}/{len(target_pids)} fichas exhaustivas extraídas con éxito.")
 
-    # 4. Build comprehensive master rows for ALL 580 players
+    # 4. Build comprehensive master rows for target players
     rows_to_append = []
-    for pid in all_pids_int:
+    for pid in target_pids:
         p_base = raw_players.get(str(pid), {})
         p_detail = details_map.get(pid, {})
         analysis = p_detail.get("analysis", {})
