@@ -1,9 +1,6 @@
 name: Daily Biwenger Market Tracker
 
 on:
-  schedule:
-    # 05:23 UTC = 07:23 CEST (Horario de verano en España) - Minuto no congestionado
-    - cron: '23 5 * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [run-market-tracker, daily-market-capture]
