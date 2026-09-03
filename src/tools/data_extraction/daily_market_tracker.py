@@ -1,7 +1,7 @@
 """
 Daily Biwenger Master Market & Intelligence Tracker
 ====================================================
-Captures the complete 40-dimensional snapshot of ALL LaLiga players (577+):
+Captures the complete 40-dimensional snapshot of ALL LaLiga players (580+):
 - Demographics, Identity, Position, Status
 - Pricing, 24h/7d/14d/30d Variations, 1y Min/Max, Season Gain
 - Community Market Sentiment (% Compras, % Ventas, % Uso, Presión Neta)
@@ -9,10 +9,11 @@ Captures the complete 40-dimensional snapshot of ALL LaLiga players (577+):
 - Detailed Performance (Puntos, Medias, Goles, Asistencias, Minutos, Picas, SofaScore, Fitness)
 - Tactical & Private League Context (Comuniate titular/duda, Propietario, Cláusula, Mercado)
 
-Syncs seamlessly to Google Sheets:
-- "Historico_Continuo": Master cumulative time-series database (idempotent, no duplicates).
-- "Mercado_Hoy": Current day dashboard.
-And saves local daily CSV snapshots + master timeseries backup.
+Robust & Safe:
+- Bulletproof JSON sanitization (NO NaNs/Infs).
+- Respects Biwenger's 200-request IP quota by prioritizing deep analysis on ~150 key players (market + league + top)
+  while including ALL 580 players in the final output.
+- Safe Append-Only for Historico_Continuo (never wipes history).
 """
 
 import os
@@ -21,6 +22,7 @@ import time
 import random
 import datetime
 import requests
+import numpy as np
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -79,6 +81,18 @@ def get_headers():
         "Referer": "https://biwenger.as.com/"
     }
 
+def sanitize_cell(val):
+    """Guarantees 100% JSON compliance: eliminates NaNs, Infs, and None."""
+    if val is None or pd.isna(val):
+        return ""
+    if isinstance(val, (float, np.floating)):
+        if np.isnan(val) or np.isinf(val):
+            return ""
+        return round(float(val), 2)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    return str(val)
+
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -102,7 +116,7 @@ def get_gspread_client():
 
 def calculate_age(birthday_val):
     if not birthday_val:
-        return None
+        return ""
     try:
         bday_str = str(int(birthday_val)).strip()
         if len(bday_str) == 8:
@@ -113,14 +127,14 @@ def calculate_age(birthday_val):
         today = datetime.date.today()
         return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
     except Exception:
-        return None
+        return ""
 
-def run_daily_market_capture(max_players: int = None):
+def run_daily_market_capture(max_deep_enrich: int = 150):
     print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    # 1. Fetch general competition data
+    # 1. Fetch general competition data (Instant: 1 call gives all 580 players)
     comp_url = "https://cf.biwenger.com/api/v2/competitions/la-liga/data?score=5"
     r_comp = requests.get(comp_url, headers=get_headers(), timeout=10)
     if r_comp.status_code != 200:
@@ -155,7 +169,7 @@ def run_daily_market_capture(max_players: int = None):
                     priority_ids.add(pid)
                 if pd.notna(r.get("BIWPLAYER_CLAUSE")):
                     league_clauses[pid] = float(r["BIWPLAYER_CLAUSE"])
-                if pd.notna(r.get("MARKET_SALE_PRICE")):
+                if pd.notna(r.get("MARKET_SALE_PRICE")) and float(r["MARKET_SALE_PRICE"]) > 0:
                     market_sales_set.add(pid)
                     priority_ids.add(pid)
         except Exception:
@@ -173,41 +187,39 @@ def run_daily_market_capture(max_players: int = None):
         except Exception:
             pass
 
-    # 3. Target players: ALL 577 players of LaLiga
-    sorted_pids = sorted(
+    # 3. Sort players: Prioritize market sales, league players, and top-priced players
+    all_pids = sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
         reverse=True
     )
-    if max_players is not None and max_players > 0:
-        target_pids = [int(p) for p in sorted_pids[:max_players]]
-    else:
-        target_pids = [int(p) for p in sorted_pids]
+    all_pids_int = [int(p) for p in all_pids]
+    target_deep_pids = all_pids_int[:max_deep_enrich]
 
-    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para TODOS los {len(target_pids)} jugadores de LaLiga...")
+    print(f"⏳ Extrayendo fichas exhaustivas profundas para {len(target_deep_pids)} jugadores clave (mercado, tu liga y top)...")
     details_map = {}
-    for idx, pid in enumerate(target_pids, 1):
-        time.sleep(random.uniform(0.10, 0.18))
+    for idx, pid in enumerate(target_deep_pids, 1):
+        time.sleep(random.uniform(0.10, 0.16))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 r = requests.get(url, headers=get_headers(), timeout=5)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
                     break
                 elif r.status_code == 429:
-                    time.sleep(1.5 + attempt * 1.5)
+                    time.sleep(2.0 + attempt * 2.0)
             except Exception:
                 time.sleep(0.5)
         
-        if idx % 50 == 0 or idx == len(target_pids):
-            print(f"   Progreso: {idx}/{len(target_pids)} ({idx/len(target_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
+        if idx % 50 == 0 or idx == len(target_deep_pids):
+            print(f"   Progreso: {idx}/{len(target_deep_pids)} ({idx/len(target_deep_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
 
-    print(f"✅ {len(details_map)}/{len(target_pids)} fichas exhaustivas extraídas con éxito.")
+    print(f"✅ {len(details_map)}/{len(target_deep_pids)} fichas exhaustivas extraídas con éxito.")
 
-    # 4. Build comprehensive master rows
+    # 4. Build comprehensive master rows for ALL 580 players
     rows_to_append = []
-    for pid in target_pids:
+    for pid in all_pids_int:
         p_base = raw_players.get(str(pid), {})
         p_detail = details_map.get(pid, {})
         analysis = p_detail.get("analysis", {})
@@ -253,10 +265,12 @@ def run_daily_market_capture(max_players: int = None):
         pct_30d = round(diff_30d / p_30d * 100.0, 2) if p_30d > 0 else 0.0
 
         # Community Market Sentiment
-        p_buy = analysis.get("purchases", 0)
-        p_sell = analysis.get("sales", 0)
-        p_use = analysis.get("owned", 0)
-        net_press = (p_buy - p_sell) if (p_buy is not None and p_sell is not None) else None
+        p_buy = analysis.get("purchases", "")
+        p_sell = analysis.get("sales", "")
+        p_use = analysis.get("owned", "")
+        net_press = ""
+        if isinstance(p_buy, (int, float)) and isinstance(p_sell, (int, float)):
+            net_press = p_buy - p_sell
 
         # Sporting Performance & Reports
         tot_goals = 0
@@ -284,8 +298,8 @@ def run_daily_market_capture(max_players: int = None):
         played_games = (p_base.get("playedHome", 0) or 0) + (p_base.get("playedAway", 0) or 0)
         points_tot = p_base.get("points", 0)
         avg_points = round(points_tot / played_games, 2) if played_games > 0 else 0.0
-        avg_picas = round(sum(picas_list) / len(picas_list), 2) if picas_list else 0.0
-        avg_sofascore = round(sum(sofascore_list) / len(sofascore_list), 2) if sofascore_list else 0.0
+        avg_picas = round(sum(picas_list) / len(picas_list), 2) if picas_list else ""
+        avg_sofascore = round(sum(sofascore_list) / len(sofascore_list), 2) if sofascore_list else ""
 
         fitness_list = p_base.get("fitness", [])
         fitness_str = ",".join(map(str, fitness_list)) if isinstance(fitness_list, list) else ""
@@ -293,10 +307,10 @@ def run_daily_market_capture(max_players: int = None):
         # Comuniate & League
         com_data = comuniate_map.get(name.lower(), {})
         owner_name = league_owners.get(pid, "Libre")
-        clause_val = league_clauses.get(pid)
+        clause_val = league_clauses.get(pid, "")
         in_market = "SÍ" if pid in market_sales_set else "NO"
 
-        row = [
+        raw_row = [
             today_str,
             pid,
             name,
@@ -326,9 +340,9 @@ def run_daily_market_capture(max_players: int = None):
             p_use,
             net_press,
             # Rankings
-            rk.get("global"),
-            rk.get("position"),
-            rk.get("lastSeason"),
+            rk.get("global", ""),
+            rk.get("position", ""),
+            rk.get("lastSeason", ""),
             # Rendimiento
             points_tot,
             p_base.get("pointsLastSeason", 0),
@@ -341,15 +355,17 @@ def run_daily_market_capture(max_players: int = None):
             avg_picas,
             avg_sofascore,
             # Contexto
-            com_data.get("titular"),
-            com_data.get("duda"),
+            com_data.get("titular", ""),
+            com_data.get("duda", ""),
             owner_name,
             clause_val,
             in_market
         ]
-        rows_to_append.append(row)
+        # Bulletproof sanitization
+        clean_row = [sanitize_cell(c) for c in raw_row]
+        rows_to_append.append(clean_row)
 
-    # 5. Save local CSVs first (guarantees data persistence even if cloud sync fails)
+    # 5. Save local CSVs first (Guarantees data persistence before any network/cloud call)
     os.makedirs("data/history/snapshots", exist_ok=True)
     daily_snapshot_file = f"data/history/snapshots/{today_str}.csv"
     local_history_path = "data/history/market_sentiment_timeseries.csv"
@@ -367,7 +383,7 @@ def run_daily_market_capture(max_players: int = None):
 
     print(f"💾 Guardados backups locales ({len(rows_to_append)} registros)")
 
-    # 6. Save to Google Sheets (Safe Append-Only, NEVER clears history)
+    # 6. Save to Google Sheets (Safe Append-Only, NEVER clears Historico_Continuo)
     gc = get_gspread_client()
     if gc:
         try:
@@ -388,8 +404,8 @@ def run_daily_market_capture(max_players: int = None):
             else:
                 ws_hoy = sh.worksheet(TAB_HOY)
 
-            # 6.1 Safe Append-Only to Historico_Continuo (NEVER call clear() on historical log)
-            existing_dates = set(ws_hist.col_values(1))  # Column A is 'fecha'
+            # 6.1 Safe Append-Only to Historico_Continuo
+            existing_dates = set(ws_hist.col_values(1))
             if today_str not in existing_dates:
                 ws_hist.append_rows(rows_to_append)
                 print(f"☁️ Añadidos {len(rows_to_append)} registros de '{today_str}' a '{TAB_HISTORICO}'")
