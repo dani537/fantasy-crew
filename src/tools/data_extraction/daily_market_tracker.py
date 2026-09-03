@@ -129,7 +129,7 @@ def calculate_age(birthday_val):
     except Exception:
         return ""
 
-def run_daily_market_capture(max_players: int = 140):
+def run_daily_market_capture(max_players: int = None):
     print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -187,7 +187,7 @@ def run_daily_market_capture(max_players: int = 140):
         except Exception:
             pass
 
-    # 3. Target players: Top 140 players (all league + market + top values) to stay safely under Biwenger's 200 limit
+    # 3. Target players: ALL 580 players of LaLiga (100% census)
     sorted_pids = [int(p) for p in sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
@@ -195,21 +195,24 @@ def run_daily_market_capture(max_players: int = 140):
     )]
     target_pids = sorted_pids[:max_players] if max_players else sorted_pids
 
-    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para {len(target_pids)} jugadores clave...")
+    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para TODOS los {len(target_pids)} jugadores de LaLiga...")
     details_map = {}
     for idx, pid in enumerate(target_pids, 1):
-        time.sleep(random.uniform(0.12, 0.18))
+        time.sleep(random.uniform(0.15, 0.22))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        for attempt in range(2):
+        for attempt in range(5):
             try:
-                r = requests.get(url, headers=get_headers(), timeout=5)
+                r = requests.get(url, headers=get_headers(), timeout=8)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
                     break
                 elif r.status_code == 429:
-                    time.sleep(1.5 + attempt * 1.5)
+                    # Cloudflare rate limit sliding window is 60s. Wait 65s so window resets completely!
+                    wait_time = 65.0
+                    print(f"   ⚠️ Rate limit 429 en jugador {idx}/{len(target_pids)}. Pausa estratégica de {wait_time}s para resetear ventana de Biwenger...")
+                    time.sleep(wait_time)
             except Exception:
-                time.sleep(0.5)
+                time.sleep(1.0)
         
         if idx % 50 == 0 or idx == len(target_pids):
             print(f"   Progreso: {idx}/{len(target_pids)} ({idx/len(target_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
