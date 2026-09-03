@@ -121,7 +121,7 @@ def extract_and_save_data():
         # Step 6: Market Tracker & Rivals Financials (Google Sheets + CSV)
         print_step(6, "Syncing Market Tracker (Google Sheets) & Estimating Rivals Balances")
         try:
-            from src.tracker import BiwengerSheetsTracker
+            from src.tools.rival_tracker import BiwengerSheetsTracker
             tracker = BiwengerSheetsTracker()
             tracker.sync(days_back=7)
         except Exception as e:

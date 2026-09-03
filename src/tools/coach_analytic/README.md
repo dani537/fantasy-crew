@@ -42,7 +42,7 @@ La herramienta puede invocarse directamente sin parámetros (utilizando los CSVs
 | Parámetro | Tipo | Requerido | Por Defecto | Descripción |
 | :--- | :---: | :---: | :---: | :--- |
 | `df_master` | `pd.DataFrame` | Opcional | `None` *(lee `./data/players_transformed.csv`)* | DataFrame consolidado con todos los jugadores y métricas avanzadas (xP, Comuniate, cuotas, tendencias). |
-| `output_dir` | `str` | Opcional | `None` *(guarda en `./test/02_coach/`)* | Ruta del directorio donde se guardarán los archivos Markdown generados (`01_coach_prompt.md` y `02_coach_response.md`). |
+| `output_dir` | `str` | Opcional | `None` *(guarda en `./data/coach/`)* | Ruta del directorio donde se guardarán los archivos Markdown generados (`coach_prompt.md` y `coach_response.md`). También crea copia canónica en `data/coach_report.md`. |
 
 ### Requisitos de Datos Previos:
 Para ejecutarse correctamente, deben existir en `./data/`:

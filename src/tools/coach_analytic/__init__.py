@@ -8,6 +8,7 @@ and lineup submission capabilities for Biwenger.
 from src.tools.coach_analytic.coach import (
     CoachAnalytic,
     run_coach_analytic,
+    get_latest_coach_report,
     format_coach_response_md,
     COACH_REQUIRED_COLUMNS
 )

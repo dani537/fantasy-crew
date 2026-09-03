@@ -352,13 +352,38 @@ def sync_lineup_to_biwenger(alineacion: dict, squad_df: pd.DataFrame) -> dict:
         return {"success": False, "message": f"Excepción al sincronizar alineación con Biwenger: {e}"}
 
 
+def get_latest_coach_report(report_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Retrieves the latest generated coach tactical report from data/ without touching test/.
+    If no report exists, executes the coach tool to generate one fresh.
+    """
+    canonical_path = "./data/coach_report.md"
+    sub_path = "./data/coach/coach_response.md"
+    chosen_path = report_path or (canonical_path if os.path.exists(canonical_path) else sub_path)
+
+    if not os.path.exists(chosen_path):
+        try:
+            run_coach_analytic()
+        except Exception as e:
+            return {"error": f"No se pudo generar el informe del entrenador: {e}"}
+
+    if os.path.exists(chosen_path):
+        with open(chosen_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {
+            "estado": "Informe disponible",
+            "resumen_informe": content
+        }
+    return {"error": "No se pudo obtener el informe del entrenador."}
+
+
 def run_coach_analytic(
     df_master: Optional[pd.DataFrame] = None,
     output_dir: Optional[str] = None,
     sync_to_biwenger: bool = True
 ) -> Dict[str, Any]:
     """
-    Executes the full Coach Analytic Tool pipeline, writes prompt & response markdown files,
+    Executes the full Coach Analytic Tool pipeline, writes prompt & response markdown files to data/coach/,
     and automatically synchronizes the validated starting XI with Biwenger.
     """
     if df_master is None:
@@ -372,11 +397,11 @@ def run_coach_analytic(
     coach = CoachAnalytic()
     result = coach.analyze(df_master)
 
-    # Save to output_dir if provided or default test/02_coach
-    target_dir = output_dir or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../test/02_coach'))
+    # Save to data/coach/ by default (production location, completely decoupled from test/)
+    target_dir = output_dir or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../data/coach'))
     os.makedirs(target_dir, exist_ok=True)
 
-    prompt_path = os.path.join(target_dir, "01_coach_prompt.md")
+    prompt_path = os.path.join(target_dir, "coach_prompt.md")
     with open(prompt_path, "w", encoding="utf-8") as f:
         f.write(result["prompt"])
 
@@ -388,12 +413,20 @@ def run_coach_analytic(
         squad_df=result["squad_df"]
     )
 
-    response_path = os.path.join(target_dir, "02_coach_response.md")
+    response_path = os.path.join(target_dir, "coach_response.md")
     with open(response_path, "w", encoding="utf-8") as f:
+        f.write(response_md)
+
+    # Canonical production path
+    canonical_report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../data/coach_report.md'))
+    os.makedirs(os.path.dirname(canonical_report_path), exist_ok=True)
+    with open(canonical_report_path, "w", encoding="utf-8") as f:
         f.write(response_md)
 
     result["prompt_file"] = prompt_path
     result["response_file"] = response_path
+    result["canonical_file"] = canonical_report_path
+    result["report_md"] = response_md
 
     # Synchronize with Biwenger if valid and enabled
     sync_res = {"success": False, "message": "Sync skipped"}
