@@ -187,30 +187,33 @@ def run_daily_market_capture(max_deep_enrich: int = 150):
         except Exception:
             pass
 
-    # 3. Sort players: Prioritize market sales, league players, and top-priced players
-    all_pids = sorted(
+    # 3. Target ALL players in LaLiga (100% of the census, no exceptions)
+    target_deep_pids = [int(p) for p in sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
         reverse=True
-    )
-    all_pids_int = [int(p) for p in all_pids]
-    target_deep_pids = all_pids_int[:max_deep_enrich]
+    )]
 
-    print(f"⏳ Extrayendo fichas exhaustivas profundas para {len(target_deep_pids)} jugadores clave (mercado, tu liga y top)...")
+    print(f"⏳ Extrayendo fichas exhaustivas completas para TODOS los {len(target_deep_pids)} jugadores de LaLiga...")
+    print(f"ℹ️ Ritmo sostenido (0.45s/jugador) para recargar el token-bucket de Biwenger y evitar bloqueos 429 (~4.5 min)...")
     details_map = {}
     for idx, pid in enumerate(target_deep_pids, 1):
-        time.sleep(random.uniform(0.10, 0.16))
+        # 0.40s - 0.55s sustained pacing matches Biwenger's refill rate (~2 req/s)
+        time.sleep(random.uniform(0.40, 0.55))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        for attempt in range(2):
+        for attempt in range(3):
             try:
-                r = requests.get(url, headers=get_headers(), timeout=5)
+                r = requests.get(url, headers=get_headers(), timeout=6)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
                     break
                 elif r.status_code == 429:
-                    time.sleep(2.0 + attempt * 2.0)
+                    # If 429 occurs, pause 15s to let bucket fully replenish
+                    wait_time = 15.0 + attempt * 5.0
+                    print(f"   ⚠️ Rate limit 429 en jugador {idx}/{len(target_deep_pids)}. Pausa de {wait_time}s para recargar cuota...")
+                    time.sleep(wait_time)
             except Exception:
-                time.sleep(0.5)
+                time.sleep(1.0)
         
         if idx % 50 == 0 or idx == len(target_deep_pids):
             print(f"   Progreso: {idx}/{len(target_deep_pids)} ({idx/len(target_deep_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
