@@ -349,64 +349,7 @@ def run_daily_market_capture(max_players: int = None):
         ]
         rows_to_append.append(row)
 
-    # 5. Save to Google Sheets (Idempotent: updates or appends cleanly)
-    gc = get_gspread_client()
-    if gc:
-        try:
-            print(f"☁️ Abriendo libro Google Sheets: {SPREADSHEET_ID}...")
-            sh = gc.open_by_key(SPREADSHEET_ID)
-
-            # Ensure tabs exist
-            ws_titles = [w.title for w in sh.worksheets()]
-            if TAB_HISTORICO not in ws_titles:
-                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=15000, cols=len(HEADERS)+2)
-                ws_hist.append_row(HEADERS)
-            else:
-                ws_hist = sh.worksheet(TAB_HISTORICO)
-
-            if TAB_HOY not in ws_titles:
-                ws_hoy = sh.add_worksheet(title=TAB_HOY, rows=1000, cols=len(HEADERS)+2)
-                ws_hoy.append_row(HEADERS)
-            else:
-                ws_hoy = sh.worksheet(TAB_HOY)
-
-            # 5.1 Idempotent sync for Historico_Continuo
-            existing_rows = ws_hist.get_all_values()
-            df_new = pd.DataFrame(rows_to_append, columns=HEADERS)
-            if len(existing_rows) > 1:
-                df_existing = pd.DataFrame(existing_rows[1:], columns=existing_rows[0])
-                # Remove today's rows if already present to avoid duplication
-                df_filtered = df_existing[df_existing["fecha"] != today_str]
-                df_final = pd.concat([df_filtered, df_new], ignore_index=True)
-                ws_hist.clear()
-                ws_hist.update([HEADERS] + df_final.values.tolist())
-                ws_hist.freeze(rows=1)
-                ws_hist.format('A1:AR1', {
-                    'backgroundColor': {'red': 0.15, 'green': 0.25, 'blue': 0.45},
-                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}}
-                })
-            else:
-                ws_hist.append_rows(rows_to_append)
-
-            print(f"☁️ Sincronizados {len(rows_to_append)} registros en '{TAB_HISTORICO}' (sin duplicados)")
-
-            # 5.2 Refresh Mercado_Hoy
-            ws_hoy.clear()
-            ws_hoy.append_row(HEADERS)
-            ws_hoy.append_rows(rows_to_append)
-            ws_hoy.freeze(rows=1)
-            ws_hoy.format('A1:AR1', {
-                'backgroundColor': {'red': 0.18, 'green': 0.45, 'blue': 0.25},
-                'textFormat': {'bold': True, 'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}}
-            })
-            print(f"☁️ Actualizada pestaña '{TAB_HOY}' con {len(rows_to_append)} registros del día")
-        except Exception as e:
-            print(f"⚠️ Error sincronizando con Google Sheets: {e}")
-            raise e
-    else:
-        print("ℹ️ No se configuraron credenciales de Google Sheets, omitiendo subida a la nube.")
-
-    # 6. Save local CSVs
+    # 5. Save local CSVs first (guarantees data persistence even if cloud sync fails)
     os.makedirs("data/history/snapshots", exist_ok=True)
     daily_snapshot_file = f"data/history/snapshots/{today_str}.csv"
     local_history_path = "data/history/market_sentiment_timeseries.csv"
@@ -423,6 +366,55 @@ def run_daily_market_capture(max_players: int = None):
         df_today.to_csv(local_history_path, mode="w", header=True, index=False, encoding="utf-8-sig")
 
     print(f"💾 Guardados backups locales ({len(rows_to_append)} registros)")
+
+    # 6. Save to Google Sheets (Safe Append-Only, NEVER clears history)
+    gc = get_gspread_client()
+    if gc:
+        try:
+            print(f"☁️ Abriendo libro Google Sheets: {SPREADSHEET_ID}...")
+            sh = gc.open_by_key(SPREADSHEET_ID)
+
+            # Ensure tabs exist
+            ws_titles = [w.title for w in sh.worksheets()]
+            if TAB_HISTORICO not in ws_titles:
+                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=20000, cols=len(HEADERS)+5)
+                ws_hist.append_row(HEADERS)
+            else:
+                ws_hist = sh.worksheet(TAB_HISTORICO)
+
+            if TAB_HOY not in ws_titles:
+                ws_hoy = sh.add_worksheet(title=TAB_HOY, rows=1000, cols=len(HEADERS)+5)
+                ws_hoy.append_row(HEADERS)
+            else:
+                ws_hoy = sh.worksheet(TAB_HOY)
+
+            # 6.1 Safe Append-Only to Historico_Continuo (NEVER call clear() on historical log)
+            existing_dates = set(ws_hist.col_values(1))  # Column A is 'fecha'
+            if today_str not in existing_dates:
+                ws_hist.append_rows(rows_to_append)
+                print(f"☁️ Añadidos {len(rows_to_append)} registros de '{today_str}' a '{TAB_HISTORICO}'")
+            else:
+                print(f"ℹ️ La fecha '{today_str}' ya está registrada en '{TAB_HISTORICO}'. Omitiendo append.")
+
+            # 6.2 Refresh Mercado_Hoy (today's active dashboard)
+            ws_hoy.clear()
+            ws_hoy.append_row(HEADERS)
+            ws_hoy.append_rows(rows_to_append)
+            ws_hoy.freeze(rows=1)
+            try:
+                ws_hoy.format('A1:AQ1', {
+                    'backgroundColor': {'red': 0.18, 'green': 0.45, 'blue': 0.25},
+                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}}
+                })
+            except Exception:
+                pass
+            print(f"☁️ Actualizada pestaña '{TAB_HOY}' con {len(rows_to_append)} registros del día")
+        except Exception as e:
+            print(f"⚠️ Error sincronizando con Google Sheets: {e}")
+            raise e
+    else:
+        print("ℹ️ No se configuraron credenciales de Google Sheets, omitiendo subida a la nube.")
+
     print(f"⏱️ Proceso completado con éxito en {time.time() - t0:.2f} segundos.")
     return True
 
