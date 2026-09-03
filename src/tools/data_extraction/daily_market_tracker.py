@@ -416,13 +416,17 @@ def run_daily_market_capture(max_deep_enrich: int = 140):
             else:
                 ws_hoy = sh.worksheet(TAB_HOY)
 
-            # 6.1 Safe Append-Only to Historico_Continuo
-            existing_dates = set(ws_hist.col_values(1))
-            if today_str not in existing_dates:
-                ws_hist.append_rows(rows_to_append)
-                print(f"☁️ Añadidos {len(rows_to_append)} registros de '{today_str}' a '{TAB_HISTORICO}'")
-            else:
-                print(f"ℹ️ La fecha '{today_str}' ya está registrada en '{TAB_HISTORICO}'. Omitiendo append.")
+            # 6.1 Idempotent sync to Historico_Continuo (replace today's rows if re-run)
+            dates_col = ws_hist.col_values(1)
+            matching_indices = [i + 1 for i, d in enumerate(dates_col) if d == today_str]
+            if matching_indices:
+                start_row = min(matching_indices)
+                end_row = max(matching_indices)
+                print(f"ℹ️ Fecha '{today_str}' ya presente (filas {start_row}-{end_row}). Actualizando con los datos más recientes...")
+                ws_hist.delete_rows(start_row, end_row)
+
+            ws_hist.append_rows(rows_to_append)
+            print(f"☁️ Sincronizados {len(rows_to_append)} registros de '{today_str}' en '{TAB_HISTORICO}'")
 
             # 6.2 Refresh Mercado_Hoy (today's active dashboard)
             ws_hoy.clear()
