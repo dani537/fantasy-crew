@@ -10,7 +10,7 @@ Captures the complete 40-dimensional snapshot of ALL LaLiga players (577+):
 - Tactical & Private League Context (Comuniate titular/duda, Propietario, Cláusula, Mercado)
 
 Syncs seamlessly to Google Sheets:
-- "Historico_Continuo": Master cumulative time-series database.
+- "Historico_Continuo": Master cumulative time-series database (idempotent, no duplicates).
 - "Mercado_Hoy": Current day dashboard.
 And saves local daily CSV snapshots + master timeseries backup.
 """
@@ -349,7 +349,7 @@ def run_daily_market_capture(max_players: int = None):
         ]
         rows_to_append.append(row)
 
-    # 5. Save to Google Sheets
+    # 5. Save to Google Sheets (Idempotent: updates or appends cleanly)
     gc = get_gspread_client()
     if gc:
         try:
@@ -359,7 +359,7 @@ def run_daily_market_capture(max_players: int = None):
             # Ensure tabs exist
             ws_titles = [w.title for w in sh.worksheets()]
             if TAB_HISTORICO not in ws_titles:
-                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=10000, cols=len(HEADERS)+2)
+                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=15000, cols=len(HEADERS)+2)
                 ws_hist.append_row(HEADERS)
             else:
                 ws_hist = sh.worksheet(TAB_HISTORICO)
@@ -370,16 +370,32 @@ def run_daily_market_capture(max_players: int = None):
             else:
                 ws_hoy = sh.worksheet(TAB_HOY)
 
-            # 5.1 Append to Historico_Continuo
-            ws_hist.append_rows(rows_to_append)
-            print(f"☁️ Añadidos {len(rows_to_append)} registros completos a '{TAB_HISTORICO}'")
+            # 5.1 Idempotent sync for Historico_Continuo
+            existing_rows = ws_hist.get_all_values()
+            df_new = pd.DataFrame(rows_to_append, columns=HEADERS)
+            if len(existing_rows) > 1:
+                df_existing = pd.DataFrame(existing_rows[1:], columns=existing_rows[0])
+                # Remove today's rows if already present to avoid duplication
+                df_filtered = df_existing[df_existing["fecha"] != today_str]
+                df_final = pd.concat([df_filtered, df_new], ignore_index=True)
+                ws_hist.clear()
+                ws_hist.update([HEADERS] + df_final.values.tolist())
+                ws_hist.freeze(rows=1)
+                ws_hist.format('A1:AR1', {
+                    'backgroundColor': {'red': 0.15, 'green': 0.25, 'blue': 0.45},
+                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}}
+                })
+            else:
+                ws_hist.append_rows(rows_to_append)
+
+            print(f"☁️ Sincronizados {len(rows_to_append)} registros en '{TAB_HISTORICO}' (sin duplicados)")
 
             # 5.2 Refresh Mercado_Hoy
             ws_hoy.clear()
             ws_hoy.append_row(HEADERS)
             ws_hoy.append_rows(rows_to_append)
             ws_hoy.freeze(rows=1)
-            ws_hoy.format('A1:AN1', {
+            ws_hoy.format('A1:AR1', {
                 'backgroundColor': {'red': 0.18, 'green': 0.45, 'blue': 0.25},
                 'textFormat': {'bold': True, 'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}}
             })
@@ -399,7 +415,10 @@ def run_daily_market_capture(max_players: int = None):
     df_today.to_csv(daily_snapshot_file, index=False, encoding="utf-8-sig")
 
     if os.path.exists(local_history_path):
-        df_today.to_csv(local_history_path, mode="a", header=False, index=False, encoding="utf-8-sig")
+        df_loc = pd.read_csv(local_history_path)
+        df_loc_clean = df_loc[df_loc["fecha"] != today_str] if "fecha" in df_loc.columns else df_loc
+        df_loc_final = pd.concat([df_loc_clean, df_today], ignore_index=True)
+        df_loc_final.to_csv(local_history_path, index=False, encoding="utf-8-sig")
     else:
         df_today.to_csv(local_history_path, mode="w", header=True, index=False, encoding="utf-8-sig")
 
