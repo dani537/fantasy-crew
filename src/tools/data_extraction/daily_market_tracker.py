@@ -129,7 +129,7 @@ def calculate_age(birthday_val):
     except Exception:
         return ""
 
-def run_daily_market_capture(max_deep_enrich: int = 140):
+def run_daily_market_capture(max_deep_enrich: int = None):
     print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -187,42 +187,46 @@ def run_daily_market_capture(max_deep_enrich: int = 140):
         except Exception:
             pass
 
-    # 3. Sort all 580 players and select top priority for deep enrichment
+    # 3. Target players: 100% of ALL 580 LaLiga players
     all_pids = [int(p) for p in sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
         reverse=True
     )]
-    
     target_deep_pids = all_pids[:max_deep_enrich] if max_deep_enrich else all_pids
-    print(f"⏳ Extrayendo fichas exhaustivas completas para {len(target_deep_pids)} jugadores clave (mercado, tu liga y top)...")
-    print(f"ℹ️ El censo diario completo abarcará el 100% ({len(all_pids)} jugadores) de LaLiga.")
+
+    print(f"⏳ Extrayendo fichas exhaustivas completas para el 100% ({len(target_deep_pids)} jugadores) de LaLiga...")
+    print(f"ℹ️ Estrategia: Lotes preventivos de 135 jugadores con pausas de enfriamiento (65s) para vaciar la ventana de Cloudflare.")
+    print(f"⏱️ Tiempo estimado: ~5.5 minutos para los 580 jugadores sin arriesgar bloqueos 429.")
 
     details_map = {}
-    rate_limit_consecutive_hits = 0
+    BATCH_SIZE = 135
+
     for idx, pid in enumerate(target_deep_pids, 1):
-        time.sleep(random.uniform(0.12, 0.18))
+        time.sleep(random.uniform(0.18, 0.28))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        success = False
-        for attempt in range(2):
+        
+        for attempt in range(3):
             try:
-                r = requests.get(url, headers=get_headers(), timeout=6)
+                r = requests.get(url, headers=get_headers(), timeout=8)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
-                    rate_limit_consecutive_hits = 0
-                    success = True
                     break
                 elif r.status_code == 429:
-                    rate_limit_consecutive_hits += 1
-                    time.sleep(2.0 + attempt * 2.0)
+                    # Cloudflare sliding window needs full rest to reset counter
+                    wait_cool = 70.0
+                    print(f"   ⚠️ [Rate limit 429] Jugador {idx}/{len(target_deep_pids)}. Enfriando IP durante {wait_cool}s antes de reintentar...")
+                    time.sleep(wait_cool)
             except Exception:
-                time.sleep(0.5)
+                time.sleep(1.0)
 
-        # Circuit breaker: if we get 3 consecutive 429s, stop deep calls to avoid wasting hours
-        if rate_limit_consecutive_hits >= 3:
-            print(f"⚠️ [Circuit Breaker] Rate limit 429 recurrente detectado en jugador {idx}. Deteniendo peticiones individuales para proteger la IP.")
-            print(f"ℹ️ Continuando de inmediato con la generación del censo de los {len(all_pids)} jugadores...")
-            break
+        # Proactive cooldown after each batch (before Cloudflare's 200 limit is reached)
+        if idx < len(target_deep_pids) and idx % BATCH_SIZE == 0:
+            batch_num = idx // BATCH_SIZE
+            total_batches = (len(target_deep_pids) + BATCH_SIZE - 1) // BATCH_SIZE
+            print(f"   ⏸️ [Pausa preventiva] Lote {batch_num}/{total_batches} completado ({idx}/{len(target_deep_pids)} jugadores).")
+            print(f"      Descansando 65s para reiniciar el contador de Cloudflare a cero...")
+            time.sleep(65.0)
 
         if idx % 50 == 0 or idx == len(target_deep_pids):
             print(f"   Progreso fichas profundas: {idx}/{len(target_deep_pids)} ({idx/len(target_deep_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
