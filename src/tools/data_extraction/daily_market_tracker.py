@@ -129,7 +129,7 @@ def calculate_age(birthday_val):
     except Exception:
         return ""
 
-def run_daily_market_capture(max_players: int = None):
+def run_daily_market_capture(max_deep_enrich: int = 140):
     print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
@@ -187,41 +187,51 @@ def run_daily_market_capture(max_players: int = None):
         except Exception:
             pass
 
-    # 3. Target players: ALL 580 players of LaLiga (100% census)
-    sorted_pids = [int(p) for p in sorted(
+    # 3. Sort all 580 players and select top priority for deep enrichment
+    all_pids = [int(p) for p in sorted(
         raw_players.keys(),
         key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
         reverse=True
     )]
-    target_pids = sorted_pids[:max_players] if max_players else sorted_pids
+    
+    target_deep_pids = all_pids[:max_deep_enrich] if max_deep_enrich else all_pids
+    print(f"⏳ Extrayendo fichas exhaustivas completas para {len(target_deep_pids)} jugadores clave (mercado, tu liga y top)...")
+    print(f"ℹ️ El censo diario completo abarcará el 100% ({len(all_pids)} jugadores) de LaLiga.")
 
-    print(f"⏳ Extrayendo datos exhaustivos (mercado, curva, actas) para TODOS los {len(target_pids)} jugadores de LaLiga...")
     details_map = {}
-    for idx, pid in enumerate(target_pids, 1):
-        time.sleep(random.uniform(0.15, 0.22))
+    rate_limit_consecutive_hits = 0
+    for idx, pid in enumerate(target_deep_pids, 1):
+        time.sleep(random.uniform(0.12, 0.18))
         url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        for attempt in range(5):
+        success = False
+        for attempt in range(2):
             try:
-                r = requests.get(url, headers=get_headers(), timeout=8)
+                r = requests.get(url, headers=get_headers(), timeout=6)
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
+                    rate_limit_consecutive_hits = 0
+                    success = True
                     break
                 elif r.status_code == 429:
-                    # Cloudflare rate limit sliding window is 60s. Wait 65s so window resets completely!
-                    wait_time = 65.0
-                    print(f"   ⚠️ Rate limit 429 en jugador {idx}/{len(target_pids)}. Pausa estratégica de {wait_time}s para resetear ventana de Biwenger...")
-                    time.sleep(wait_time)
+                    rate_limit_consecutive_hits += 1
+                    time.sleep(2.0 + attempt * 2.0)
             except Exception:
-                time.sleep(1.0)
-        
-        if idx % 50 == 0 or idx == len(target_pids):
-            print(f"   Progreso: {idx}/{len(target_pids)} ({idx/len(target_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
+                time.sleep(0.5)
 
-    print(f"✅ {len(details_map)}/{len(target_pids)} fichas exhaustivas extraídas con éxito.")
+        # Circuit breaker: if we get 3 consecutive 429s, stop deep calls to avoid wasting hours
+        if rate_limit_consecutive_hits >= 3:
+            print(f"⚠️ [Circuit Breaker] Rate limit 429 recurrente detectado en jugador {idx}. Deteniendo peticiones individuales para proteger la IP.")
+            print(f"ℹ️ Continuando de inmediato con la generación del censo de los {len(all_pids)} jugadores...")
+            break
 
-    # 4. Build comprehensive master rows for target players
+        if idx % 50 == 0 or idx == len(target_deep_pids):
+            print(f"   Progreso fichas profundas: {idx}/{len(target_deep_pids)} ({idx/len(target_deep_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
+
+    print(f"✅ {len(details_map)}/{len(target_deep_pids)} fichas exhaustivas extraídas con éxito.")
+
+    # 4. Build comprehensive master rows for ALL 580 players
     rows_to_append = []
-    for pid in target_pids:
+    for pid in all_pids:
         p_base = raw_players.get(str(pid), {})
         p_detail = details_map.get(pid, {})
         analysis = p_detail.get("analysis", {})
