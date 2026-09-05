@@ -20,7 +20,7 @@ import pandas as pd
 import gspread
 from typing import Optional, Dict, Any, List
 
-from src.config import Credentials, GeneralSettings
+from src.config import Credentials, GeneralSettings, GoogleSheetsConfig
 from src.tools.data_extraction.auth import BiwengerAuth
 from src.tools.data_extraction.biwenger_data import BiwengerGeneralData, UserLeagueData
 
@@ -28,6 +28,10 @@ from src.tools.data_extraction.biwenger_data import BiwengerGeneralData, UserLea
 SHEET_MOVIMIENTOS = "Movimientos"
 SHEET_CONFIG = "Config_Inicial"
 SHEET_SALDOS = "Saldos_Estimados"
+SHEET_PRIMAS = "Primas_Jornadas"
+SHEET_SQUAD = "Mi_Plantilla"
+SHEET_USER_STATUS = "Estado_Usuario"
+SHEET_MARKET = "Mercado_Fichajes"
 
 DEFAULT_DAYS_BACK = int(os.getenv("TRACKER_DAYS_BACK", "7"))
 
@@ -48,8 +52,8 @@ class BiwengerSheetsTracker:
     """Manages the synchronization between Biwenger and Google Sheets."""
 
     def __init__(self, sheet_id: Optional[str] = None, creds_path: Optional[str] = None):
-        self.sheet_id = sheet_id or GeneralSettings.GOOGLE_SHEET_ID
-        self.creds_path = creds_path or GeneralSettings.GOOGLE_SERVICE_ACCOUNT_FILE
+        self.sheet_id = sheet_id or os.getenv("GOOGLE_SHEET_ID") or GoogleSheetsConfig.SHEET_ID
+        self.creds_path = creds_path or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or GoogleSheetsConfig.SERVICE_ACCOUNT_FILE
         
         if not self.sheet_id:
             raise ValueError("GOOGLE_SHEET_ID is not configured in .env or settings.")
@@ -78,20 +82,58 @@ class BiwengerSheetsTracker:
                 except Exception:
                     pass
 
-    def sync(self, days_back: Optional[int] = DEFAULT_DAYS_BACK, full: bool = False, reset_sheets: bool = False) -> Dict[str, Any]:
+    def sync(
+        self,
+        days_back: Optional[int] = None,
+        full: bool = False,
+        reset_sheets: bool = False,
+        df_players_enriched: Optional[pd.DataFrame] = None
+    ) -> Dict[str, Any]:
         """
         Main synchronization pipeline:
-          1. Connect to Biwenger API and extract board transactions (last N days or full history).
-          2. Map player names from General Data.
-          3. Read existing transactions from 'Movimientos' sheet and deduplicate.
-          4. Append only new records to 'Movimientos'.
-          5. Ensure 'Config_Inicial' contains all managers with their baseline values.
-          6. Recalculate estimated balances and update 'Saldos_Estimados' in Google Sheets.
-          7. Export rich rival metrics to local CSV './data/rival_financials.csv'.
+          1. Connect to Biwenger API and check existing movements in Sheets.
+          2. Auto-detect last recorded movement date for fast incremental syncing.
+          3. Extract only new board transactions, round bonuses, and clause blindajes.
+          4. Map player names from General Data.
+          5. Append only new records to 'Movimientos' (deduplicated).
+          6. Update 'Primas_Jornadas' with round bonuses breakdown (cumulative).
+          7. Ensure 'Config_Inicial' contains all managers with their baseline values.
+          8. Recalculate estimated balances, calibrate with Dani's real balance, and update 'Saldos_Estimados'.
+          9. Sync operational sheets: 'Mi_Plantilla', 'Estado_Usuario', 'Mercado_Fichajes'.
+          10. Export rich rival metrics to local CSV './data/rival_financials.csv'.
         """
-        effective_days = None if full else (days_back if days_back is not None else DEFAULT_DAYS_BACK)
-        sync_desc = "HISTÓRICO COMPLETO (Día 1 hasta hoy)" if (full or effective_days is None) else f"Últimos {effective_days} días"
-        
+        # Open / create 'Movimientos' first to inspect latest recorded movement
+        ws_mov = self._get_or_create_worksheet(SHEET_MOVIMIENTOS, rows=1000, cols=12)
+        if reset_sheets:
+            ws_mov.clear()
+
+        # Incremental detection: find latest movement date in Movimientos
+        latest_movement_date = None
+        if not reset_sheets:
+            mov_values = ws_mov.get_all_values()
+            if len(mov_values) > 1:
+                dates = []
+                for r in mov_values[1:]:
+                    if len(r) > 1 and r[1]:
+                        try:
+                            dates.append(pd.to_datetime(r[1]))
+                        except Exception:
+                            pass
+                if dates:
+                    latest_movement_date = max(dates)
+
+        if not full and latest_movement_date is not None and days_back is None:
+            # Calculate days back since latest movement + 1 day safety buffer
+            now = pd.Timestamp.now()
+            diff_days = (now - latest_movement_date).total_seconds() / 86400.0
+            effective_days = max(2, int(diff_days) + 1)
+            fetch_all = False
+            sync_desc = f"INCREMENTAL (Últimos {effective_days} días, desde {latest_movement_date.strftime('%Y-%m-%d %H:%M')})"
+        else:
+            effective_days = None if full else days_back
+            fetch_all = full or (effective_days is None)
+            sync_desc = "HISTÓRICO COMPLETO (Desde reinicio de liga)" if (full or effective_days is None) else f"Últimos {effective_days} días"
+
         print("=" * 65)
         print(f"📊 BIWENGER TRACKER - Sincronizando: {sync_desc}")
         print(f"📅 Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -102,6 +144,8 @@ class BiwengerSheetsTracker:
         print("\n🔑 Authenticating with Biwenger API...")
         auth = BiwengerAuth(email=Credentials.BIWENGER_USERNAME, password=Credentials.BIWENGER_PASSWORD)
         auth.run()
+        user_real_balance = getattr(auth.player_info, 'balance', None) if auth.player_info else None
+        current_user_id = _clean_id(getattr(auth.player_info, 'team_id', None)) if auth.player_info else None
 
         # 2. General player data for name mapping
         print("⚽ Fetching player database for name resolution...")
@@ -111,8 +155,7 @@ class BiwengerSheetsTracker:
         player_names_map = dict(zip(df_players['id'], df_players['name']))
 
         # 3. Extract Board info
-        fetch_all = full or (effective_days is None)
-        print(f"📥 Extracting board activity ({'Muro completo' if fetch_all else f'últimos {effective_days} días'})...")
+        print(f"📥 Extracting board activity ({sync_desc})...")
         user_league_data = UserLeagueData(
             session=auth.session,
             token=auth.token,
@@ -121,7 +164,11 @@ class BiwengerSheetsTracker:
         )
         board_res = user_league_data.league_board_info(auth.session, fetch_all=fetch_all, days_back=effective_days)
         df_transfers = board_res.get('transfers', pd.DataFrame())
-        print(f"   📥 Total transacciones recibidas de Biwenger: {len(df_transfers)}")
+        df_bonuses = board_res.get('bonuses', pd.DataFrame())
+        df_clause_inc = board_res.get('clause_increments', pd.DataFrame())
+        print(f"   📥 Total transacciones de mercado/fichajes: {len(df_transfers)}")
+        print(f"   🏆 Total primas de jornada registradas: {len(df_bonuses)}")
+        print(f"   🛡️ Total blindajes de cláusulas registrados: {len(df_clause_inc)}")
 
         # Standings table for team values, points, position, and manager IDs
         user_league_data._league_table_data(auth.session)
@@ -130,12 +177,22 @@ class BiwengerSheetsTracker:
         # Extract live round lineups and standings
         round_standings = user_league_data.league_round_standings(auth.session)
 
+        # Market sales (players on sale today)
+        try:
+            df_market_sales = user_league_data.market_sales_info()
+        except Exception:
+            df_market_sales = pd.DataFrame()
+
         # 4. Sync 'Movimientos' Worksheet
         print("\n📋 Synchronizing 'Movimientos' worksheet...")
-        ws_mov = self._get_or_create_worksheet(SHEET_MOVIMIENTOS, rows=1000, cols=12)
-        if reset_sheets:
-            ws_mov.clear()
         added_count = self._sync_movements(ws_mov, df_transfers, player_names_map)
+
+        # 4b. Sync 'Primas_Jornadas' Worksheet
+        print("🏆 Synchronizing 'Primas_Jornadas' worksheet...")
+        ws_primas = self._get_or_create_worksheet(SHEET_PRIMAS, rows=150, cols=7)
+        if reset_sheets:
+            ws_primas.clear()
+        self._sync_round_bonuses(ws_primas, df_bonuses)
 
         # 5. Sync 'Config_Inicial' Worksheet
         print("⚙️ Checking 'Config_Inicial' worksheet...")
@@ -145,17 +202,34 @@ class BiwengerSheetsTracker:
         config_data = self._sync_initial_config(ws_cfg, df_standings)
 
         # 6. Recalculate and update 'Saldos_Estimados'
-        print("💰 Calculating updated balances and updating 'Saldos_Estimados'...")
-        ws_saldos = self._get_or_create_worksheet(SHEET_SALDOS, rows=50, cols=16)
-        saldos_df = self._update_saldos(ws_mov, ws_saldos, config_data, df_standings, df_players, round_standings)
+        print("💰 Calculating updated balances and reconciling with current user...")
+        ws_saldos = self._get_or_create_worksheet(SHEET_SALDOS, rows=50, cols=22)
+        saldos_df = self._update_saldos(
+            ws_mov, ws_saldos, ws_primas, config_data, df_standings, df_players,
+            round_standings, df_bonuses, df_clause_inc, user_real_balance, current_user_id
+        )
 
-        # 7. Save local CSVs for data extraction pipeline & agents
+        # 7. Sync operational dashboard sheets (Mi_Plantilla, Estado_Usuario, Mercado_Fichajes)
+        active_players_df = df_players_enriched if (df_players_enriched is not None and not df_players_enriched.empty) else None
+        if active_players_df is None and os.path.exists("./data/players_transformed.csv"):
+            try:
+                active_players_df = pd.read_csv("./data/players_transformed.csv")
+            except Exception:
+                pass
+        if active_players_df is None or active_players_df.empty:
+            active_players_df = df_players
+
+        self._sync_dashboard_sheets(
+            df_players=active_players_df,
+            auth_player_info=auth.player_info,
+            df_market_sales=df_market_sales,
+            saldos_df=saldos_df
+        )
+
+        # 8. Save local CSVs for data extraction pipeline & agents
         os.makedirs("./data", exist_ok=True)
-
-
         saldos_df.to_csv("./data/rival_financials.csv", index=False)
         print("💾 Guardado './data/rival_financials.csv' con todas las métricas de rivales.")
-
 
         # Cleanup unused default sheet if needed
         self._ensure_default_sheet_cleanup()
@@ -199,7 +273,8 @@ class BiwengerSheetsTracker:
             'market_buy': 'Compra Mercado',
             'user_sale': 'Venta Mercado',
             'user_transfer': 'Traspaso entre Managers',
-            'clause_steal': 'Clausulazo'
+            'clause_steal': 'Clausulazo',
+            'clause_increment': 'Blindaje Cláusula'
         }
 
         new_rows = []
@@ -214,7 +289,8 @@ class BiwengerSheetsTracker:
             buyer_id = _clean_id(row.get('buyer_id'))
             buyer_name = str(row.get('buyer_name') or 'Mercado')
             seller_id = _clean_id(row.get('seller_id'))
-            seller_name = str(row.get('seller_name') or 'Mercado')
+            seller_default = 'Biwenger' if row.get('type') == 'clause_increment' else 'Mercado'
+            seller_name = str(row.get('seller_name') or seller_default)
             amount = int(row.get('amount') or 0)
             is_clause = "SÍ" if row.get('clause') else "NO"
 
@@ -234,6 +310,46 @@ class BiwengerSheetsTracker:
         else:
             print(f"   👌 Todos los movimientos ya estaban registrados en '{SHEET_MOVIMIENTOS}'.")
 
+        return len(new_rows)
+
+    def _sync_round_bonuses(self, ws: gspread.Worksheet, df_bonuses: Optional[pd.DataFrame]) -> int:
+        """Syncs round bonuses per manager into Primas_Jornadas worksheet (cumulative and deduplicated)."""
+        headers = ["Jornada", "Manager", "User ID", "Puntos", "Prima Recibida", "Fecha"]
+        if df_bonuses is None or df_bonuses.empty:
+            return 0
+
+        existing_values = ws.get_all_values()
+        existing_keys = set()
+        if existing_values and existing_values[0] == headers:
+            for r in existing_values[1:]:
+                if len(r) >= 3:
+                    existing_keys.add(f"{r[0]}_{r[2]}")
+        else:
+            ws.clear()
+            ws.append_row(headers)
+
+        df_sorted = df_bonuses.sort_values(by=['round_base', 'bonus'], ascending=[True, False])
+        new_rows = []
+        for _, r in df_sorted.iterrows():
+            j_name = str(r.get('round_name') or r.get('round_base'))
+            uid = str(r.get('user_id') or '')
+            k = f"{j_name}_{uid}"
+            if k not in existing_keys:
+                new_rows.append([
+                    j_name,
+                    str(r.get('user_name') or ''),
+                    uid,
+                    int(r.get('points') or 0),
+                    f"{int(r.get('bonus') or 0):,} €".replace(",", "."),
+                    str(r.get('date') or '')
+                ])
+                existing_keys.add(k)
+
+        if new_rows:
+            ws.append_rows(new_rows)
+            print(f"   🏆 {len(new_rows)} nuevas primas de jornada añadidas a '{SHEET_PRIMAS}'.")
+        else:
+            print(f"   👌 Todas las primas de jornada ya estaban registradas en '{SHEET_PRIMAS}'.")
         return len(new_rows)
 
     def _sync_initial_config(self, ws: gspread.Worksheet, df_standings: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
@@ -323,20 +439,26 @@ class BiwengerSheetsTracker:
         self,
         ws_mov: gspread.Worksheet,
         ws_saldos: gspread.Worksheet,
+        ws_primas: Optional[gspread.Worksheet],
         config_data: Dict[str, Dict[str, Any]],
         df_standings: pd.DataFrame,
         df_players: Optional[pd.DataFrame] = None,
-        round_standings: Optional[List[Dict[str, Any]]] = None
+        round_standings: Optional[List[Dict[str, Any]]] = None,
+        df_bonuses: Optional[pd.DataFrame] = None,
+        df_clause_inc: Optional[pd.DataFrame] = None,
+        user_real_balance: Optional[float] = None,
+        current_user_id: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Reads all movements from Movimientos, calculates aggregate financials and squad metrics,
-        rewrites the Saldos_Estimados worksheet in Google Sheets, and returns a DataFrame.
+        Reads movements from Movimientos and bonuses from Primas_Jornadas / board, calculates exact aggregate
+        financials and squad metrics, rewrites the Saldos_Estimados worksheet in Google Sheets,
+        calibrates against current user's real balance, and returns a DataFrame.
         """
         mov_values = ws_mov.get_all_values()
         
         name_to_uid = {cfg["manager"].lower().strip(): uid for uid, cfg in config_data.items()}
 
-        # Compute exact lineup points per manager
+        # Compute exact lineup points per manager if needed
         live_points_map = {}
         if round_standings and df_players is not None and not df_players.empty:
             player_pts_dict = dict(zip(df_players['id'], df_players['points']))
@@ -350,18 +472,8 @@ class BiwengerSheetsTracker:
                 empty_slots = max(0, 11 - len(aligned_valid))
                 penalty = empty_slots * 4
                 lineup_pts = base_pts - penalty
-
-                # Captain / MVP bonuses
-                if m_uid == '12630338': # Birra München (Captain bonus +2)
-                    lineup_pts += 2
-                elif m_uid == '9879359': # RusoPoderoso (+1)
-                    lineup_pts += 1
-                elif m_uid == '12629981': # JubiladosFC (exact match 4 pts)
-                    lineup_pts = 4
-
                 if m_uid:
                     live_points_map[m_uid] = max(0, lineup_pts)
-
 
         spent_map = {}
         income_map = {}
@@ -369,11 +481,13 @@ class BiwengerSheetsTracker:
         sales_count = {}
         clauses_paid = {}
         clauses_received = {}
+        clause_increments_spent = {}
 
         if len(mov_values) > 1:
             for row in mov_values[1:]:
                 if len(row) < 10:
                     continue
+                tipo_mov = str(row[2]).strip().lower()
                 buyer_name = str(row[5]).strip()
                 buyer_id = _clean_id(row[6]) or name_to_uid.get(buyer_name.lower())
                 
@@ -386,17 +500,50 @@ class BiwengerSheetsTracker:
                     amount = 0.0
                 is_clause = (str(row[10]).strip().upper() == "SÍ")
 
-                if buyer_id:
-                    spent_map[buyer_id] = spent_map.get(buyer_id, 0.0) + amount
-                    purchases_count[buyer_id] = purchases_count.get(buyer_id, 0) + 1
-                    if is_clause:
-                        clauses_paid[buyer_id] = clauses_paid.get(buyer_id, 0.0) + amount
+                if 'blindaje' in tipo_mov or tipo_mov == 'clause_increment':
+                    if buyer_id:
+                        clause_increments_spent[buyer_id] = clause_increments_spent.get(buyer_id, 0.0) + amount
+                else:
+                    if buyer_id:
+                        spent_map[buyer_id] = spent_map.get(buyer_id, 0.0) + amount
+                        purchases_count[buyer_id] = purchases_count.get(buyer_id, 0) + 1
+                        if is_clause:
+                            clauses_paid[buyer_id] = clauses_paid.get(buyer_id, 0.0) + amount
 
-                if seller_id:
-                    income_map[seller_id] = income_map.get(seller_id, 0.0) + amount
-                    sales_count[seller_id] = sales_count.get(seller_id, 0) + 1
-                    if is_clause:
-                        clauses_received[seller_id] = clauses_received.get(seller_id, 0.0) + amount
+                    if seller_id:
+                        income_map[seller_id] = income_map.get(seller_id, 0.0) + amount
+                        sales_count[seller_id] = sales_count.get(seller_id, 0) + 1
+                        if is_clause:
+                            clauses_received[seller_id] = clauses_received.get(seller_id, 0.0) + amount
+
+        # Round bonuses mapping: accumulate from ws_primas (all recorded rounds)
+        round_bonuses_map = {}
+        if ws_primas is not None:
+            primas_values = ws_primas.get_all_values()
+            if len(primas_values) > 1:
+                for r in primas_values[1:]:
+                    if len(r) >= 5:
+                        uid = _clean_id(r[2])
+                        try:
+                            amt = float(str(r[4]).replace("€", "").replace(".", "").replace(",", ".").strip())
+                        except Exception:
+                            amt = 0.0
+                        if uid:
+                            round_bonuses_map[uid] = round_bonuses_map.get(uid, 0.0) + amt
+
+        if not round_bonuses_map and df_bonuses is not None and not df_bonuses.empty:
+            for _, r in df_bonuses.iterrows():
+                uid = _clean_id(r.get('user_id'))
+                if uid:
+                    round_bonuses_map[uid] = round_bonuses_map.get(uid, 0.0) + float(r.get('bonus', 0) or 0)
+
+        # Clause increments mapping
+        if df_clause_inc is not None and not df_clause_inc.empty:
+            for _, r in df_clause_inc.iterrows():
+                uid = _clean_id(r.get('user_id'))
+                if uid:
+                    inc_sum = float(df_clause_inc[df_clause_inc['user_id'].astype(str) == str(uid)]['amount'].sum())
+                    clause_increments_spent[uid] = max(clause_increments_spent.get(uid, 0.0), inc_sum)
 
         # Map current standings metrics
         standings_map = {}
@@ -418,30 +565,29 @@ class BiwengerSheetsTracker:
             manager_name = cfg["manager"]
             pres_ini = cfg["presupuesto_inicial"]
             plant_ini = cfg.get("valor_equipo_inicial", 0.0)
-            primas = cfg["primas_manuales"]
+            primas_manuales = cfg["primas_manuales"]
             total_spent = spent_map.get(uid, 0.0)
             total_income = income_map.get(uid, 0.0)
+            total_bonuses = round_bonuses_map.get(uid, 0.0)
+            total_clause_inc = clause_increments_spent.get(uid, 0.0)
             
             st_info = standings_map.get(uid, {"position": 0, "points": 0, "teamSize": 0, "teamValue": 0.0, "teamValueInc": 0.0})
             valor_plantilla = st_info["teamValue"]
             team_size = st_info["teamSize"]
             official_pts = st_info["points"]
             live_pts = live_points_map.get(uid, 0)
-            # If official standings are yet to be consolidated (e.g. active round on weekend or midweek)
             puntos = official_pts if official_pts > 0 else live_pts
             posicion_liga = st_info["position"]
 
-
-            
-            # Estimated Cash = Initial Budget + Sales Income - Purchases Spent + Manual Bonuses
-            saldo_est = pres_ini + total_income - total_spent + primas
+            # Exact Formula:
+            # Saldo = Presupuesto Inicial + Ventas - Fichajes + Primas Jornada - Blindaje Cláusulas + Primas Manuales
+            saldo_est = pres_ini + total_income - total_spent + total_bonuses - total_clause_inc + primas_manuales
             patrimonio_total = saldo_est + valor_plantilla
             base_total = (pres_ini + plant_ini) if (pres_ini + plant_ini) > 0 else 40000000.0
             beneficio_neto = patrimonio_total - base_total
             
-            # Useful derived metrics
             media_jugador = (valor_plantilla / team_size) if team_size > 0 else 0.0
-            max_puja_biwenger = saldo_est + (0.25 * valor_plantilla) # Límite de saldo negativo permitido en Biwenger (hasta 25% valor plantilla)
+            max_puja_biwenger = saldo_est + (0.25 * valor_plantilla)
             
             if saldo_est >= 15000000:
                 amenaza_clausula = "MUY ALTA"
@@ -453,6 +599,21 @@ class BiwengerSheetsTracker:
                 amenaza_clausula = "BAJA"
             else:
                 amenaza_clausula = "EN NEGATIVO"
+
+            is_me = (current_user_id and uid == _clean_id(current_user_id))
+            drift = (user_real_balance - saldo_est) if (is_me and user_real_balance is not None) else None
+
+            if is_me and user_real_balance is not None:
+                print("\n" + "=" * 65)
+                print(f"🎯 CONCILIACIÓN CON TU SALDO REAL ({manager_name}):")
+                print(f"   • Saldo real en Biwenger (API): {int(user_real_balance):,} €".replace(",", "."))
+                print(f"   • Saldo calculado con el muro:  {int(saldo_est):,} €".replace(",", "."))
+                print(f"   • Diferencia / Desviación:     {int(drift):,} €".replace(",", "."))
+                if abs(drift) < 1:
+                    print("   ✅ ¡CUADRE EXACTO (0 € de desviación)! Tus cuentas cuadran al 100%.")
+                else:
+                    print(f"   ⚠️ Desviación detectada: {int(drift):+,} €".replace(",", "."))
+                print("=" * 65 + "\n")
 
             summary_dicts.append({
                 "user_id": uid,
@@ -470,11 +631,15 @@ class BiwengerSheetsTracker:
                 "presupuesto_inicial": pres_ini,
                 "total_gastado": total_spent,
                 "total_ingresado": total_income,
+                "primas_jornadas": total_bonuses,
+                "blindaje_clausulas": total_clause_inc,
                 "clausulas_pagadas": clauses_paid.get(uid, 0.0),
                 "clausulas_recibidas": clauses_received.get(uid, 0.0),
-                "primas_manuales": primas,
+                "primas_manuales": primas_manuales,
                 "fichajes": purchases_count.get(uid, 0),
                 "ventas": sales_count.get(uid, 0),
+                "saldo_real": user_real_balance if is_me else None,
+                "desviacion_conciliacion": drift if is_me else None,
                 "ultima_actualizacion": now_str
             })
 
@@ -486,7 +651,9 @@ class BiwengerSheetsTracker:
             "Ranking Pat.", "Manager", "Pos. Liga", "Puntos", "Jugadores",
             "Saldo Disponible Est.", "Valor Plantilla", "Patrimonio Total Est.", "Beneficio Neto (€)",
             "Media / Jugador", "Límite Puja (Biwenger)", "Amenaza Clausulazo",
-            "Presupuesto Inicial", "Total Gastado", "Total Ingresado", "Fichajes", "Ventas", "Última Actualización"
+            "Presupuesto Inicial", "Total Gastado", "Total Ingresado",
+            "Primas Jornada", "Blindaje Cláusulas", "Primas Manuales",
+            "Fichajes", "Ventas", "Última Actualización"
         ]
 
         gs_rows = []
@@ -508,6 +675,9 @@ class BiwengerSheetsTracker:
                 f"{int(row['presupuesto_inicial']):,} €".replace(",", "."),
                 f"{int(row['total_gastado']):,} €".replace(",", "."),
                 f"{int(row['total_ingresado']):,} €".replace(",", "."),
+                f"{int(row['primas_jornadas']):,} €".replace(",", "."),
+                f"{int(row['blindaje_clausulas']):,} €".replace(",", "."),
+                f"{int(row['primas_manuales']):,} €".replace(",", "."),
                 row["fichajes"],
                 row["ventas"],
                 now_str
@@ -520,8 +690,173 @@ class BiwengerSheetsTracker:
 
         return df_summary
 
+    def _sync_dashboard_sheets(
+        self,
+        df_players: pd.DataFrame,
+        auth_player_info: Any,
+        df_market_sales: Optional[pd.DataFrame] = None,
+        saldos_df: Optional[pd.DataFrame] = None
+    ):
+        """Syncs Mi_Plantilla, Estado_Usuario, and Mercado_Fichajes into fantasy_tracker."""
+        print("📊 Sincronizando hojas operativas para Dashboard y Agente...")
+        
+        my_team_name = getattr(auth_player_info, 'team_name', 'Dani SR') if auth_player_info else 'Dani SR'
+        my_balance = float(getattr(auth_player_info, 'balance', 0.0) or 0.0) if auth_player_info else 0.0
 
-def run_tracker(days_back: Optional[int] = DEFAULT_DAYS_BACK, full: bool = False, reset_sheets: bool = False) -> pd.DataFrame:
+        # 1. Mi_Plantilla
+        try:
+            ws_squad = self._get_or_create_worksheet(SHEET_SQUAD, rows=50, cols=12)
+            headers_squad = [
+                "Jugador", "Posicion", "Equipo", "Precio", "Subida_24h",
+                "Estado_Fisico", "Prevision_Titular", "Puntos", "Oferta_Mercado", "Clausula"
+            ]
+            
+            squad_rows = []
+            if df_players is not None and not df_players.empty:
+                team_col = None
+                for c in ['BIWPLAYER_TEAM_NAME', 'owner_name', 'team_name']:
+                    if c in df_players.columns:
+                        team_col = c
+                        break
+                
+                my_squad = df_players[df_players[team_col] == my_team_name] if team_col else pd.DataFrame()
+
+                pos_map = {1: "GK", 2: "DF", 3: "MF", 4: "FW"}
+                for _, p in my_squad.iterrows():
+                    pos_raw = p.get('PLAYER_POSITION') or p.get('position') or ''
+                    pos_name = pos_map.get(pos_raw, str(pos_raw))
+                    status_raw = str(p.get('PLAYER_STATUS') or p.get('fitness') or 'ok')
+                    if status_raw.lower() in ('ok', 'fit'):
+                        status_str = "🟢 Apto"
+                    elif any(w in status_raw.lower() for w in ('injur', 'lesion', 'baja')):
+                        status_str = "🔴 Lesionado"
+                    else:
+                        status_str = "🟡 Duda"
+
+                    titular_raw = str(p.get('COMUNIATE_STATUS') or p.get('comuniate_status') or '—')
+                    
+                    price = int(p.get('PLAYER_PRICE') or p.get('price') or 0)
+                    inc = int(p.get('PLAYER_PRICE_INCREMENT') or p.get('price_increment') or 0)
+                    pts = int(p.get('PLAYER_POINTS') or p.get('points') or 0)
+                    offer = p.get('MARKET_OFFER_AMOUNT')
+                    offer_str = f"{int(offer):,} €".replace(",", ".") if pd.notnull(offer) and float(offer) > 0 else "—"
+                    clause = p.get('PLAYER_CLAUSE') or p.get('clause')
+                    clause_str = f"{int(clause):,} €".replace(",", ".") if pd.notnull(clause) and float(clause) > 0 else "—"
+
+                    squad_rows.append([
+                        str(p.get('PLAYER_NAME') or p.get('name') or ''),
+                        pos_name,
+                        str(p.get('TEAM_NAME') or p.get('team_name') or ''),
+                        f"{price:,} €".replace(",", "."),
+                        f"{inc:+,} €".replace(",", "."),
+                        status_str,
+                        titular_raw,
+                        pts,
+                        offer_str,
+                        clause_str
+                    ])
+            
+            ws_squad.clear()
+            ws_squad.append_row(headers_squad)
+            if squad_rows:
+                ws_squad.append_rows(squad_rows)
+            ws_squad.freeze(rows=1)
+            print(f"   👔 Sincronizados {len(squad_rows)} jugadores en '{SHEET_SQUAD}'.")
+        except Exception as e:
+            print(f"   ⚠️ Error sincronizando '{SHEET_SQUAD}': {e}")
+
+        # 2. Estado_Usuario
+        try:
+            ws_status = self._get_or_create_worksheet(SHEET_USER_STATUS, rows=20, cols=10)
+            headers_status = [
+                "Manager", "Posicion_Liga", "Puntos_Totales", "Saldo_Real_Disponible",
+                "Valor_Plantilla", "Patrimonio_Total", "Max_Puja_Permitida", "Num_Jugadores", "Ultima_Actualizacion"
+            ]
+            
+            pos_liga = 6
+            puntos_tot = 0
+            val_plantilla = 0.0
+            if saldos_df is not None and not saldos_df.empty:
+                user_row = saldos_df[saldos_df['manager'] == my_team_name]
+                if not user_row.empty:
+                    pos_liga = int(user_row['posicion_liga'].iloc[0])
+                    puntos_tot = int(user_row['puntos'].iloc[0])
+                    val_plantilla = float(user_row['valor_plantilla'].iloc[0])
+
+            patrimonio = my_balance + val_plantilla
+            max_bid = my_balance + (val_plantilla * 0.25)
+            num_jug = len(squad_rows) if 'squad_rows' in locals() and squad_rows else 0
+
+            status_row = [
+                my_team_name,
+                pos_liga,
+                puntos_tot,
+                f"{int(my_balance):,} €".replace(",", "."),
+                f"{int(val_plantilla):,} €".replace(",", "."),
+                f"{int(patrimonio):,} €".replace(",", "."),
+                f"{int(max_bid):,} €".replace(",", "."),
+                num_jug,
+                pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')
+            ]
+
+            ws_status.clear()
+            ws_status.append_row(headers_status)
+            ws_status.append_row(status_row)
+            ws_status.freeze(rows=1)
+            print(f"   👤 Actualizado '{SHEET_USER_STATUS}' con saldo exacto {my_balance:,.0f} €.")
+        except Exception as e:
+            print(f"   ⚠️ Error sincronizando '{SHEET_USER_STATUS}': {e}")
+
+        # 3. Mercado_Fichajes
+        try:
+            ws_market = self._get_or_create_worksheet(SHEET_MARKET, rows=100, cols=8)
+            headers_market = ["Jugador", "Posicion", "Equipo", "Precio_Venta", "Subida_24h", "Vendedor", "Fin_Puja"]
+            market_rows = []
+            
+            if df_market_sales is not None and not df_market_sales.empty and df_players is not None and not df_players.empty:
+                p_id_col = 'PLAYER_ID' if 'PLAYER_ID' in df_players.columns else 'id'
+                p_name_col = 'PLAYER_NAME' if 'PLAYER_NAME' in df_players.columns else 'name'
+                p_pos_col = 'PLAYER_POSITION' if 'PLAYER_POSITION' in df_players.columns else 'position'
+                p_team_col = 'TEAM_NAME' if 'TEAM_NAME' in df_players.columns else 'team_name'
+                p_price_col = 'PLAYER_PRICE' if 'PLAYER_PRICE' in df_players.columns else 'price'
+                p_inc_col = 'PLAYER_PRICE_INCREMENT' if 'PLAYER_PRICE_INCREMENT' in df_players.columns else 'price_increment'
+
+                p_lookup = df_players.set_index(p_id_col).to_dict('index')
+                
+                pos_map = {1: "GK", 2: "DF", 3: "MF", 4: "FW"}
+                for _, s in df_market_sales.iterrows():
+                    pid = s.get('player_id')
+                    info = p_lookup.get(pid, {})
+                    p_name = info.get(p_name_col, f"Jugador {pid}")
+                    pos_raw = info.get(p_pos_col, '')
+                    pos_str = pos_map.get(pos_raw, str(pos_raw))
+                    team_str = str(info.get(p_team_col, ''))
+                    price_val = int(s.get('price') or info.get(p_price_col, 0) or 0)
+                    inc_val = int(info.get(p_inc_col, 0) or 0)
+                    seller = str(s.get('seller') or 'Mercado')
+                    until_val = str(s.get('until') or '')
+
+                    market_rows.append([
+                        p_name,
+                        pos_str,
+                        team_str,
+                        f"{price_val:,} €".replace(",", "."),
+                        f"{inc_val:+,} €".replace(",", "."),
+                        seller,
+                        until_val
+                    ])
+
+            ws_market.clear()
+            ws_market.append_row(headers_market)
+            if market_rows:
+                ws_market.append_rows(market_rows)
+            ws_market.freeze(rows=1)
+            print(f"   🛒 Sincronizados {len(market_rows)} jugadores transferibles en '{SHEET_MARKET}'.")
+        except Exception as e:
+            print(f"   ⚠️ Error sincronizando '{SHEET_MARKET}': {e}")
+
+
+def run_tracker(days_back: Optional[int] = None, full: bool = True, reset_sheets: bool = False) -> pd.DataFrame:
     """CLI / Execution entrypoint for the Biwenger Google Sheets Tracker."""
     tracker = BiwengerSheetsTracker()
     res = tracker.sync(days_back=days_back, full=full, reset_sheets=reset_sheets)
@@ -529,13 +864,15 @@ def run_tracker(days_back: Optional[int] = DEFAULT_DAYS_BACK, full: bool = False
 
 
 if __name__ == "__main__":
-    full_sync = "--full" in sys.argv
-    days = DEFAULT_DAYS_BACK
+    full_sync = "--full" in sys.argv or "--days" not in sys.argv
+    days = None
     if "--days" in sys.argv:
         idx = sys.argv.index("--days")
         if idx + 1 < len(sys.argv):
             try:
                 days = int(sys.argv[idx + 1])
+                full_sync = False
             except ValueError:
-                days = DEFAULT_DAYS_BACK
-    run_tracker(days_back=None if full_sync else days, full=full_sync)
+                days = None
+                full_sync = True
+    run_tracker(days_back=days, full=full_sync)

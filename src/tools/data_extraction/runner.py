@@ -123,7 +123,7 @@ def extract_and_save_data():
         try:
             from src.tools.rival_tracker import BiwengerSheetsTracker
             tracker = BiwengerSheetsTracker()
-            tracker.sync(days_back=7)
+            tracker.sync(full=True)
         except Exception as e:
             print(f"⚠️ Warning: Google Sheets Tracker sync skipped: {e}")
         

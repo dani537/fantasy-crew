@@ -3,6 +3,7 @@ import pandas as pd
 import datetime
 import time
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel
 from typing import List, Optional
@@ -552,6 +553,9 @@ class UserLeagueData:
                         stop_early = True
                         break
                     all_items.append(item)
+                    if item.get('type') == 'leagueReset':
+                        stop_early = True
+                        break
                 
                 if stop_early or not fetch_all or len(raw_items) < batch_limit:
                     break
@@ -561,6 +565,8 @@ class UserLeagueData:
 
             transfers_list = []
             bids_list = []
+            clause_increments_list = []
+            round_bonuses_map = {}  # user_id -> {base_round_name: dict}
             financials_map = {}
 
             for item in all_items:
@@ -597,7 +603,12 @@ class UserLeagueData:
                             })
 
                             if buyer_id not in financials_map:
-                                financials_map[buyer_id] = {'user_name': buyer_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0, 'purchases': 0, 'sales': 0, 'clauses_paid': 0, 'clauses_received': 0}
+                                financials_map[buyer_id] = {
+                                    'user_name': buyer_name, 'total_spent': 0, 'total_income': 0,
+                                    'bids_placed': 0, 'purchases': 0, 'sales': 0,
+                                    'clauses_paid': 0, 'clauses_received': 0,
+                                    'clause_increments': 0, 'total_bonuses': 0
+                                }
                             financials_map[buyer_id]['total_spent'] += amount
                             financials_map[buyer_id]['purchases'] += 1
 
@@ -625,7 +636,12 @@ class UserLeagueData:
 
                                 if u_id:
                                     if u_id not in financials_map:
-                                        financials_map[u_id] = {'user_name': u_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0, 'purchases': 0, 'sales': 0, 'clauses_paid': 0, 'clauses_received': 0}
+                                        financials_map[u_id] = {
+                                            'user_name': u_name, 'total_spent': 0, 'total_income': 0,
+                                            'bids_placed': 0, 'purchases': 0, 'sales': 0,
+                                            'clauses_paid': 0, 'clauses_received': 0,
+                                            'clause_increments': 0, 'total_bonuses': 0
+                                        }
                                     financials_map[u_id]['bids_placed'] += 1
 
                 elif item_type == 'transfer':
@@ -667,7 +683,12 @@ class UserLeagueData:
 
                         if seller_id:
                             if seller_id not in financials_map:
-                                financials_map[seller_id] = {'user_name': seller_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0, 'purchases': 0, 'sales': 0, 'clauses_paid': 0, 'clauses_received': 0}
+                                financials_map[seller_id] = {
+                                    'user_name': seller_name, 'total_spent': 0, 'total_income': 0,
+                                    'bids_placed': 0, 'purchases': 0, 'sales': 0,
+                                    'clauses_paid': 0, 'clauses_received': 0,
+                                    'clause_increments': 0, 'total_bonuses': 0
+                                }
                             financials_map[seller_id]['total_income'] += amount
                             financials_map[seller_id]['sales'] += 1
                             if is_clause:
@@ -675,28 +696,154 @@ class UserLeagueData:
 
                         if buyer_id and buyer_id != seller_id:
                             if buyer_id not in financials_map:
-                                financials_map[buyer_id] = {'user_name': buyer_name, 'total_spent': 0, 'total_income': 0, 'bids_placed': 0, 'purchases': 0, 'sales': 0, 'clauses_paid': 0, 'clauses_received': 0}
+                                financials_map[buyer_id] = {
+                                    'user_name': buyer_name, 'total_spent': 0, 'total_income': 0,
+                                    'bids_placed': 0, 'purchases': 0, 'sales': 0,
+                                    'clauses_paid': 0, 'clauses_received': 0,
+                                    'clause_increments': 0, 'total_bonuses': 0
+                                }
                             financials_map[buyer_id]['total_spent'] += amount
                             financials_map[buyer_id]['purchases'] += 1
                             if is_clause:
                                 financials_map[buyer_id]['clauses_paid'] += 1
 
+                elif item_type == 'clauseIncrement':
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        u = entry.get('user', {})
+                        u_id = u.get('id') if isinstance(u, dict) else None
+                        u_name = u.get('name') if isinstance(u, dict) else 'Desconocido'
+                        p_id = entry.get('player')
+                        amount = entry.get('amount', 0)
+                        rc = entry.get('releaseClause', 0)
+
+                        clause_increments_list.append({
+                            'date': item_date,
+                            'user_id': u_id,
+                            'user_name': u_name,
+                            'player_id': p_id,
+                            'amount': amount,
+                            'release_clause': rc
+                        })
+
+                        transfers_list.append({
+                            'date': item_date,
+                            'type': 'clause_increment',
+                            'player_id': p_id,
+                            'buyer_id': u_id,
+                            'buyer_name': u_name,
+                            'seller_id': None,
+                            'seller_name': 'Biwenger',
+                            'amount': amount,
+                            'clause': True
+                        })
+
+                        if u_id:
+                            if u_id not in financials_map:
+                                financials_map[u_id] = {
+                                    'user_name': u_name, 'total_spent': 0, 'total_income': 0,
+                                    'bids_placed': 0, 'purchases': 0, 'sales': 0,
+                                    'clauses_paid': 0, 'clauses_received': 0,
+                                    'clause_increments': 0, 'total_bonuses': 0
+                                }
+                            financials_map[u_id]['clause_increments'] = financials_map[u_id].get('clause_increments', 0) + amount
+
+                elif item_type == 'roundFinished':
+                    rnd = content.get('round', {}) if isinstance(content, dict) else {}
+                    rnd_id = rnd.get('id')
+                    rnd_name = rnd.get('name', '')
+                    m = re.match(r'(Jornada \d+)', rnd_name)
+                    base_round = m.group(1) if m else rnd_name
+
+                    for res in (content.get('results', []) if isinstance(content, dict) else []):
+                        u = res.get('user', {})
+                        u_id = u.get('id') if isinstance(u, dict) else None
+                        u_name = u.get('name') if isinstance(u, dict) else 'Desconocido'
+                        bonus = res.get('bonus', 0)
+                        points = res.get('points', 0)
+
+                        if u_id:
+                            if u_id not in round_bonuses_map:
+                                round_bonuses_map[u_id] = {}
+                            # Since items are newest-first, first time we see base_round is the latest/recalculated version
+                            if base_round not in round_bonuses_map[u_id]:
+                                round_bonuses_map[u_id][base_round] = {
+                                    'round_id': rnd_id,
+                                    'round_name': rnd_name,
+                                    'base_round': base_round,
+                                    'bonus': bonus,
+                                    'points': points,
+                                    'date': item_date,
+                                    'user_name': u_name
+                                }
+
+            # Consolidate round bonuses into financials_map
+            for u_id, rounds_dict in round_bonuses_map.items():
+                tot_bon = sum(b.get('bonus', 0) for b in rounds_dict.values())
+                if u_id not in financials_map:
+                    uname = next((b.get('user_name') for b in rounds_dict.values() if b.get('user_name')), 'Desconocido')
+                    financials_map[u_id] = {
+                        'user_name': uname, 'total_spent': 0, 'total_income': 0,
+                        'bids_placed': 0, 'purchases': 0, 'sales': 0,
+                        'clauses_paid': 0, 'clauses_received': 0,
+                        'clause_increments': 0, 'total_bonuses': 0
+                    }
+                financials_map[u_id]['total_bonuses'] = tot_bon
+
             df_transfers = pd.DataFrame(transfers_list)
             df_bids = pd.DataFrame(bids_list)
-            fin_rows = [{'user_id': k, **v, 'net_balance_change': v['total_income'] - v['total_spent']} for k, v in financials_map.items()]
+            df_clause_increments = pd.DataFrame(clause_increments_list)
+
+            bonuses_rows = []
+            for u_id, r_dict in round_bonuses_map.items():
+                for b_name, b_info in r_dict.items():
+                    bonuses_rows.append({
+                        'user_id': u_id,
+                        'user_name': b_info.get('user_name'),
+                        'round_base': b_name,
+                        'round_name': b_info.get('round_name'),
+                        'round_id': b_info.get('round_id'),
+                        'points': b_info.get('points', 0),
+                        'bonus': b_info.get('bonus', 0),
+                        'date': b_info.get('date')
+                    })
+            df_bonuses = pd.DataFrame(bonuses_rows)
+
+            fin_rows = [{
+                'user_id': k,
+                **v,
+                'net_balance_change': v['total_income'] + v.get('total_bonuses', 0) - v['total_spent'] - v.get('clause_increments', 0)
+            } for k, v in financials_map.items()]
             df_financials = pd.DataFrame(fin_rows)
 
             self.df_board_transfers = df_transfers
             self.df_board_bids = df_bids
             self.df_rival_financials = df_financials
+            self.df_board_bonuses = df_bonuses
+            self.df_clause_increments = df_clause_increments
 
-            return {'transfers': df_transfers, 'bids': df_bids, 'financials': df_financials}
+            return {
+                'transfers': df_transfers,
+                'bids': df_bids,
+                'financials': df_financials,
+                'bonuses': df_bonuses,
+                'clause_increments': df_clause_increments
+            }
         except Exception as e:
             print(f"⚠️ Excepción al extraer el muro de la liga: {e}")
             self.df_board_transfers = pd.DataFrame()
             self.df_board_bids = pd.DataFrame()
             self.df_rival_financials = pd.DataFrame()
-            return {'transfers': pd.DataFrame(), 'bids': pd.DataFrame(), 'financials': pd.DataFrame()}
+            self.df_board_bonuses = pd.DataFrame()
+            self.df_clause_increments = pd.DataFrame()
+            return {
+                'transfers': pd.DataFrame(),
+                'bids': pd.DataFrame(),
+                'financials': pd.DataFrame(),
+                'bonuses': pd.DataFrame(),
+                'clause_increments': pd.DataFrame()
+            }
 
     def run(self, session):
         """

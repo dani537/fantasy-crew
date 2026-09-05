@@ -28,11 +28,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 POSITION_MAP = {1: "Portero", 2: "Defensa", 3: "Centrocampista", 4: "Delantero"}
-DEFAULT_SPREADSHEET_ID = "1FsuSJr5k7BkPJa6vIL1zRK0qvIJGlaoSFIPxAUx8wr0"
-SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID_MARKET") or DEFAULT_SPREADSHEET_ID
+DEFAULT_SPREADSHEET_ID = "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk"  # fantasy_tracker
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID") or os.getenv("GOOGLE_SHEET_ID_MARKET") or DEFAULT_SPREADSHEET_ID
 CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "credentials_google.json"
 TAB_HISTORICO = "Historico_Continuo"
-TAB_HOY = "Mercado_Hoy"
 
 COUNTRY_MAP = {
     "ES": "España", "DO": "Rep. Dominicana", "FR": "Francia", "BR": "Brasil",
@@ -414,12 +413,6 @@ def run_daily_market_capture(max_deep_enrich: int = None):
             else:
                 ws_hist = sh.worksheet(TAB_HISTORICO)
 
-            if TAB_HOY not in ws_titles:
-                ws_hoy = sh.add_worksheet(title=TAB_HOY, rows=1000, cols=len(HEADERS)+5)
-                ws_hoy.append_row(HEADERS)
-            else:
-                ws_hoy = sh.worksheet(TAB_HOY)
-
             # 6.1 Idempotent sync to Historico_Continuo (replace today's rows if re-run)
             dates_col = ws_hist.col_values(1)
             matching_indices = [i + 1 for i, d in enumerate(dates_col) if d == today_str]
@@ -431,20 +424,6 @@ def run_daily_market_capture(max_deep_enrich: int = None):
 
             ws_hist.append_rows(rows_to_append)
             print(f"☁️ Sincronizados {len(rows_to_append)} registros de '{today_str}' en '{TAB_HISTORICO}'")
-
-            # 6.2 Refresh Mercado_Hoy (today's active dashboard)
-            ws_hoy.clear()
-            ws_hoy.append_row(HEADERS)
-            ws_hoy.append_rows(rows_to_append)
-            ws_hoy.freeze(rows=1)
-            try:
-                ws_hoy.format('A1:AQ1', {
-                    'backgroundColor': {'red': 0.18, 'green': 0.45, 'blue': 0.25},
-                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}}
-                })
-            except Exception:
-                pass
-            print(f"☁️ Actualizada pestaña '{TAB_HOY}' con {len(rows_to_append)} registros del día")
         except Exception as e:
             print(f"⚠️ Error sincronizando con Google Sheets: {e}")
             raise e
