@@ -176,6 +176,14 @@ class BiwengerSheetsTracker:
 
         # Extract live round lineups and standings
         round_standings = user_league_data.league_round_standings(auth.session)
+        if round_standings:
+            try:
+                import json
+                os.makedirs("./data", exist_ok=True)
+                with open("./data/round_standings_cache.json", "w", encoding="utf-8") as f_rs:
+                    json.dump({"standings": round_standings, "synced_at": datetime.datetime.now().isoformat()}, f_rs, indent=2)
+            except Exception as e_rs:
+                print(f"⚠️ Error guardando round_standings_cache.json: {e_rs}")
 
         # Market sales (players on sale today)
         try:

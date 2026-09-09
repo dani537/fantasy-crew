@@ -1,11 +1,14 @@
 name: Daily Biwenger Market & League Tracker
 
 on:
-  schedule:
-    - cron: '15 5 * * *'  # 05:15 UTC = 07:15 Madrid (just after Biwenger daily market update)
-  workflow_dispatch:
+  # Disparador externo vía cron-job / API (cero retraso)
   repository_dispatch:
     types: [run-market-tracker, daily-market-capture]
+  # Disparador manual con botón desde la interfaz de GitHub
+  workflow_dispatch:
+  # Desactivado cron interno de GitHub para evitar ejecuciones duplicadas
+  # schedule:
+  #   - cron: '15 5 * * *'  # 05:15 UTC = 07:15 Madrid
 
 permissions:
   contents: read

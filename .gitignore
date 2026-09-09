@@ -154,11 +154,9 @@ cython_debug/
 # Project specific
 prova*.py
 prova*.ipynb
-data/*.csv
-data/*.xlsx
+data/
 *.xlsx
 *.csv
-data/raw/
 .env
 .env.*
 credentials_google.json
