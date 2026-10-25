@@ -927,6 +927,20 @@ with tab_squad:
         # Enrich squad DataFrame
         df_view = my_squad.copy()
 
+        # Enrich with predictive indicators if available
+        if "pred_subida_24h" not in df_view.columns and not df_pred.empty and "player_id" in df_pred.columns:
+            pred_squad_cols = [
+                "player_id", "pred_subida_24h", "pred_pct_24h", "precio_est_24h",
+                "pred_subida_72h_cum", "pred_roi_72h_pct", "precio_est_72h",
+                "efr_72h_eur", "regimen_72h_desc", "prob_techo_pct", "prob_desplome_pct",
+                "prob_suelo_pct", "dias_optimos_retencion", "accion_recomendada"
+            ]
+            sub_p = df_pred[[c for c in pred_squad_cols if c in df_pred.columns]].drop_duplicates(subset=["player_id"]).copy()
+            df_view["_pid"] = pd.to_numeric(df_view["PLAYER_ID"], errors="coerce")
+            sub_p["_pid"] = pd.to_numeric(sub_p["player_id"], errors="coerce")
+            df_view = pd.merge(df_view, sub_p.drop(columns=["player_id"]), on="_pid", how="left")
+            df_view.drop(columns=["_pid"], inplace=True)
+
         # Position Formatter with Alt-positions
         pos_icons = {"GK": "🧤 POR", "DF": "🛡️ DEF", "MF": "⚙️ MED", "FW": "⚡ DEL"}
         pos_rank = {"GK": 0, "DF": 1, "MF": 2, "FW": 3}
@@ -987,6 +1001,20 @@ with tab_squad:
         df_view["_raw_inc"] = pd.to_numeric(df_view.get("PLAYER_PRICE_INCREMENT", 0), errors="coerce").fillna(0).astype(float)
         df_view["_raw_points"] = pd.to_numeric(df_view.get("PLAYER_POINTS", 0), errors="coerce").fillna(0).astype(int)
         df_view["_raw_offer"] = pd.to_numeric(df_view.get("MARKET_OFFER_AMOUNT"), errors="coerce")
+
+        # Predictive indicators (v3 Engine)
+        df_view["_raw_pred_24h"] = pd.to_numeric(df_view.get("pred_subida_24h", 0.0), errors="coerce").fillna(0.0)
+        df_view["_raw_pred_72h"] = pd.to_numeric(df_view.get("pred_subida_72h_cum", 0.0), errors="coerce").fillna(0.0)
+        df_view["_raw_roi_72h"] = pd.to_numeric(df_view.get("pred_roi_72h_pct", 0.0), errors="coerce").fillna(0.0)
+        df_view["_raw_prob_techo"] = pd.to_numeric(df_view.get("prob_techo_pct", 0.0), errors="coerce").fillna(0.0)
+        df_view["_raw_prob_desplome"] = pd.to_numeric(df_view.get("prob_desplome_pct", 0.0), errors="coerce").fillna(0.0)
+        df_view["_raw_prob_suelo"] = pd.to_numeric(df_view.get("prob_suelo_pct", 0.0), errors="coerce").fillna(0.0)
+
+        df_view["Acción IA"] = df_view.get("accion_recomendada", pd.Series("—", index=df_view.index)).fillna("—")
+        df_view["Pred. 24h (K€)"] = (df_view["_raw_pred_24h"] / 1_000).round().astype(int)
+        df_view["Previsión 72h (K€)"] = (df_view["_raw_pred_72h"] / 1_000).round().astype(int)
+        df_view["ROI 72h (%)"] = df_view["_raw_roi_72h"].round(1)
+        df_view["Retención"] = df_view.get("dias_optimos_retencion", pd.Series("—", index=df_view.index)).fillna("—")
 
         # Increment percentage & Trend formatter
         def _format_trend(row):
@@ -1051,6 +1079,35 @@ with tab_squad:
         """, unsafe_allow_html=True)
 
         # ---------------------------------------------------------------------
+        # ALERTAS TÁCTICAS IA EN PLANTILLA (TECHO INMINENTE & STOP-LOSS)
+        # ---------------------------------------------------------------------
+        squad_ati = df_view[
+            (df_view["Acción IA"].str.contains("TECHO", na=False)) |
+            (df_view["_raw_prob_techo"] >= 55.0)
+        ]
+        squad_stoploss = df_view[
+            (df_view["Acción IA"].str.contains("STOP-LOSS", na=False)) |
+            (df_view["_raw_prob_desplome"] >= 65.0)
+        ]
+        squad_gainers = df_view[
+            (df_view["_raw_pred_72h"] >= 60_000)
+        ]
+
+        if not squad_ati.empty:
+            ati_items = [f"**{r['PLAYER_NAME']}** ({r['Valor (M€)']}M€ · Techo: {r['_raw_prob_techo']:.0f}% · {r['Retención']})" for _, r in squad_ati.iterrows()]
+            st.warning(f"⚠️ **ALERTA DE TECHO INMINENTE (ATI) EN TU EQUIPO:** {len(squad_ati)} futbolista(s) en agotamiento de subida: {', '.join(ati_items)}. El modelo prevé freno o caída en 24-48h. ¡Considera vender hoy en el punto máximo de rentabilidad!")
+
+        if not squad_stoploss.empty:
+            loss_k = int(squad_stoploss["_raw_pred_72h"].sum() / 1_000)
+            sl_items = [f"**{r['PLAYER_NAME']}** ({r['Previsión 72h (K€)']} K€ · Desplome: {r['_raw_prob_desplome']:.0f}%)" for _, r in squad_stoploss.iterrows()]
+            st.error(f"🛑 **ALERTA STOP-LOSS EN TU PLANTILLA:** {len(squad_stoploss)} futbolista(s) en desvalorización acusada (Pérdida 72h prevista: **{loss_k:+d} K€**): {', '.join(sl_items)}. Considera darles salida urgente para blindar tu patrimonio.")
+
+        if not squad_gainers.empty:
+            gain_k = int(squad_gainers["_raw_pred_72h"].sum() / 1_000)
+            g_items = [f"**{r['PLAYER_NAME']}** ({r['Previsión 72h (K€)']:+d} K€ · ROI: {r['ROI 72h (%)']:+.1f}%)" for _, r in squad_gainers.iterrows()]
+            st.success(f"🚀 **MOTORES DE REVALORIZACIÓN (+{gain_k} K€ a 72h):** {', '.join(g_items)}. Mantener en plantilla para capturar plusvalías.")
+
+        # ---------------------------------------------------------------------
         # FILTERS & SORTING CONTROLS (4 COMPACT COLUMNS)
         # ---------------------------------------------------------------------
         f1, f2, f3, f4 = st.columns([1.3, 1.6, 1.8, 1.8])
@@ -1070,6 +1127,10 @@ with tab_squad:
                     "Titulares probables (≥60%)",
                     "Dudas o incidencias",
                     "Con oferta activa en firme",
+                    "🚀 Motores de subida (Prev. 72h > 0)",
+                    "⚠️ Alerta Techo / Venta en pico",
+                    "🛑 Alerta Stop-Loss (Desplome)",
+                    "💎 Compra Sniper / Suelo",
                     "En subida hoy (+€)",
                     "En bajada hoy (-€)"
                 ],
@@ -1081,6 +1142,10 @@ with tab_squad:
                 "Ordenar por:",
                 options=[
                     "💰 Mayor Valor de Mercado",
+                    "🔮 Mayor Previsión 72h (IA)",
+                    "🚀 Mayor ROI Previsto 72h (%)",
+                    "⚠️ Mayor Probabilidad de Techo",
+                    "🛑 Mayor Riesgo de Desplome",
                     "📈 Mayor Subida 24h",
                     "📉 Mayor Caída 24h (Stop-Loss)",
                     "⚽ Mayor Titularidad (%)",
@@ -1114,6 +1179,14 @@ with tab_squad:
             filtered_df = filtered_df[filtered_df["PLAYER_STATUS"] != "ok"]
         elif status_filter == "Con oferta activa en firme":
             filtered_df = filtered_df[filtered_df["_raw_offer"].notna() & (filtered_df["_raw_offer"] > 0)]
+        elif status_filter == "🚀 Motores de subida (Prev. 72h > 0)":
+            filtered_df = filtered_df[filtered_df["_raw_pred_72h"] > 0]
+        elif status_filter == "⚠️ Alerta Techo / Venta en pico":
+            filtered_df = filtered_df[(filtered_df["Acción IA"].str.contains("TECHO", na=False)) | (filtered_df["_raw_prob_techo"] >= 50.0)]
+        elif status_filter == "🛑 Alerta Stop-Loss (Desplome)":
+            filtered_df = filtered_df[(filtered_df["Acción IA"].str.contains("STOP-LOSS", na=False)) | (filtered_df["_raw_prob_desplome"] >= 60.0)]
+        elif status_filter == "💎 Compra Sniper / Suelo":
+            filtered_df = filtered_df[(filtered_df["Acción IA"].str.contains("SUELO", na=False)) | (filtered_df["_raw_prob_suelo"] >= 50.0)]
         elif status_filter == "En subida hoy (+€)":
             filtered_df = filtered_df[filtered_df["_raw_inc"] > 0]
         elif status_filter == "En bajada hoy (-€)":
@@ -1130,6 +1203,14 @@ with tab_squad:
         # Apply Sorting with Mathematical Accuracy
         if sort_choice == "💰 Mayor Valor de Mercado":
             filtered_df = filtered_df.sort_values(by="_raw_price", ascending=False)
+        elif sort_choice == "🔮 Mayor Previsión 72h (IA)":
+            filtered_df = filtered_df.sort_values(by="_raw_pred_72h", ascending=False)
+        elif sort_choice == "🚀 Mayor ROI Previsto 72h (%)":
+            filtered_df = filtered_df.sort_values(by="_raw_roi_72h", ascending=False)
+        elif sort_choice == "⚠️ Mayor Probabilidad de Techo":
+            filtered_df = filtered_df.sort_values(by="_raw_prob_techo", ascending=False)
+        elif sort_choice == "🛑 Mayor Riesgo de Desplome":
+            filtered_df = filtered_df.sort_values(by="_raw_prob_desplome", ascending=False)
         elif sort_choice == "📈 Mayor Subida 24h":
             filtered_df = filtered_df.sort_values(by="_raw_inc", ascending=False)
         elif sort_choice == "📉 Mayor Caída 24h (Stop-Loss)":
@@ -1149,8 +1230,9 @@ with tab_squad:
         display_cols = [
             "PLAYER_NAME", "TEAM_NAME", "Pos", "Estado", "Titularidad",
             "Puntos", "Percentil", "Media", "Racha Reciente",
-            "Valor (M€)", "Subida 24h (K€)", "Tendencia", "Oferta (M€)", "Cláusula (M€)",
-            "Vendible"
+            "Valor (M€)", "Subida 24h (K€)", "Tendencia",
+            "Acción IA", "Pred. 24h (K€)", "Previsión 72h (K€)", "ROI 72h (%)", "Retención",
+            "Oferta (M€)", "Cláusula (M€)", "Vendible"
         ]
 
         st.dataframe(
@@ -1180,6 +1262,11 @@ with tab_squad:
                 "Valor (M€)": st.column_config.NumberColumn("Valor (M€)", help="Precio oficial en Millones de Euros", format="%.2f M€", width="small"),
                 "Subida 24h (K€)": st.column_config.NumberColumn("Subida 24h (K€)", help="Variación en 24h en Miles de Euros", format="%+d K€", width="small"),
                 "Tendencia": st.column_config.TextColumn("Tendencia", help="Semáforo y porcentaje de variación 24h", width="small"),
+                "Acción IA": st.column_config.TextColumn("Señal IA", help="Recomendación táctica del modelo cuantitativo v3", width="medium"),
+                "Pred. 24h (K€)": st.column_config.NumberColumn("Pred. 24h", help="Variación prevista de valor en las próximas 24h", format="%+d K€", width="small"),
+                "Previsión 72h (K€)": st.column_config.NumberColumn("Prev. 72h", help="Variación prevista acumulada en 3 días (72h)", format="%+d K€", width="small"),
+                "ROI 72h (%)": st.column_config.NumberColumn("ROI 72h", help="Retorno porcentual previsto a 3 días", format="%+.1f%%", width="small"),
+                "Retención": st.column_config.TextColumn("Retención", help="Horizonte recomendado de posesión", width="small"),
                 "Oferta (M€)": st.column_config.NumberColumn("Oferta (M€)", help="Oferta recibida en firme en Millones de Euros", format="%.2f M€", width="small"),
                 "Cláusula (M€)": st.column_config.NumberColumn("Cláusula (M€)", help="Cláusula de rescisión en Millones de Euros", format="%.2f M€", width="small"),
                 "Vendible": st.column_config.TextColumn(
@@ -1614,18 +1701,45 @@ with tab_players:
         df_all = df_players.copy()
 
         # Merge predictions if available
+        pred_cols_all = [
+            "player_id", "pred_subida_24h", "pred_pct_24h", "precio_est_24h",
+            "pred_subida_48h_cum", "pred_roi_48h_pct", "precio_est_48h",
+            "pred_subida_72h_cum", "pred_roi_72h_pct", "precio_est_72h",
+            "efr_72h_eur", "regimen_72h_desc", "prob_explosion_pct", "prob_desplome_pct",
+            "prob_techo_pct", "prob_suelo_pct", "dias_optimos_retencion", "accion_recomendada"
+        ]
+
         if not df_pred.empty and "player_id" in df_pred.columns:
-            pred_sub = df_pred[[
-                "player_id", "pred_subida_24h", "pred_subida_72h_cum", "fase_mercado", "accion_recomendada"
-            ]].drop_duplicates(subset=["player_id"]).copy()
+            cols_to_pull = [c for c in pred_cols_all if c in df_pred.columns]
+            pred_sub = df_pred[cols_to_pull].drop_duplicates(subset=["player_id"]).copy()
+            overlap = [c for c in cols_to_pull if c in df_all.columns and c != "player_id"]
+            if overlap:
+                df_all.drop(columns=overlap, inplace=True)
             df_all["_pid"] = pd.to_numeric(df_all["PLAYER_ID"], errors="coerce")
             pred_sub["_pid"] = pd.to_numeric(pred_sub["player_id"], errors="coerce")
-            df_all = pd.merge(df_all, pred_sub, on="_pid", how="left")
-        else:
-            df_all["pred_subida_24h"] = 0.0
-            df_all["pred_subida_72h_cum"] = 0.0
-            df_all["fase_mercado"] = "—"
+            df_all = pd.merge(df_all, pred_sub.drop(columns=["player_id"]), on="_pid", how="left")
+            df_all.drop(columns=["_pid"], inplace=True)
+
+        for c in ["pred_subida_24h", "precio_est_24h", "pred_subida_72h_cum", "precio_est_72h", "pred_roi_72h_pct", "efr_72h_eur", "prob_techo_pct", "prob_suelo_pct", "prob_desplome_pct", "prob_explosion_pct"]:
+            if c not in df_all.columns:
+                df_all[c] = 0.0
+            else:
+                df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0.0)
+
+        if "accion_recomendada" not in df_all.columns:
             df_all["accion_recomendada"] = "—"
+        else:
+            df_all["accion_recomendada"] = df_all["accion_recomendada"].fillna("—")
+
+        if "dias_optimos_retencion" not in df_all.columns:
+            df_all["dias_optimos_retencion"] = "—"
+        else:
+            df_all["dias_optimos_retencion"] = df_all["dias_optimos_retencion"].fillna("—")
+
+        if "regimen_72h_desc" not in df_all.columns:
+            df_all["regimen_72h_desc"] = "—"
+        else:
+            df_all["regimen_72h_desc"] = df_all["regimen_72h_desc"].fillna("—")
 
         # Sanitized raw numeric series for filtering and sorting
         def _to_num(series, default=0.0):
@@ -1640,7 +1754,15 @@ with tab_players:
         df_all["_raw_percentile"] = _to_num(df_all["PERCENTILE"] if "PERCENTILE" in df_all.columns else pd.Series(0.0, index=df_all.index))
         df_all["_raw_clause"] = _to_num(df_all["BIWPLAYER_CLAUSE"] if "BIWPLAYER_CLAUSE" in df_all.columns else pd.Series(0.0, index=df_all.index))
         df_all["_raw_market_sale"] = _to_num(df_all["MARKET_SALE_PRICE"] if "MARKET_SALE_PRICE" in df_all.columns else pd.Series(0.0, index=df_all.index))
-        df_all["_raw_pred_72h"] = _to_num(df_all["pred_subida_72h_cum"] if "pred_subida_72h_cum" in df_all.columns else pd.Series(0.0, index=df_all.index))
+        df_all["_raw_pred_24h"] = _to_num(df_all["pred_subida_24h"])
+        df_all["_raw_precio_est_24h"] = _to_num(df_all["precio_est_24h"])
+        df_all["_raw_pred_72h"] = _to_num(df_all["pred_subida_72h_cum"])
+        df_all["_raw_precio_est_72h"] = _to_num(df_all["precio_est_72h"])
+        df_all["_raw_roi_72h"] = _to_num(df_all["pred_roi_72h_pct"])
+        df_all["_raw_efr"] = _to_num(df_all["efr_72h_eur"])
+        df_all["_raw_prob_techo"] = _to_num(df_all["prob_techo_pct"])
+        df_all["_raw_prob_suelo"] = _to_num(df_all["prob_suelo_pct"])
+        df_all["_raw_prob_desplome"] = _to_num(df_all["prob_desplome_pct"])
 
         # Tactical positions and order
         pos_icons = {"GK": "🧤 POR", "DF": "🛡️ DEF", "MF": "⚙️ MED", "FW": "⚡ DEL"}
@@ -1690,7 +1812,15 @@ with tab_players:
         # Numeric currency and variation columns (in M€ or K€) for mathematical sorting
         df_all["Valor (M€)"] = (df_all["_raw_price"] / 1_000_000).round(2)
         df_all["Subida 24h (K€)"] = (df_all["_raw_inc"] / 1_000).round().astype(int)
+        df_all["Pred. 24h (K€)"] = (df_all["_raw_pred_24h"] / 1_000).round().astype(int)
         df_all["Previsión 72h (K€)"] = (df_all["_raw_pred_72h"] / 1_000).round().astype(int)
+        df_all["Precio Est. 24h (M€)"] = (df_all["_raw_precio_est_24h"] / 1_000_000).round(2)
+        df_all["Precio Est. 72h (M€)"] = (df_all["_raw_precio_est_72h"] / 1_000_000).round(2)
+        df_all["ROI 72h (%)"] = df_all["_raw_roi_72h"].round(1)
+        df_all["EFR (K€)"] = (df_all["_raw_efr"] / 1_000).round().astype(int)
+        df_all["Retención"] = df_all["dias_optimos_retencion"]
+        df_all["Régimen 72h"] = df_all["regimen_72h_desc"]
+        df_all["Acción IA"] = df_all["accion_recomendada"]
 
         # Ownership Formatter
         def _fmt_owner(row):
@@ -1807,7 +1937,6 @@ with tab_players:
         df_all["Percentil"] = (df_all["_raw_percentile"] * 100).round().astype(int)
         df_all["Media"] = df_all["_raw_avg"]
         df_all["xP"] = df_all["_raw_xp"]
-        df_all["Acción IA"] = df_all.get("accion_recomendada", pd.Series("—", index=df_all.index)).fillna("—")
 
         # Dynamic Counts for summary pills
         total_p = len(df_all)
@@ -1859,6 +1988,32 @@ with tab_players:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        # ---------------------------------------------------------------------
+        # GUÍA TÁCTICA DEL MOTOR PREDICTIVO IA (DESPLEGABLE EXPLICATIVO)
+        # ---------------------------------------------------------------------
+        with st.expander("🧠 **Guía Táctica del Motor Predictivo: ¿Cómo interpretar las Señales e Indicadores IA?**", expanded=False):
+            g1, g2 = st.columns(2)
+            with g1:
+                st.markdown("""
+                ##### 🎯 Señales Operativas de Mercado
+                * **🚀 COMPRA FUERTE (CHOLLO MICRO / JOYA MEDIA):** Futbolistas económicos o de precio moderado en plena fase de aceleración con elevado **ROI esperado a 72h (>2.5% - 5%)**. Son las mejores oportunidades para especular y ganar dinero rápido.
+                * **📈 MANTENER (SUBIDA ORGÁNICA):** Jugadores con inercia compradora continuada. Mantener en plantilla para seguir sumando valor diario.
+                * **⚠️ VENTA EN PICO (TECHO INMINENTE - ATI):** Detecta desaceleración acusada de compras, aceleración negativa y saturación de liquidez. La subida se frenará en seco o caerá en 24-48h. **Vender en máximos de ciclo.**
+                * **💎 COMPRA SNIPER (SUELO INMINENTE - ASI):** Futbolistas que venían en caída pero cuyo ritmo vendedor se neutraliza y la presión gira al alza. Punto de entrada perfecto antes del rebote.
+                * **🛑 VENTA URGENTE (STOP-LOSS):** Desplome en curso o pérdida de titularidad/lesión. Salida inmediata para proteger tu presupuesto.
+                * **👑 MANTENER (CRACK EN SUBIDA):** Activos de élite (>8M€) con tendencia económica positiva y peso clave en el once.
+                * **⏸️ MANTENER / ESPERAR:** Jugadores con variación neutral o mercado lateral sin tendencia clara.
+                """)
+            with g2:
+                st.markdown("""
+                ##### 📊 Métricas Cuantitativas Explicadas
+                * **Pred. 24h & Previsión 72h (K€):** Incremento estimado de precio en miles de euros para mañana y acumulado en 3 días por el ensamble de ML (HistGB + RF + ExtraTrees + Ridge).
+                * **Precio Est. 24h / 72h (M€):** Valor proyectado absoluto del futbolista al término de cada ventana temporal.
+                * **ROI 72h (%):** Retorno esperado de la inversión (*Return On Investment*) respecto a su precio actual en 3 días.
+                * **EFR (€ - Expected Financial Return):** Beneficio neto esperado ponderado por probabilidades de subida vs riesgo de depreciación.
+                * **Retención Óptima:** Horizonte sugerido de tenencia antes de agotar la inercia (*"1 día (Vender en 24h)"*, *"2 a 3 días"*, *"3+ días"* o *"0 días (Venta inmediata)"*).
+                """)
 
         # ---------------------------------------------------------------------
         # FILTROS Y CONTROLES OPERATIVOS (2 FILAS LIMPIAS)
@@ -1931,10 +2086,15 @@ with tab_players:
                 "Señal IA & Previsión:",
                 options=[
                     "Todas las señales IA",
-                    "🚀 Compra Fuerte (Especulación)",
-                    "📈 Mantener en subida",
-                    "🛑 Stop-Loss / Desplome",
-                    "🔮 Previsión 72h positiva (+€)"
+                    "🚀 Chollos Micro (< 1.5M con alto ROI)",
+                    "💎 Joyas Gama Media (1.5M - 5M con alto ROI)",
+                    "🎯 Alertas Suelo Inminente (ASI - Compra Sniper)",
+                    "⚠️ Alertas Techo Inminente (ATI - Vender en Máximos)",
+                    "🛑 Alarmas Desplome (Stop-Loss / Salida Urgente)",
+                    "👑 Cracks de Élite (> 8M en subida)",
+                    "📈 Subida Orgánica / Mantener",
+                    "🔮 Previsión 72h Positiva (> 0 €)",
+                    "⏸️ Mercado Lateral / Esperar"
                 ],
                 index=0,
                 key="all_p_ai"
@@ -1946,9 +2106,13 @@ with tab_players:
                 options=[
                     "💰 Mayor Valor de Mercado",
                     "🏷️ Menor Precio de Salida (Económicos)",
+                    "🔮 Mayor Subida Prevista a 72h (IA)",
+                    "🚀 Mayor ROI Previsto 72h (%)",
+                    "💎 Mayor Retorno Esperado EFR (€)",
+                    "⚠️ Mayor Riesgo de Techo Inminente (%)",
+                    "🎯 Mayor Probabilidad de Suelo (%)",
                     "📈 Mayor Subida 24h",
                     "📉 Mayor Caída 24h (Stop-Loss)",
-                    "🔮 Mayor Subida Prevista a 72h (IA)",
                     "⭐ Más Puntos Fantasy",
                     "📊 Mayor Percentil Puntos",
                     "⚽ Mayor Titularidad (%)",
@@ -2020,14 +2184,45 @@ with tab_players:
             filtered_all = filtered_all[filtered_all["_raw_inc"] < 0]
 
         # 6. Señal IA
-        if "Compra Fuerte" in f_ai:
-            filtered_all = filtered_all[filtered_all["Acción IA"].str.contains("COMPRA", na=False)]
-        elif "Mantener" in f_ai:
-            filtered_all = filtered_all[filtered_all["Acción IA"].str.contains("MANTENER", na=False)]
-        elif "Stop-Loss" in f_ai:
-            filtered_all = filtered_all[filtered_all["Acción IA"].str.contains("STOP-LOSS|VENDER", na=False)]
-        elif "Previsión 72h positiva" in f_ai:
+        if "Chollos Micro" in f_ai:
+            filtered_all = filtered_all[
+                ((filtered_all["_raw_price"] < 1_500_000) & (filtered_all["_raw_roi_72h"] >= 3.0)) |
+                (filtered_all["Acción IA"].str.contains("CHOLLO", na=False))
+            ]
+        elif "Joyas Gama Media" in f_ai:
+            filtered_all = filtered_all[
+                ((filtered_all["_raw_price"] >= 1_500_000) & (filtered_all["_raw_price"] <= 5_000_000) & (filtered_all["_raw_roi_72h"] >= 2.0)) |
+                (filtered_all["Acción IA"].str.contains("JOYA", na=False))
+            ]
+        elif "Alertas Suelo Inminente" in f_ai:
+            filtered_all = filtered_all[
+                (filtered_all["_raw_prob_suelo"] >= 50.0) |
+                (filtered_all["Acción IA"].str.contains("SUELO", na=False))
+            ]
+        elif "Alertas Techo Inminente" in f_ai:
+            filtered_all = filtered_all[
+                (filtered_all["_raw_prob_techo"] >= 50.0) |
+                (filtered_all["Acción IA"].str.contains("TECHO", na=False))
+            ]
+        elif "Alarmas Desplome" in f_ai:
+            filtered_all = filtered_all[
+                (filtered_all["Acción IA"].str.contains("STOP-LOSS|DESPLOME", na=False)) |
+                (filtered_all["_raw_prob_desplome"] >= 60.0)
+            ]
+        elif "Cracks de Élite" in f_ai:
+            filtered_all = filtered_all[
+                (filtered_all["_raw_price"] >= 8_000_000) &
+                (filtered_all["_raw_pred_72h"] > 0)
+            ]
+        elif "Subida Orgánica" in f_ai:
+            filtered_all = filtered_all[
+                (filtered_all["Acción IA"].str.contains("ORGÁNICA|SUBIDA", na=False)) |
+                (filtered_all["_raw_pred_24h"] > 0)
+            ]
+        elif "Previsión 72h Positiva" in f_ai:
             filtered_all = filtered_all[filtered_all["_raw_pred_72h"] > 0]
+        elif "Mercado Lateral" in f_ai:
+            filtered_all = filtered_all[filtered_all["Acción IA"].str.contains("LATERAL|ESPERAR", na=False)]
 
         # 7. Búsqueda
         if f_search.strip():
@@ -2043,12 +2238,20 @@ with tab_players:
         elif f_sort == "🏷️ Menor Precio de Salida (Económicos)":
             filtered_all["_sort_cost"] = filtered_all["_raw_market_sale"].replace(0, np.nan).fillna(filtered_all["_raw_price"])
             filtered_all = filtered_all.sort_values(by="_sort_cost", ascending=True)
+        elif f_sort == "🔮 Mayor Subida Prevista a 72h (IA)":
+            filtered_all = filtered_all.sort_values(by="_raw_pred_72h", ascending=False)
+        elif f_sort == "🚀 Mayor ROI Previsto 72h (%)":
+            filtered_all = filtered_all.sort_values(by="_raw_roi_72h", ascending=False)
+        elif f_sort == "💎 Mayor Retorno Esperado EFR (€)":
+            filtered_all = filtered_all.sort_values(by="_raw_efr", ascending=False)
+        elif f_sort == "⚠️ Mayor Riesgo de Techo Inminente (%)":
+            filtered_all = filtered_all.sort_values(by="_raw_prob_techo", ascending=False)
+        elif f_sort == "🎯 Mayor Probabilidad de Suelo (%)":
+            filtered_all = filtered_all.sort_values(by="_raw_prob_suelo", ascending=False)
         elif f_sort == "📈 Mayor Subida 24h":
             filtered_all = filtered_all.sort_values(by="_raw_inc", ascending=False)
         elif f_sort == "📉 Mayor Caída 24h (Stop-Loss)":
             filtered_all = filtered_all.sort_values(by="_raw_inc", ascending=True)
-        elif f_sort == "🔮 Mayor Subida Prevista a 72h (IA)":
-            filtered_all = filtered_all.sort_values(by="_raw_pred_72h", ascending=False)
         elif f_sort == "⭐ Más Puntos Fantasy":
             filtered_all = filtered_all.sort_values(by="_raw_points", ascending=False)
         elif f_sort == "📊 Mayor Percentil Puntos":
@@ -2066,7 +2269,8 @@ with tab_players:
         all_display_cols = [
             "PLAYER_NAME", "TEAM_NAME", "Pos", "Estado", "Titularidad",
             "Puntos", "Percentil", "Valor (M€)", "Precio Salida (M€)", "Cláusula (M€)",
-            "Vendedor", "Fin Subasta", "Viabilidad", "Acción IA"
+            "Vendedor", "Fin Subasta", "Viabilidad",
+            "Acción IA", "Pred. 24h (K€)", "Previsión 72h (K€)", "ROI 72h (%)", "Retención"
         ]
 
         st.dataframe(
@@ -2097,7 +2301,11 @@ with tab_players:
                 "Vendedor": st.column_config.TextColumn("Vendedor / Dueño", help="Quién lo tiene en venta (Mercado CPU o Rival)", width="medium"),
                 "Fin Subasta": st.column_config.TextColumn("Cierre Subasta", help="Fecha y hora límite para presentar tu puja", width="small"),
                 "Viabilidad": st.column_config.TextColumn("Diagnóstico Fichaje", help="Indica si puedes ficharlo con tu saldo actual o usando crédito", width="medium"),
-                "Acción IA": st.column_config.TextColumn("Señal IA", help="Recomendación econométrica del modelo cuantitativo", width="medium")
+                "Acción IA": st.column_config.TextColumn("Señal IA", help="Recomendación econométrica táctica del modelo predictivo v3", width="medium"),
+                "Pred. 24h (K€)": st.column_config.NumberColumn("Pred. 24h", help="Variación prevista de precio en las próximas 24h", format="%+d K€", width="small"),
+                "Previsión 72h (K€)": st.column_config.NumberColumn("Prev. 72h", help="Variación acumulada prevista en 3 días (72h)", format="%+d K€", width="small"),
+                "ROI 72h (%)": st.column_config.NumberColumn("ROI 72h", help="Rentabilidad porcentual prevista en 3 días", format="%+.1f%%", width="small"),
+                "Retención": st.column_config.TextColumn("Retención", help="Horizonte temporal recomendado de tenencia", width="small")
             },
             width="stretch",
             height=540,
@@ -2186,11 +2394,27 @@ with tab_players:
             with ic3:
                 st.markdown(f"##### 🔮 Inteligencia & Econometría (IA)")
                 st.markdown(f"• **Recomendación IA:** `{p_card['Acción IA']}`")
-                prev_k = int(p_card['Previsión 72h (K€)'])
-                st.markdown(f"• **Previsión acumulada 72h:** `{'+' if prev_k > 0 else ''}{prev_k} K€`")
-                fase = str(p_card.get("fase_mercado", "—"))
-                if fase and fase.lower() != "nan":
-                    st.markdown(f"• **Fase de Mercado:** `{fase}`")
+                p24_k = int(p_card.get('Pred. 24h (K€)', 0))
+                p72_k = int(p_card.get('Previsión 72h (K€)', 0))
+                p_roi = float(p_card.get('ROI 72h (%)', 0.0))
+                p_efr = int(p_card.get('EFR (K€)', 0))
+                st.markdown(f"• **Predicción 24h:** `{'+' if p24_k > 0 else ''}{p24_k} K€` (Precio est.: `{p_card.get('Precio Est. 24h (M€)', 0.0):.2f} M€`)")
+                st.markdown(f"• **Previsión 72h:** `{'+' if p72_k > 0 else ''}{p72_k} K€` (Precio est.: `{p_card.get('Precio Est. 72h (M€)', 0.0):.2f} M€`)")
+                st.markdown(f"• **ROI 72h:** `{'+' if p_roi > 0 else ''}{p_roi:.1f}%` · **EFR:** `{'+' if p_efr > 0 else ''}{p_efr} K€`")
+                st.markdown(f"• **Régimen 72h:** `{p_card.get('Régimen 72h', '—')}`")
+                st.markdown(f"• **Retención sugerida:** `{p_card.get('Retención', '—')}`")
+                
+                # Ceiling / Floor risk callouts if notable
+                p_techo = float(p_card.get('_raw_prob_techo', 0.0))
+                p_suelo = float(p_card.get('_raw_prob_suelo', 0.0))
+                p_desplome = float(p_card.get('_raw_prob_desplome', 0.0))
+                if p_techo >= 50.0:
+                    st.caption(f"⚠️ **Riesgo de Techo Alto:** {p_techo:.0f}% de probabilidad de agotar subida.")
+                elif p_suelo >= 50.0:
+                    st.caption(f"🎯 **Suelo Cercano:** {p_suelo:.0f}% de probabilidad de frenar bajada y rebotar.")
+                elif p_desplome >= 60.0:
+                    st.caption(f"🛑 **Alerta de Desplome:** {p_desplome:.0f}% de probabilidad de pérdidas continuadas.")
+
                 cpp = float(p_card.get("COST_PER_POINT", 0.0) or 0.0)
                 if cpp > 0:
                     st.markdown(f"• **Coste por punto:** `{cpp:.2f} M€/pt`")
