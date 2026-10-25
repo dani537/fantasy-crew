@@ -65,8 +65,9 @@ class ComuniateData:
             if fuente_alternativa:
                 span_jornada = fuente_alternativa.find('span', class_='success')
                 if span_jornada:
-                    self.id_jornada = int(span_jornada.get_text(strip=True))
-                    print(f"📅 Jornada detectada: {self.id_jornada}")
+                    detected_j = int(span_jornada.get_text(strip=True))
+                    self.id_jornada = detected_j
+                    print(f"📅 Jornada base detectada en Comuniate: {self.id_jornada}")
                 else:
                     raise Exception("❌ No se encontró el span.success con la jornada.")
             else:
@@ -85,6 +86,27 @@ class ComuniateData:
                 print(f"✅ Mapeo de equipos cargado ({len(self.teams_map)} equipos).")
             else:
                 print("⚠️ No se encontró el elemento #fila-escudos.")
+
+            # 3. Si la jornada detectada ya está en juego/finalizada (ej. domingo), comprobar si la siguiente ya tiene previsiones
+            try:
+                r_rounds = requests.get(
+                    "https://cf.biwenger.com/api/v2/rounds/la-liga",
+                    headers={'User-Agent': get_random_user_agent(), 'Referer': 'https://biwenger.as.com/'},
+                    timeout=6
+                )
+                if r_rounds.status_code == 200:
+                    rdata = r_rounds.json().get('data', {})
+                    # Si la jornada raíz está 'active' o 'completed', la próxima jornada a alinear es 'next'
+                    target_round = rdata if (rdata.get('games') and rdata.get('status') == 'pending') else rdata.get('next', {})
+                    r_name = str(target_round.get('name', ''))
+                    m_j = re.search(r'(\d+)', r_name)
+                    if m_j:
+                        next_j_num = int(m_j.group(1))
+                        if next_j_num > self.id_jornada:
+                            print(f"⏭️ Jornada {self.id_jornada} ya en curso/finalizada; apuntando a la próxima Jornada {next_j_num}.")
+                            self.id_jornada = next_j_num
+            except Exception:
+                pass
         except Exception as e:
             print(f"⚠️ Error al cargar los datos de la liga: {e}")
             raise
@@ -178,11 +200,14 @@ class ComuniateData:
                     # El nombre suele ser el primer texto o lo que no es div alternativo
                     alternativo_div = nombre_div.find('div', class_='alternativo')
                     if alternativo_div:
-                        suplente = alternativo_div.get_text(strip=True)
+                        raw_sup = alternativo_div.get_text(strip=True)
                         # Extraemos el texto del padre quitando el del hijo para obtener solo el nombre del titular
-                        nombre = nombre_div.get_text(strip=True).replace(suplente, "").strip()
+                        nombre = nombre_div.get_text(strip=True).replace(raw_sup, "").strip()
+                        # Limpiar prefijos de minutos en partidos ya jugados (ej: "55' Denis Suárez" -> "Denis Suárez")
+                        suplente = re.sub(r"^\d+['’]\s*", "", raw_sup).strip()
                     else:
                         nombre = nombre_div.get_text(strip=True)
+                    nombre = re.sub(r"^\d+['’]\s*", "", nombre).strip()
 
                 # 2. Titularidad (%)
                 titularidad = "100%" # Por defecto si no hay icono_porcentaje
@@ -270,6 +295,7 @@ class ComuniateData:
             if html:
                 df = self.parse_lineup_html(html)
                 if df is not None and not df.empty:
+                    df['id_jornada'] = jornada
                     df['equipo'] = team_name
                     df['id_equipo_comuniate'] = team_id
                     return df
@@ -321,6 +347,25 @@ class ComuniateData:
             
         # 3. Ejecutar extracción
         return self.extract_all_lineups(output_file=output_file)
+
+    def extract_historical_lineups(self, jornadas: list = None) -> pd.DataFrame:
+        """
+        Extrae de forma retroactiva las alineaciones de Comuniate para una lista de jornadas (ej. 1..11).
+        """
+        self.initialize_session()
+        if not self.teams_map:
+            self.load_league_data()
+        if jornadas is None:
+            max_j = self.id_jornada or 11
+            jornadas = list(range(1, max_j + 1))
+
+        dfs = []
+        for j in jornadas:
+            print(f"📥 Extrayendo alineaciones Comuniate para Jornada {j}...")
+            df_j = self.extract_all_lineups(id_jornada=j)
+            if df_j is not None and not df_j.empty:
+                dfs.append(df_j)
+        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 class JornadaPerfectaData:
     """
@@ -469,12 +514,20 @@ class EuroClubIndexData:
                 print("⚠️ La respuesta no contiene 'matchOdds'.")
                 return pd.DataFrame()
 
+            def _fix_mojibake(val):
+                if not isinstance(val, str):
+                    return val
+                try:
+                    return val.encode('latin-1').decode('utf-8')
+                except Exception:
+                    return val
+
             matches_data = []
             for match in data['matchOdds']:
                 match_info = {
                     'fecha': match.get('d_Date'),
-                    'local': match.get('c_HomeTeam'),
-                    'visitante': match.get('c_Awayteam'),
+                    'local': _fix_mojibake(match.get('c_HomeTeam')),
+                    'visitante': _fix_mojibake(match.get('c_Awayteam')),
                     '1': float(match.get('n_OddHomeWin', 0)),
                     'X': float(match.get('n_OddDraw', 0)),
                     '2': float(match.get('n_OddAwayWin', 0)),

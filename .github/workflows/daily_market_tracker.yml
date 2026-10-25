@@ -45,11 +45,14 @@ jobs:
           BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID }}
           BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID }}
         run: |
-          # 1. Update general league context, incremental movements, and rival finances
+          # 1. Update general league context, incremental movements, rival finances & save session cache
           python -u -m src.tools.data_extraction.runner
 
-          # 2. Run master 40-dimensional market tracker (appends to Historico_Continuo)
+          # 2. Update all historical tables (Rounds, Lineups, Bids, Daily Manager Snapshots, Market History, Comuniate)
+          python -u -m src.tools.data_extraction.historical_backfill --comuniate-history
+
+          # 3. Run master 40-dimensional market tracker (appends to Historico_Continuo using Warehouse + safe API quota)
           python -u src/tools/data_extraction/daily_market_tracker.py
 
-          # 3. Train predictive ML model & sync Predicciones_IA
-          python -u test/05_market_prediction/run.py || true
+          # 4. Train predictive ML model & sync Predicciones_IA
+          python -u test/05_market_prediction/run.py --sync-sheets || true

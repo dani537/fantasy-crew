@@ -14,15 +14,21 @@ Sheets:
 """
 
 import os
+import re
 import sys
 import datetime
 import pandas as pd
 import gspread
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from src.config import Credentials, GeneralSettings, GoogleSheetsConfig
 from src.tools.data_extraction.auth import BiwengerAuth
 from src.tools.data_extraction.biwenger_data import BiwengerGeneralData, UserLeagueData
+from src.tools.data_extraction.warehouse import (
+    get_authorized_gspread_client,
+    ensure_exact_balances_csv,
+    DEFAULT_SPREADSHEET_ID,
+)
 
 
 SHEET_MOVIMIENTOS = "Movimientos"
@@ -52,15 +58,23 @@ class BiwengerSheetsTracker:
     """Manages the synchronization between Biwenger and Google Sheets."""
 
     def __init__(self, sheet_id: Optional[str] = None, creds_path: Optional[str] = None):
-        self.sheet_id = sheet_id or os.getenv("GOOGLE_SHEET_ID") or GoogleSheetsConfig.SHEET_ID
+        self.sheet_id = (
+            sheet_id
+            or os.getenv("GOOGLE_SHEET_ID")
+            or os.getenv("GOOGLE_SHEET_ID_MARKET")
+            or GoogleSheetsConfig.SHEET_ID
+            or DEFAULT_SPREADSHEET_ID
+        )
         self.creds_path = creds_path or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or GoogleSheetsConfig.SERVICE_ACCOUNT_FILE
         
         if not self.sheet_id:
             raise ValueError("GOOGLE_SHEET_ID is not configured in .env or settings.")
-        if not self.creds_path or not os.path.exists(self.creds_path):
-            raise FileNotFoundError(f"Service account file not found at: {self.creds_path}")
 
-        self.gc = gspread.service_account(filename=self.creds_path)
+        self.gc = get_authorized_gspread_client(self.creds_path)
+        if self.gc is None:
+            raise FileNotFoundError(
+                f"No valid Google credentials found in GOOGLE_SERVICE_ACCOUNT_JSON or {self.creds_path}"
+            )
         self.spreadsheet = self.gc.open_by_key(self.sheet_id)
 
     def _get_or_create_worksheet(self, title: str, rows: int = 100, cols: int = 20):
@@ -150,8 +164,11 @@ class BiwengerSheetsTracker:
         # 2. General player data for name mapping
         print("⚽ Fetching player database for name resolution...")
         comp_slug = auth.player_info.competition_slug if auth.player_info else "la-liga"
-        general_data = BiwengerGeneralData(session=None, competition_slug=comp_slug)
-        df_players = general_data.players_info()
+        if os.path.exists("./data/raw/players.csv"):
+            df_players = pd.read_csv("./data/raw/players.csv")
+        else:
+            general_data = BiwengerGeneralData(session=None, competition_slug=comp_slug)
+            df_players = general_data.players_info()
         player_names_map = dict(zip(df_players['id'], df_players['name']))
 
         # 3. Extract Board info
@@ -321,44 +338,64 @@ class BiwengerSheetsTracker:
         return len(new_rows)
 
     def _sync_round_bonuses(self, ws: gspread.Worksheet, df_bonuses: Optional[pd.DataFrame]) -> int:
-        """Syncs round bonuses per manager into Primas_Jornadas worksheet (cumulative and deduplicated)."""
+        """
+        Syncs round bonuses per manager into Primas_Jornadas worksheet, deduplicating by
+        `(round_base, user_id)` so postponed/recalculated rounds (e.g. 'Jornada 6 (ajornada)')
+        replace the earlier partial round entry instead of double-counting.
+        """
         headers = ["Jornada", "Manager", "User ID", "Puntos", "Prima Recibida", "Fecha"]
         if df_bonuses is None or df_bonuses.empty:
             return 0
 
+        def _base_rnd(j_str: str) -> str:
+            m = re.match(r"(Jornada \d+)", str(j_str).strip())
+            return m.group(1) if m else str(j_str).strip()
+
         existing_values = ws.get_all_values()
-        existing_keys = set()
+        records_by_key: Dict[str, List[Any]] = {}
+
         if existing_values and existing_values[0] == headers:
             for r in existing_values[1:]:
-                if len(r) >= 3:
-                    existing_keys.add(f"{r[0]}_{r[2]}")
-        else:
-            ws.clear()
-            ws.append_row(headers)
+                if len(r) >= 6:
+                    b_rnd = _base_rnd(r[0])
+                    uid = _clean_id(r[2])
+                    if b_rnd and uid:
+                        records_by_key[f"{b_rnd}_{uid}"] = r
 
-        df_sorted = df_bonuses.sort_values(by=['round_base', 'bonus'], ascending=[True, False])
-        new_rows = []
+        prev_count = len(records_by_key)
+        df_sorted = df_bonuses.sort_values(by="date") if "date" in df_bonuses.columns else df_bonuses
+
         for _, r in df_sorted.iterrows():
-            j_name = str(r.get('round_name') or r.get('round_base'))
-            uid = str(r.get('user_id') or '')
-            k = f"{j_name}_{uid}"
-            if k not in existing_keys:
-                new_rows.append([
-                    j_name,
-                    str(r.get('user_name') or ''),
-                    uid,
-                    int(r.get('points') or 0),
-                    f"{int(r.get('bonus') or 0):,} €".replace(",", "."),
-                    str(r.get('date') or '')
-                ])
-                existing_keys.add(k)
+            j_name = str(r.get("round_name") or r.get("round_base") or "").strip()
+            b_rnd = str(r.get("round_base") or _base_rnd(j_name)).strip()
+            uid = _clean_id(r.get("user_id"))
+            if not b_rnd or not uid:
+                continue
+            k = f"{b_rnd}_{uid}"
+            records_by_key[k] = [
+                j_name,
+                str(r.get("user_name") or ""),
+                uid,
+                int(r.get("points") or 0),
+                f"{int(r.get('bonus') or 0):,} €".replace(",", "."),
+                str(r.get("date") or ""),
+            ]
 
-        if new_rows:
-            ws.append_rows(new_rows)
-            print(f"   🏆 {len(new_rows)} nuevas primas de jornada añadidas a '{SHEET_PRIMAS}'.")
-        else:
-            print(f"   👌 Todas las primas de jornada ya estaban registradas en '{SHEET_PRIMAS}'.")
-        return len(new_rows)
+        def _sort_key(row_item: List[Any]):
+            m = re.search(r"(\d+)", str(row_item[0]))
+            j_num = int(m.group(1)) if m else 999
+            try:
+                b_val = int(str(row_item[4]).replace("€", "").replace(".", "").strip())
+            except Exception:
+                b_val = 0
+            return (j_num, -b_val)
+
+        all_rows = sorted(records_by_key.values(), key=_sort_key)
+        ws.clear()
+        ws.update(values=[headers] + all_rows, range_name="A1", value_input_option="RAW")
+        added_or_updated = max(0, len(all_rows) - prev_count)
+        print(f"   🏆 Sincronizadas {len(all_rows)} primas de jornada deduplicadas en '{SHEET_PRIMAS}'.")
+        return added_or_updated
 
     def _sync_initial_config(self, ws: gspread.Worksheet, df_standings: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
         """
@@ -370,18 +407,16 @@ class BiwengerSheetsTracker:
         ]
 
         default_baseline = {}
-        exact_csv = "data/history_exact_balances.csv"
-        if os.path.exists(exact_csv):
-            try:
-                df_exact = pd.read_csv(exact_csv)
-                for _, r in df_exact.iterrows():
-                    m_name = str(r.get('Manager')).strip().lower()
-                    default_baseline[m_name] = {
-                        "saldo_inicial": float(r.get('Saldo Inicial', 23900000)),
-                        "plantilla_inicial": float(r.get('Valor Plantilla Inicial (01/08)', 16100000))
-                    }
-            except Exception as e:
-                print(f"   ⚠️ Could not load {exact_csv}: {e}")
+        try:
+            df_exact = ensure_exact_balances_csv("data/history_exact_balances.csv")
+            for _, r in df_exact.iterrows():
+                m_name = str(r.get('Manager')).strip().lower()
+                default_baseline[m_name] = {
+                    "saldo_inicial": float(r.get('Saldo Inicial', 23900000)),
+                    "plantilla_inicial": float(r.get('Valor Plantilla Inicial (01/08)', 16100000))
+                }
+        except Exception as e:
+            print(f"   ⚠️ Could not load exact balances baseline: {e}")
 
         existing_values = ws.get_all_values()
         existing_managers = {}
@@ -524,20 +559,25 @@ class BiwengerSheetsTracker:
                         if is_clause:
                             clauses_received[seller_id] = clauses_received.get(seller_id, 0.0) + amount
 
-        # Round bonuses mapping: accumulate from ws_primas (all recorded rounds)
+        # Round bonuses mapping: deduplicate by (round_base, uid) from ws_primas
         round_bonuses_map = {}
         if ws_primas is not None:
             primas_values = ws_primas.get_all_values()
             if len(primas_values) > 1:
+                dedup_primas: Dict[str, Tuple[str, float]] = {}
                 for r in primas_values[1:]:
                     if len(r) >= 5:
+                        m_b = re.match(r"(Jornada \d+)", str(r[0]).strip())
+                        b_rnd = m_b.group(1) if m_b else str(r[0]).strip()
                         uid = _clean_id(r[2])
                         try:
                             amt = float(str(r[4]).replace("€", "").replace(".", "").replace(",", ".").strip())
                         except Exception:
                             amt = 0.0
-                        if uid:
-                            round_bonuses_map[uid] = round_bonuses_map.get(uid, 0.0) + amt
+                        if uid and b_rnd:
+                            dedup_primas[f"{b_rnd}_{uid}"] = (uid, amt)
+                for uid, amt in dedup_primas.values():
+                    round_bonuses_map[uid] = round_bonuses_map.get(uid, 0.0) + amt
 
         if not round_bonuses_map and df_bonuses is not None and not df_bonuses.empty:
             for _, r in df_bonuses.iterrows():

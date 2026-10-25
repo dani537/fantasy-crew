@@ -111,6 +111,26 @@ def extract_and_save_data():
             user_league_data.df_board_transfers.to_csv('./data/raw/board_transfers.csv', index=False)
         if hasattr(user_league_data, 'df_board_bids'):
             user_league_data.df_board_bids.to_csv('./data/raw/board_bids.csv', index=False)
+        if hasattr(user_league_data, 'df_board_bonuses'):
+            user_league_data.df_board_bonuses.to_csv('./data/raw/board_bonuses.csv', index=False)
+        if hasattr(user_league_data, 'df_clause_increments'):
+            user_league_data.df_clause_increments.to_csv('./data/raw/clause_increments.csv', index=False)
+
+        # Save raw API session cache so historical_backfill.py & daily_market_tracker.py make 0 duplicate API calls
+        try:
+            import json, datetime, time
+            cache_payload = {
+                "date": datetime.date.today().strftime("%Y-%m-%d"),
+                "timestamp": time.time(),
+                "comp_data": getattr(general_data, "raw_comp_data", {}),
+                "all_teams_details": {str(k): v for k, v in getattr(user_league_data, "all_teams_details_raw", {}).items()},
+                "all_board_items": getattr(user_league_data, "all_board_items", []),
+                "market_sales": getattr(user_league_data, "market_sales", []),
+            }
+            with open("./data/raw/api_session_cache.json", "w", encoding="utf-8") as f_cache:
+                json.dump(cache_payload, f_cache)
+        except Exception as e_cache:
+            print(f"⚠️ Warning saving api_session_cache.json: {e_cache}")
 
         df_comuniate.to_csv('./data/raw/comuniate.csv', index=False)
         df_odds.to_csv('./data/raw/odds.csv', index=False)
@@ -364,6 +384,49 @@ def orchestrate_pipeline(extract: bool = True) -> pd.DataFrame:
     # 5. Feature Engineering
     if df_players_total is not None and not df_players_total.empty:
         df_master = feature_engineering(df_players_total)
+
+        # 5b. Quantitative AI Predictive Model (v4)
+        df_pred = pd.DataFrame()
+        try:
+            print_step("T5b", "Running Biwenger Quantitative Predictive Engine v4")
+            from src.tools.market_prediction import BiwengerMarketPredictorV4
+            predictor = BiwengerMarketPredictorV4()
+            predictor.load_and_prepare_data()
+            predictor.train_and_validate()
+            df_pred = predictor.predict_latest()
+
+            # Export dedicated prediction files
+            os.makedirs("./data/predictions", exist_ok=True)
+            df_pred.to_csv('./data/predictions/predicciones_mercado_hoy.csv', index=False, encoding='utf-8-sig')
+            df_pred.to_csv('./data/predictions/predicciones_mercado_v4.csv', index=False, encoding='utf-8-sig')
+            df_pred.to_csv('./data/predictions/predicciones_mercado_v3.csv', index=False, encoding='utf-8-sig')
+            predictor.export_excel(df_pred, './data/predictions/estudio_predictivo_mercado.xlsx')
+            predictor.export_excel(df_pred, './data/predictions/estudio_predictivo_mercado_v4.xlsx')
+            predictor.export_excel(df_pred, './data/predictions/estudio_predictivo_mercado_v3.xlsx')
+            try:
+                predictor.sync_to_google_sheets()
+            except Exception as e_gs:
+                print(f"⚠️ Warning syncing Predicciones_IA to Google Sheets: {e_gs}")
+
+            # Enrich df_master with predictive signals and valuations
+            pred_cols_to_merge = [
+                "player_id", "pred_subida_24h", "pred_pct_24h", "precio_est_24h",
+                "pred_subida_48h_cum", "pred_roi_48h_pct", "precio_est_48h",
+                "pred_subida_72h_cum", "pred_roi_72h_pct", "precio_est_72h",
+                "efr_72h_eur", "regimen_72h_desc", "prob_explosion_pct", "prob_desplome_pct",
+                "prob_techo_pct", "prob_suelo_pct", "ien", "dias_optimos_retencion", "accion_recomendada"
+            ]
+            pred_subset = df_pred[[c for c in pred_cols_to_merge if c in df_pred.columns]].drop_duplicates(subset=["player_id"]).copy()
+
+            df_master["_pid"] = pd.to_numeric(df_master["PLAYER_ID"], errors="coerce")
+            pred_subset["_pid"] = pd.to_numeric(pred_subset["player_id"], errors="coerce")
+
+            df_master = pd.merge(df_master, pred_subset.drop(columns=["player_id"]), on="_pid", how="left")
+            df_master.drop(columns=["_pid"], inplace=True)
+            print_step("T5c", f"Enriched df_master with {len(pred_subset.columns)-1} predictive features")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not run predictive engine: {e}")
+
         print_step("T6", "Saving Master DataFrames (players_transformed.csv & _master.xlsx)")
         df_master.to_csv('./data/players_transformed.csv', index=False)
 
@@ -408,9 +471,26 @@ def orchestrate_pipeline(extract: bool = True) -> pd.DataFrame:
             else:
                 pd.DataFrame().to_excel(writer, sheet_name="news", index=False)
 
+            # Sheet 6: predicciones_ia (New dedicated sheet!)
+            if not df_pred.empty:
+                df_pred.to_excel(writer, sheet_name="predicciones_ia", index=False)
+
         # Apply executive formatting
         format_master_excel('./data/_master.xlsx')
+
+        # 7. Re-sync operational sheets (Mi_Plantilla, Mercado_Fichajes) with enriched df_master
+        try:
+            print_step(7, "Syncing Enriched Squad & Operational Sheets to Google Sheets")
+            from src.tools.rival_tracker import BiwengerSheetsTracker
+            tracker = BiwengerSheetsTracker()
+            tracker.sync(full=False, df_players_enriched=df_master)
+        except Exception as e:
+            print(f"⚠️ Warning: Enriched dashboard sheets sync skipped: {e}")
 
         return df_master
     
     return df_players_total
+
+
+if __name__ == "__main__":
+    orchestrate_pipeline(extract=True)

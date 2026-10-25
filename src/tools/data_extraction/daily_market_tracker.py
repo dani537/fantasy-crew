@@ -133,20 +133,85 @@ def run_daily_market_capture(max_deep_enrich: int = None):
     t0 = time.time()
     today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-    # 1. Fetch general competition data (Instant: 1 call gives all 580 players)
-    comp_url = "https://cf.biwenger.com/api/v2/competitions/la-liga/data?score=5"
-    r_comp = requests.get(comp_url, headers=get_headers(), timeout=10)
-    if r_comp.status_code != 200:
-        print(f"⚠️ Error obteniendo datos de competición de Biwenger: HTTP {r_comp.status_code}")
-        print(f"Respuesta: {r_comp.text[:200]}")
-        return False
+    # 1. Fetch or reuse general competition data
+    comp_data = {}
+    session_cache_path = "./data/raw/api_session_cache.json"
+    if os.path.exists(session_cache_path):
+        try:
+            with open(session_cache_path, "r", encoding="utf-8") as fc:
+                sc = json.load(fc)
+            if sc.get("date") == today_str and sc.get("comp_data", {}).get("players"):
+                comp_data = sc["comp_data"]
+                print(f"⚡ Reutilizando datos generales de competición desde caché de sesión ({today_str}).")
+        except Exception:
+            comp_data = {}
 
-    comp_data = r_comp.json().get("data", {})
+    if not comp_data:
+        comp_url = "https://cf.biwenger.com/api/v2/competitions/la-liga/data?score=5"
+        r_comp = requests.get(comp_url, headers=get_headers(), timeout=10)
+        if r_comp is None or r_comp.status_code != 200:
+            print(f"⚠️ Error obteniendo datos de competición de Biwenger: HTTP {r_comp.status_code if r_comp else 'None'}")
+            return False
+        comp_data = r_comp.json().get("data", {})
+
     raw_players = comp_data.get("players", {})
     raw_teams = comp_data.get("teams", {})
     team_map = {int(tid): t["name"] for tid, t in raw_teams.items()}
     total_comp_players = len(raw_players)
     print(f"✅ Obtenidos {total_comp_players} jugadores base y {len(raw_teams)} equipos de LaLiga.")
+
+    # Compute exact Global & Position Rankings from raw_players (0 extra API calls!)
+    all_pids_sorted_pts = sorted(
+        [int(k) for k in raw_players.keys()],
+        key=lambda pid: (raw_players[str(pid)].get("points", 0) or 0, raw_players[str(pid)].get("price", 0) or 0),
+        reverse=True,
+    )
+    computed_global_rank = {pid: idx + 1 for idx, pid in enumerate(all_pids_sorted_pts)}
+    computed_pos_rank = {}
+    pos_counters = {}
+    for pid in all_pids_sorted_pts:
+        pos = raw_players[str(pid)].get("position", 0)
+        pos_counters[pos] = pos_counters.get(pos, 0) + 1
+        computed_pos_rank[pid] = pos_counters[pos]
+
+    # Load Warehouse historical fallback for prices, demographics & match stats
+    wh_prices_by_pid = {}
+    wh_meta_by_pid = {}
+    wh_stats_by_pid = {}
+    try:
+        from src.tools.data_extraction.warehouse import BiwengerWarehouse
+        wh_tmp = BiwengerWarehouse()
+        df_wh_hist = wh_tmp.read_table("Historico_Continuo")
+        if not df_wh_hist.empty:
+            for row_h in df_wh_hist.to_dict(orient="records"):
+                p_id_h = int(float(row_h.get("player_id", 0) or 0))
+                if not p_id_h:
+                    continue
+                d_h = str(row_h.get("fecha", "")).strip()
+                pr_h = int(float(row_h.get("precio", 0) or 0))
+                if d_h and pr_h > 0:
+                    wh_prices_by_pid.setdefault(p_id_h, {})[d_h] = pr_h
+                wh_meta_by_pid[p_id_h] = {
+                    "edad": row_h.get("edad", ""),
+                    "nacionalidad": row_h.get("nacionalidad", "Desconocida"),
+                    "ranking_last_season": row_h.get("ranking_last_season", ""),
+                    "pct_uso_ligas": row_h.get("pct_uso_ligas", ""),
+                }
+        df_wh_rep = wh_tmp.read_table("Rendimiento_Jornadas")
+        if not df_wh_rep.empty:
+            for p_id_r, grp in df_wh_rep.groupby("player_id"):
+                p_id_i = int(float(p_id_r))
+                picas_v = pd.to_numeric(grp["picas_as"], errors="coerce").dropna().tolist()
+                sofa_v = pd.to_numeric(grp["nota_sofascore"], errors="coerce").dropna().tolist()
+                wh_stats_by_pid[p_id_i] = {
+                    "goles": int(pd.to_numeric(grp["goles"], errors="coerce").fillna(0).sum()),
+                    "asistencias": int(pd.to_numeric(grp["asistencias"], errors="coerce").fillna(0).sum()),
+                    "minutos": int(pd.to_numeric(grp["minutos_jugados"], errors="coerce").fillna(0).sum()),
+                    "media_picas": round(sum(picas_v) / len(picas_v), 2) if picas_v else "",
+                    "media_sofascore": round(sum(sofa_v) / len(sofa_v), 2) if sofa_v else "",
+                }
+    except Exception:
+        pass
 
     # 2. Local League & Comuniate context
     league_owners = {}
@@ -186,53 +251,68 @@ def run_daily_market_capture(max_deep_enrich: int = None):
         except Exception:
             pass
 
-    # 3. Target players: 100% of ALL 580 LaLiga players
+    # 3. Target players: prioritize market + owned in our league + highest price/movement
     all_pids = [int(p) for p in sorted(
         raw_players.keys(),
-        key=lambda k: (int(k) in priority_ids, raw_players[k].get("price", 0)),
+        key=lambda k: (int(k) in market_sales_set, int(k) in priority_ids, abs(raw_players[k].get("priceIncrement", 0)), raw_players[k].get("price", 0)),
         reverse=True
     )]
     target_deep_pids = all_pids[:max_deep_enrich] if max_deep_enrich else all_pids
 
-    print(f"⏳ Extrayendo fichas exhaustivas completas para el 100% ({len(target_deep_pids)} jugadores) de LaLiga...")
-    print(f"ℹ️ Estrategia: Lotes preventivos de 135 jugadores con pausas de enfriamiento (65s) para vaciar la ventana de Cloudflare.")
-    print(f"⏱️ Tiempo estimado: ~5.5 minutos para los 580 jugadores sin arriesgar bloqueos 429.")
-
     details_map = {}
-    BATCH_SIZE = 135
+    deep_cache_path = "./data/raw/players_deep_cache.json"
+    if not max_deep_enrich and os.path.exists(deep_cache_path):
+        try:
+            with open(deep_cache_path, "r", encoding="utf-8") as f_cache:
+                cached_obj = json.load(f_cache)
+            if cached_obj.get("date") == today_str and len(cached_obj.get("players", {})) >= 100:
+                print(f"⚡ Reutilizando caché profunda de {len(cached_obj['players'])} jugadores extraída hoy ({today_str}).")
+                details_map = {int(k): v for k, v in cached_obj["players"].items()}
+        except Exception:
+            details_map = {}
 
-    for idx, pid in enumerate(target_deep_pids, 1):
-        time.sleep(random.uniform(0.18, 0.28))
-        url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports"
-        
-        for attempt in range(3):
+    if not details_map:
+        print(f"⏳ Extrayendo sentimiento de mercado para jugadores prioritarios (respetando x-rate-limit-remaining >= 15)...")
+
+        for idx, pid in enumerate(target_deep_pids, 1):
+            time.sleep(random.uniform(0.12, 0.20))
+            url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports,seasons"
             try:
                 r = requests.get(url, headers=get_headers(), timeout=8)
+                rem_str = r.headers.get("x-rate-limit-remaining")
+                rem_quota = int(rem_str) if rem_str is not None and rem_str.isdigit() else 100
+
                 if r.status_code == 200:
                     details_map[pid] = r.json().get("data", {})
-                    break
                 elif r.status_code == 429:
-                    # Cloudflare sliding window needs full rest to reset counter
-                    wait_cool = 70.0
-                    print(f"   ⚠️ [Rate limit 429] Jugador {idx}/{len(target_deep_pids)}. Enfriando IP durante {wait_cool}s antes de reintentar...")
-                    time.sleep(wait_cool)
+                    print(f"   ℹ️ Cuota horaria alcanzada en jugador {idx}. Completando el resto desde el Data Warehouse local (0 esperas).")
+                    break
+
+                if rem_quota <= 15:
+                    print(f"   🛡️ Reserva de seguridad alcanzada (x-rate-limit-remaining={rem_quota} tras {idx} jugadores). Completando el resto desde Warehouse.")
+                    break
             except Exception:
-                time.sleep(1.0)
+                pass
 
-        # Proactive cooldown after each batch (before Cloudflare's 200 limit is reached)
-        if idx < len(target_deep_pids) and idx % BATCH_SIZE == 0:
-            batch_num = idx // BATCH_SIZE
-            total_batches = (len(target_deep_pids) + BATCH_SIZE - 1) // BATCH_SIZE
-            print(f"   ⏸️ [Pausa preventiva] Lote {batch_num}/{total_batches} completado ({idx}/{len(target_deep_pids)} jugadores).")
-            print(f"      Descansando 65s para reiniciar el contador de Cloudflare a cero...")
-            time.sleep(65.0)
+            if idx % 50 == 0 or idx == len(target_deep_pids):
+                print(f"   Progreso fichas profundas: {idx}/{len(target_deep_pids)} — {time.time()-t0:.1f}s")
 
-        if idx % 50 == 0 or idx == len(target_deep_pids):
-            print(f"   Progreso fichas profundas: {idx}/{len(target_deep_pids)} ({idx/len(target_deep_pids)*100:.1f}%) — {time.time()-t0:.1f}s")
+        if details_map:
+            try:
+                os.makedirs("./data/raw", exist_ok=True)
+                with open(deep_cache_path, "w", encoding="utf-8") as f_cache:
+                    json.dump({"date": today_str, "players": {str(k): v for k, v in details_map.items()}}, f_cache)
+            except Exception:
+                pass
 
-    print(f"✅ {len(details_map)}/{len(target_deep_pids)} fichas exhaustivas extraídas con éxito.")
+    print(f"✅ {len(details_map)} fichas enriquecidas por API + {len(all_pids) - len(details_map)} enriquecidas vía Warehouse.")
 
     # 4. Build comprehensive master rows for ALL 580 players
+    dt_today = pd.to_datetime(today_str)
+    d_m7 = (dt_today - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    d_m14 = (dt_today - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+    d_m30 = (dt_today - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+
     rows_to_append = []
     for pid in all_pids:
         p_base = raw_players.get(str(pid), {})
@@ -241,6 +321,9 @@ def run_daily_market_capture(max_deep_enrich: int = None):
         rk = analysis.get("ranking", {})
         prices_history = p_detail.get("prices", [])
         reports = p_detail.get("reports", [])
+        wh_meta = wh_meta_by_pid.get(pid, {})
+        wh_p_map = wh_prices_by_pid.get(pid, {})
+        wh_st = wh_stats_by_pid.get(pid, {})
 
         name = p_base.get("name", "")
         current_p = p_base.get("price", 0)
@@ -248,27 +331,30 @@ def run_daily_market_capture(max_deep_enrich: int = None):
         pct_inc_24h = round(inc_24h / (current_p - inc_24h) * 100.0, 2) if (current_p - inc_24h) > 0 else 0.0
 
         # Demographics
-        age = calculate_age(p_detail.get("birthday") or p_base.get("birthday"))
+        age = calculate_age(p_detail.get("birthday") or p_base.get("birthday")) or wh_meta.get("edad", "")
         c_code = str(p_detail.get("country", "")).upper()
-        nationality = COUNTRY_MAP.get(c_code, c_code) if c_code else "Desconocida"
+        nationality = COUNTRY_MAP.get(c_code, c_code) if c_code else wh_meta.get("nacionalidad", "Desconocida")
 
-        # Price Curves & Temporal Variations
-        min_1y = min((p[1] for p in prices_history), default=current_p) if prices_history else current_p
-        max_1y = max((p[1] for p in prices_history), default=current_p) if prices_history else current_p
+        # Price Curves & Temporal Variations (API prices_history or Warehouse history fallback)
+        if prices_history:
+            min_1y = min((p[1] for p in prices_history), default=current_p)
+            max_1y = max((p[1] for p in prices_history), default=current_p)
+            recent_window = prices_history[-30:] if len(prices_history) >= 30 else prices_history
+            season_floor = min((p[1] for p in recent_window), default=current_p)
+            p_7d = prices_history[max(0, len(prices_history) - 8)][1]
+            p_14d = prices_history[max(0, len(prices_history) - 15)][1]
+            p_30d = prices_history[max(0, len(prices_history) - 31)][1]
+        else:
+            hist_vals = list(wh_p_map.values()) + [current_p]
+            min_1y = min(hist_vals)
+            max_1y = max(hist_vals)
+            season_floor = min(hist_vals[-30:])
+            p_7d = wh_p_map.get(d_m7, current_p)
+            p_14d = wh_p_map.get(d_m14, current_p)
+            p_30d = wh_p_map.get(d_m30, current_p)
 
-        recent_window = prices_history[-30:] if len(prices_history) >= 30 else prices_history
-        season_floor = min((p[1] for p in recent_window), default=current_p) if recent_window else current_p
         season_gain = current_p - season_floor
         season_gain_pct = round((season_gain / season_floor * 100.0), 2) if season_floor > 0 else 0.0
-
-        def get_past_p(days):
-            if not prices_history: return current_p
-            idx = max(0, len(prices_history) - 1 - days)
-            return prices_history[idx][1]
-
-        p_7d = get_past_p(7)
-        p_14d = get_past_p(14)
-        p_30d = get_past_p(30)
 
         diff_7d = current_p - p_7d
         pct_7d = round(diff_7d / p_7d * 100.0, 2) if p_7d > 0 else 0.0
@@ -282,39 +368,47 @@ def run_daily_market_capture(max_deep_enrich: int = None):
         # Community Market Sentiment
         p_buy = analysis.get("purchases", "")
         p_sell = analysis.get("sales", "")
-        p_use = analysis.get("owned", "")
+        p_use = analysis.get("owned", wh_meta.get("pct_uso_ligas", ""))
         net_press = ""
         if isinstance(p_buy, (int, float)) and isinstance(p_sell, (int, float)):
             net_press = p_buy - p_sell
 
         # Sporting Performance & Reports
-        tot_goals = 0
-        tot_assists = 0
-        tot_mins = 0
-        picas_list = []
-        sofascore_list = []
+        if reports:
+            tot_goals = 0
+            tot_assists = 0
+            tot_mins = 0
+            picas_list = []
+            sofascore_list = []
 
-        for rep in reports:
-            raw_stats = rep.get("rawStats", {})
-            tot_goals += int(raw_stats.get("goals", 0) or 0)
-            tot_assists += int(raw_stats.get("assists", 0) or 0)
-            tot_mins += int(raw_stats.get("minutesPlayed", 0) or 0)
-            
-            p_val = raw_stats.get("picas")
-            if p_val is not None:
-                try: picas_list.append(float(p_val))
-                except (ValueError, TypeError): pass
-            
-            s_val = raw_stats.get("sofascore")
-            if s_val is not None:
-                try: sofascore_list.append(float(s_val))
-                except (ValueError, TypeError): pass
+            for rep in reports:
+                raw_stats = rep.get("rawStats", {})
+                tot_goals += int(raw_stats.get("goals", 0) or 0)
+                tot_assists += int(raw_stats.get("assists", 0) or 0)
+                tot_mins += int(raw_stats.get("minutesPlayed", 0) or 0)
+                
+                p_val = raw_stats.get("picas")
+                if p_val is not None:
+                    try: picas_list.append(float(p_val))
+                    except (ValueError, TypeError): pass
+                
+                s_val = raw_stats.get("sofascore")
+                if s_val is not None:
+                    try: sofascore_list.append(float(s_val))
+                    except (ValueError, TypeError): pass
+
+            avg_picas = round(sum(picas_list) / len(picas_list), 2) if picas_list else ""
+            avg_sofascore = round(sum(sofascore_list) / len(sofascore_list), 2) if sofascore_list else ""
+        else:
+            tot_goals = wh_st.get("goles", 0)
+            tot_assists = wh_st.get("asistencias", 0)
+            tot_mins = wh_st.get("minutos", 0)
+            avg_picas = wh_st.get("media_picas", "")
+            avg_sofascore = wh_st.get("media_sofascore", "")
 
         played_games = (p_base.get("playedHome", 0) or 0) + (p_base.get("playedAway", 0) or 0)
         points_tot = p_base.get("points", 0)
         avg_points = round(points_tot / played_games, 2) if played_games > 0 else 0.0
-        avg_picas = round(sum(picas_list) / len(picas_list), 2) if picas_list else ""
-        avg_sofascore = round(sum(sofascore_list) / len(sofascore_list), 2) if sofascore_list else ""
 
         fitness_list = p_base.get("fitness", [])
         fitness_str = ",".join(map(str, fitness_list)) if isinstance(fitness_list, list) else ""
@@ -355,9 +449,9 @@ def run_daily_market_capture(max_deep_enrich: int = None):
             p_use,
             net_press,
             # Rankings
-            rk.get("global", ""),
-            rk.get("position", ""),
-            rk.get("lastSeason", ""),
+            rk.get("global", computed_global_rank.get(pid, "")),
+            rk.get("position", computed_pos_rank.get(pid, "")),
+            rk.get("lastSeason", wh_meta.get("ranking_last_season", "")),
             # Rendimiento
             points_tot,
             p_base.get("pointsLastSeason", 0),
@@ -396,7 +490,14 @@ def run_daily_market_capture(max_deep_enrich: int = None):
     else:
         df_today.to_csv(local_history_path, mode="w", header=True, index=False, encoding="utf-8-sig")
 
-    print(f"💾 Guardados backups locales ({len(rows_to_append)} registros)")
+    try:
+        from src.tools.data_extraction.warehouse import BiwengerWarehouse
+        wh = BiwengerWarehouse()
+        wh.upsert_table("Historico_Continuo", df_today, pk_cols=["fecha", "player_id"])
+    except Exception as e_wh:
+        print(f"⚠️ Warning updating SQLite warehouse Historico_Continuo: {e_wh}")
+
+    print(f"💾 Guardados backups locales y Warehouse ({len(rows_to_append)} registros)")
 
     # 6. Save to Google Sheets (Safe Append-Only, NEVER clears Historico_Continuo)
     gc = get_gspread_client()

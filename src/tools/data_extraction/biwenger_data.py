@@ -49,21 +49,31 @@ class BiwengerGeneralData:
         self._jornadas_data()
     
     def _laliga_data(self):
-        headers = random_headers()
-        headers['Referer'] = "https://biwenger.as.com/peloton/news"
-        headers['Authorization'] = None  # Importante: no enviar el token al CDN
-        
-        response = self.session.get(self.info_url, headers=headers)
-        if response.status_code == 200:
-            response_json = response.json()
-            data = response_json.get('data', {})
-            self.players = data.get('players', {})
-            self.teams = data.get('teams', {})
-            self.season_raw = data.get('season', {})
-            self.active_events_raw = data.get('activeEvents', [])
-            return True
-        else:
-            raise Exception(f"Error: {response.status_code} - {response.text}")
+        for attempt in range(3):
+            headers = random_headers()
+            headers['Referer'] = "https://biwenger.as.com/peloton/news"
+            headers['Authorization'] = None  # Importante: no enviar el token al CDN
+            
+            response = self.session.get(self.info_url, headers=headers, timeout=12)
+            if response.status_code == 200:
+                response_json = response.json()
+                data = response_json.get('data', {})
+                self.raw_comp_data = data
+                self.players = data.get('players', {})
+                self.teams = data.get('teams', {})
+                self.season_raw = data.get('season', {})
+                self.active_events_raw = data.get('activeEvents', [])
+                return True
+            elif response.status_code == 429 and attempt < 2:
+                reset_ts = int(response.headers.get("x-rate-limit-reset", 0) or 0)
+                wait_sec = (reset_ts - time.time() + 2.0) if reset_ts > time.time() else 65.0
+                if wait_sec <= 95.0:
+                    print(f"⏳ [429 Rate Limit en _laliga_data] Esperando {wait_sec:.0f}s para reset CDN...")
+                    time.sleep(max(1.0, wait_sec))
+                else:
+                    raise Exception(f"Error: 429 (Reset a las {datetime.datetime.fromtimestamp(reset_ts).strftime('%H:%M:%S')}) - {response.text}")
+            else:
+                raise Exception(f"Error: {response.status_code} - {response.text}")
     
     def players_info(self) -> pd.DataFrame:
         """Crea un DataFrame a partir de los datos de jugadores"""
@@ -185,22 +195,31 @@ class BiwengerGeneralData:
 
     def _jornadas_data(self):
         """Extrae los datos de la próxima jornada (o la activa si está pendiente)"""
-        headers = random_headers()
-        headers['Referer'] = "https://biwenger.as.com/peloton/news"
-        headers['Authorization'] = None
-        
-        response = self.session.get(self.jornada_url, headers=headers)
-        if response.status_code == 200:
-            response_json = response.json()
-            data_root = response_json.get('data', {})
-            # Si el objeto raíz contiene partidos y no está completado, es la jornada inmediata a jugar
-            if data_root.get('games') and data_root.get('status') != 'completed':
-                self.next_jornada = data_root
+        for attempt in range(3):
+            headers = random_headers()
+            headers['Referer'] = "https://biwenger.as.com/peloton/news"
+            headers['Authorization'] = None
+            
+            response = self.session.get(self.jornada_url, headers=headers, timeout=12)
+            if response.status_code == 200:
+                response_json = response.json()
+                data_root = response_json.get('data', {})
+                # Si el objeto raíz contiene partidos y no está completado, es la jornada inmediata a jugar
+                if data_root.get('games') and data_root.get('status') != 'completed':
+                    self.next_jornada = data_root
+                else:
+                    self.next_jornada = data_root.get('next', {})
+                return True
+            elif response.status_code == 429 and attempt < 2:
+                reset_ts = int(response.headers.get("x-rate-limit-reset", 0) or 0)
+                wait_sec = (reset_ts - time.time() + 2.0) if reset_ts > time.time() else 65.0
+                if wait_sec <= 95.0:
+                    print(f"⏳ [429 Rate Limit en _jornadas_data] Esperando {wait_sec:.0f}s para reset CDN...")
+                    time.sleep(max(1.0, wait_sec))
+                else:
+                    raise Exception(f"Error: 429 (Reset a las {datetime.datetime.fromtimestamp(reset_ts).strftime('%H:%M:%S')}) - {response.text}")
             else:
-                self.next_jornada = data_root.get('next', {})
-            return True
-        else:
-            raise Exception(f"Error: {response.status_code} - {response.text}")
+                raise Exception(f"Error: {response.status_code} - {response.text}")
 
     def next_jornada_info(self) -> pd.DataFrame:
         """Devuelve un DataFrame con los partidos de la próxima jornada y sus métricas de dificultad"""
@@ -481,6 +500,7 @@ class UserLeagueData:
                     all_details[user_id] = data
                     print(f"✅ Datos obtenidos para el usuario {user_id}")
         
+        self.all_teams_details_raw = all_details
         return all_details
 
     def league_players_info(self, session) -> pd.DataFrame:
@@ -563,6 +583,7 @@ class UserLeagueData:
                 offset += batch_limit
 
 
+            self.all_board_items = all_items
             transfers_list = []
             bids_list = []
             clause_increments_list = []
