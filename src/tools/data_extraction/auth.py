@@ -44,7 +44,7 @@ def random_headers() -> dict:
     return {
         "User-Agent": get_random_user_agent(),
         "Accept": "application/json, text/plain, */*",
-        "X-Version": "630",
+        "X-Version": "640",
         "X-Lang": get_random_language()
     }
 
@@ -114,6 +114,17 @@ class BiwengerAuth:
             "Referer": "https://biwenger.as.com/"
         }
         response = self.session.get(USER_INFO_URL, headers=extra_headers, timeout=20)
+        
+        # Fallback dinámico si Biwenger eleva el requisito de X-Version ("Old version")
+        if response.status_code == 400 and "Old version" in response.text:
+            print("⚠️ Biwenger API devolvió 'Old version'. Actualizando dinámicamente X-Version...")
+            for test_v in ["640", "650", "700", "800"]:
+                extra_headers["X-Version"] = test_v
+                self.session.headers["X-Version"] = test_v
+                response = self.session.get(USER_INFO_URL, headers=extra_headers, timeout=20)
+                if response.status_code == 200:
+                    print(f"✅ X-Version adaptada con éxito a '{test_v}'.")
+                    break
         
         if response.status_code == 200:
             response_json = response.json()
