@@ -295,9 +295,22 @@ def run_daily_market_capture(max_deep_enrich: int = None):
                         break
                     elif r.status_code == 429 or rem_quota <= 1:
                         # Cuota alcanzada: calcular espera exacta hasta el reseteo
-                        reset_ts = int(reset_str) if reset_str and reset_str.isdigit() else (time.time() + 70.0)
                         now_ts = time.time()
-                        wait_sec = max(5.0, (reset_ts - now_ts) + 3.0)
+                        if reset_str and reset_str.isdigit():
+                            val = int(reset_str)
+                            if val > 1_000_000_000:
+                                reset_ts = val
+                                wait_sec = max(5.0, (reset_ts - now_ts) + 3.0)
+                            else:
+                                wait_sec = max(5.0, float(val) + 3.0)
+                                reset_ts = now_ts + wait_sec
+                        else:
+                            # Si la API no indica timestamp exacto, la cuota de Biwenger se reinicia a las :00 UTC
+                            # Calculamos los segundos restantes hasta el próximo cambio de hora + margen
+                            next_hour_ts = (int(now_ts) // 3600 + 1) * 3600
+                            wait_sec = max(10.0, (next_hour_ts - now_ts) + 5.0)
+                            reset_ts = next_hour_ts + 5.0
+
                         reset_dt_str = datetime.datetime.fromtimestamp(reset_ts).strftime("%H:%M:%S")
                         print(f"   ⚠️ [Cuota 200 alcanzada] Jugador {idx}/{len(missing_pids)} (ID: {pid}).")
                         print(f"      Esperando {wait_sec:.0f}s hasta reseteo de hora a las {reset_dt_str}...")
