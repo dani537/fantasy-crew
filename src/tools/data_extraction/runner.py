@@ -29,9 +29,9 @@ def extract_and_save_data():
     """
     load_dotenv()
 
-    missing = Credentials.validate()
+    missing = Credentials.validate(require_llm=False)
     if missing:
-        raise RuntimeError(f"Missing required credentials in .env: {', '.join(missing)}")
+        raise RuntimeError(f"Missing required credentials: {', '.join(missing)}")
 
     # Suppress output from imported modules to reduce noise
     f = io.StringIO()

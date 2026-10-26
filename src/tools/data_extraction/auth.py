@@ -153,8 +153,16 @@ class BiwengerAuth:
         """
         if self.token:
             self.session.headers.update({"Authorization": f"Bearer {self.token}"})
-            self.get_user_info()
-            return self.session
+            try:
+                self.get_user_info()
+                return self.session
+            except Exception as e:
+                if self.email and self.password:
+                    print(f"⚠️ Token no válido o expirado ({e}). Reintentando con login por credenciales...")
+                    self.login()
+                    self.get_user_info()
+                    return self.session
+                raise e
         elif self.email and self.password:
             self.login()
             self.get_user_info()

@@ -44,6 +44,8 @@ jobs:
           BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
           BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID }}
           BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           # 1. Update general league context, incremental movements, rival finances & save session cache
           python -u -m src.tools.data_extraction.runner

@@ -87,7 +87,7 @@ class Credentials(metaclass=_CredentialsMeta):
         return cls.LLM_API_KEY or cls.OPENROUTER_API_KEY or cls.DEEPSEEK_API_KEY or ""
 
     @classmethod
-    def validate(cls) -> list:
+    def validate(cls, require_llm: bool = True) -> list:
         """Returns a list of missing required credential names (empty = all OK)."""
         missing = []
         has_token = bool(_get_config_var("BIWENGER_TOKEN"))
@@ -95,7 +95,7 @@ class Credentials(metaclass=_CredentialsMeta):
         
         if not (has_token or has_creds):
             missing.append("BIWENGER_TOKEN (o BIWENGER_USERNAME y BIWENGER_PASSWORD)")
-        if not cls.get_llm_api_key():
+        if require_llm and not cls.get_llm_api_key():
             missing.append("OPENROUTER_API_KEY (or LLM_API_KEY / DEEPSEEK_API_KEY)")
         return missing
 
