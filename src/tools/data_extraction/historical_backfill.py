@@ -1109,6 +1109,9 @@ def extract_rounds_matches_reports_and_lineups(
     df_lineups = pd.DataFrame(lineups_rows)
 
     if not df_player_reports.empty:
+        for c in ["player_id", "match_id", "jornada_num", "part", "puntos_biwenger"]:
+            if c in df_player_reports.columns:
+                df_player_reports[c] = pd.to_numeric(df_player_reports[c], errors="coerce").fillna(0).astype(int)
         df_player_reports = (
             df_player_reports.sort_values(["jornada_num", "part", "fecha_partido"])
             .drop_duplicates(subset=["match_id", "player_id"], keep="last")
@@ -1130,19 +1133,30 @@ def extract_rounds_matches_reports_and_lineups(
         for pid in player_dated_reports:
             player_dated_reports[pid].sort(key=lambda x: x["date"])
 
+    if not df_matches.empty:
+        for c in ["round_id", "match_id", "jornada_num", "part"]:
+            if c in df_matches.columns:
+                df_matches[c] = pd.to_numeric(df_matches[c], errors="coerce").fillna(0).astype(int)
+
     if not df_lineups.empty:
+        for c in ["jornada_num", "part", "user_id", "round_id", "posicion_jornada", "puntos_jornada"]:
+            if c in df_lineups.columns:
+                df_lineups[c] = pd.to_numeric(df_lineups[c], errors="coerce").fillna(0).astype(int)
+
         df_lineups = df_lineups.sort_values(["jornada_num", "part", "posicion_jornada"]).reset_index(drop=True)
         latest_part_per_j = df_lineups.groupby("jornada_num")["part"].max().to_dict()
 
         for (jn, pt), grp in df_lineups.groupby(["jornada_num", "part"], sort=False):
+            jn_int = int(jn)
+            pt_int = int(pt)
             temp_totals = {}
             for idx_row, r_row in grp.iterrows():
                 u = int(r_row["user_id"])
                 sub = df_lineups[
                     (df_lineups["user_id"] == u)
                     & (
-                        ((df_lineups["jornada_num"] < jn) & (df_lineups["part"] == df_lineups["jornada_num"].map(latest_part_per_j)))
-                        | ((df_lineups["jornada_num"] == jn) & (df_lineups["part"] == pt))
+                        ((df_lineups["jornada_num"] < jn_int) & (df_lineups["part"] == df_lineups["jornada_num"].map(latest_part_per_j)))
+                        | ((df_lineups["jornada_num"] == jn_int) & (df_lineups["part"] == pt_int))
                     )
                 ]
                 sub_dedup = sub.sort_values("part").drop_duplicates(subset=["jornada_num"], keep="last")

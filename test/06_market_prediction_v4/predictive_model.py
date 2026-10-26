@@ -660,7 +660,16 @@ class BiwengerMarketPredictorV4:
                 "prob_techo_pct", "prob_suelo_pct", "ien", "dias_optimos_retencion", "accion_recomendada"
             ]
             upload_df = self.df_today[[c for c in cols_upload if c in self.df_today.columns]].fillna("")
-            payload = [upload_df.columns.tolist()] + upload_df.values.tolist()
+            clean_rows = []
+            for row in upload_df.to_numpy().tolist():
+                clean_row = [
+                    v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else (
+                        "" if (v is None or pd.isna(v)) else v
+                    )
+                    for v in row
+                ]
+                clean_rows.append(clean_row)
+            payload = [upload_df.columns.tolist()] + clean_rows
             ws.update(values=payload, range_name="A1")
             print(f"✅ Sincronizadas {len(upload_df)} filas en Google Sheets ({tab_name}).")
             return True
