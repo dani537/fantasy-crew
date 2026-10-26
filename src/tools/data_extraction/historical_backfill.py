@@ -101,6 +101,17 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_read_csv(path: str) -> pd.DataFrame:
+    """Safely reads a CSV file, returning an empty DataFrame if file is missing, empty, or unparseable."""
+    if os.path.exists(path):
+        try:
+            if os.path.getsize(path) >= 5:
+                return pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
 def load_existing_historico_from_sheets_or_warehouse(warehouse: BiwengerWarehouse) -> pd.DataFrame:
     """Loads the existing `Historico_Continuo` table from Warehouse or Google Sheets."""
     df_existing = warehouse.read_table("Historico_Continuo")
@@ -1681,13 +1692,14 @@ def run_historical_pipeline(
             season_rounds = season_info.rounds
         except Exception as e_gen:
             print(f"ℹ️ CDN de competición en espera ({e_gen}); reconstruyendo jugadores y equipos desde './data/raw/' + 'Historico_Continuo'.")
-            if os.path.exists("./data/raw/teams.csv"):
-                df_t = pd.read_csv("./data/raw/teams.csv")
+            df_t = _safe_read_csv("./data/raw/teams.csv")
+            if not df_t.empty:
                 teams_map = {int(r["id"]): str(r["name"]) for _, r in df_t.iterrows()}
-            if os.path.exists("./data/raw/rounds.csv"):
-                season_rounds = pd.read_csv("./data/raw/rounds.csv").to_dict(orient="records")
-            if os.path.exists("./data/raw/players.csv"):
-                df_p = pd.read_csv("./data/raw/players.csv")
+            df_rounds = _safe_read_csv("./data/raw/rounds.csv")
+            if not df_rounds.empty:
+                season_rounds = df_rounds.to_dict(orient="records")
+            df_p = _safe_read_csv("./data/raw/players.csv")
+            if not df_p.empty:
                 for _, r in df_p.iterrows():
                     pid_s = str(int(r["id"]))
                     raw_players[pid_s] = {
@@ -1743,12 +1755,12 @@ def run_historical_pipeline(
         if auth_session is None:
             raise RuntimeError("Sin sesión activa de Biwenger")
         if os.path.exists("./data/raw/league_teams.csv") and session_cache:
-            df_standings = pd.read_csv("./data/raw/league_teams.csv")
-            df_league_players = pd.read_csv("./data/raw/league_players.csv")
-            df_market_sales = pd.read_csv("./data/raw/market_sales.csv") if os.path.exists("./data/raw/market_sales.csv") else pd.DataFrame()
-            df_market_offers = pd.read_csv("./data/raw/market_offers.csv") if os.path.exists("./data/raw/market_offers.csv") else pd.DataFrame()
-            df_bt = pd.read_csv("./data/raw/board_transfers.csv") if os.path.exists("./data/raw/board_transfers.csv") else pd.DataFrame()
-            df_bb = pd.read_csv("./data/raw/board_bids.csv") if os.path.exists("./data/raw/board_bids.csv") else pd.DataFrame()
+            df_standings = _safe_read_csv("./data/raw/league_teams.csv")
+            df_league_players = _safe_read_csv("./data/raw/league_players.csv")
+            df_market_sales = _safe_read_csv("./data/raw/market_sales.csv")
+            df_market_offers = _safe_read_csv("./data/raw/market_offers.csv")
+            df_bt = _safe_read_csv("./data/raw/board_transfers.csv")
+            df_bb = _safe_read_csv("./data/raw/board_bids.csv")
             board_res = {"transfers": df_bt, "bids": df_bb}
             if not raw_board_items:
                 raw_board_items = fetch_full_board_raw(auth_session, auth_token, league_id, my_uid)
@@ -1778,8 +1790,8 @@ def run_historical_pipeline(
                 df_ui = pd.read_csv("./data/user_info.csv")
                 df_ui["balance"] = my_balance
                 df_ui.to_csv("./data/user_info.csv", index=False)
-            if os.path.exists("./data/raw/players.csv") and raw_players:
-                df_p_upd = pd.read_csv("./data/raw/players.csv")
+            df_p_upd = _safe_read_csv("./data/raw/players.csv")
+            if not df_p_upd.empty and raw_players:
                 df_p_upd["price"] = df_p_upd["id"].map(lambda x: raw_players.get(str(int(x)), {}).get("price", 0))
                 df_p_upd["priceIncrement"] = df_p_upd["id"].map(lambda x: raw_players.get(str(int(x)), {}).get("priceIncrement", 0))
                 df_p_upd["points"] = df_p_upd["id"].map(lambda x: raw_players.get(str(int(x)), {}).get("points", 0))
@@ -1794,16 +1806,12 @@ def run_historical_pipeline(
                     print(f"⚠️ Warning syncing BiwengerSheetsTracker: {e_tr}")
     except Exception as e_priv:
         print(f"ℹ️ Endpoints privados en espera ({e_priv}); utilizando staging local en './data/raw/'.")
-        if os.path.exists("./data/raw/league_teams.csv"):
-            df_standings = pd.read_csv("./data/raw/league_teams.csv")
-        if os.path.exists("./data/raw/league_players.csv"):
-            df_league_players = pd.read_csv("./data/raw/league_players.csv")
-        if os.path.exists("./data/raw/market_sales.csv"):
-            df_market_sales = pd.read_csv("./data/raw/market_sales.csv")
-        if os.path.exists("./data/raw/market_offers.csv"):
-            df_market_offers = pd.read_csv("./data/raw/market_offers.csv")
-        df_bt = pd.read_csv("./data/raw/board_transfers.csv") if os.path.exists("./data/raw/board_transfers.csv") else pd.DataFrame()
-        df_bb = pd.read_csv("./data/raw/board_bids.csv") if os.path.exists("./data/raw/board_bids.csv") else pd.DataFrame()
+        df_standings = _safe_read_csv("./data/raw/league_teams.csv")
+        df_league_players = _safe_read_csv("./data/raw/league_players.csv")
+        df_market_sales = _safe_read_csv("./data/raw/market_sales.csv")
+        df_market_offers = _safe_read_csv("./data/raw/market_offers.csv")
+        df_bt = _safe_read_csv("./data/raw/board_transfers.csv")
+        df_bb = _safe_read_csv("./data/raw/board_bids.csv")
         board_res = {"transfers": df_bt, "bids": df_bb}
         # Reconstruct synthetic raw_board_items from board_transfers.csv + board_bids.csv if raw_board_items is empty
         if not raw_board_items and not df_bt.empty:

@@ -151,6 +151,7 @@ class BiwengerWarehouse:
     Manages the Dual-Sink analytical database (`data/warehouse/biwenger_history.db` + CSVs)
     and synchronizes worksheets with Google Sheets.
     """
+    TABLE_MAP: Dict[str, str] = {}
 
     def __init__(
         self,
