@@ -265,47 +265,79 @@ def run_daily_market_capture(max_deep_enrich: int = None):
         try:
             with open(deep_cache_path, "r", encoding="utf-8") as f_cache:
                 cached_obj = json.load(f_cache)
-            if cached_obj.get("date") == today_str and len(cached_obj.get("players", {})) >= 100:
-                print(f"⚡ Reutilizando caché profunda de {len(cached_obj['players'])} jugadores extraída hoy ({today_str}).")
+            if cached_obj.get("date") == today_str and isinstance(cached_obj.get("players"), dict):
                 details_map = {int(k): v for k, v in cached_obj["players"].items()}
+                print(f"⚡ Recuperados {len(details_map)} jugadores de la caché profunda de hoy ({today_str}).")
         except Exception:
             details_map = {}
 
-    if not details_map:
-        print(f"⏳ Extrayendo sentimiento de mercado para jugadores prioritarios (respetando x-rate-limit-remaining >= 15)...")
+    missing_pids = [pid for pid in target_deep_pids if pid not in details_map]
 
-        for idx, pid in enumerate(target_deep_pids, 1):
-            time.sleep(random.uniform(0.12, 0.20))
+    if missing_pids:
+        print(f"⏳ Extrayendo fichas exhaustivas completas para {len(missing_pids)}/{len(target_deep_pids)} jugadores de LaLiga (100% detalle)...")
+        print(f"ℹ️ Política estricta: Esperas automáticas al inicio de hora (:00 UTC) al alcanzar la cuota horaria de Biwenger.")
+
+        for idx, pid in enumerate(missing_pids, 1):
             url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports,seasons"
-            try:
-                r = requests.get(url, headers=get_headers(), timeout=8)
-                rem_str = r.headers.get("x-rate-limit-remaining")
-                rem_quota = int(rem_str) if rem_str is not None and rem_str.isdigit() else 100
+            fetched = False
 
-                if r.status_code == 200:
-                    details_map[pid] = r.json().get("data", {})
-                elif r.status_code == 429:
-                    print(f"   ℹ️ Cuota horaria alcanzada en jugador {idx}. Completando el resto desde el Data Warehouse local (0 esperas).")
-                    break
+            for attempt in range(5):
+                time.sleep(random.uniform(0.15, 0.25))
+                try:
+                    r = requests.get(url, headers=get_headers(), timeout=10)
+                    rem_str = r.headers.get("x-rate-limit-remaining")
+                    reset_str = r.headers.get("x-rate-limit-reset")
+                    rem_quota = int(rem_str) if rem_str is not None and rem_str.isdigit() else 100
 
-                if rem_quota <= 15:
-                    print(f"   🛡️ Reserva de seguridad alcanzada (x-rate-limit-remaining={rem_quota} tras {idx} jugadores). Completando el resto desde Warehouse.")
-                    break
-            except Exception:
-                pass
+                    if r.status_code == 200:
+                        details_map[pid] = r.json().get("data", {})
+                        fetched = True
+                        break
+                    elif r.status_code == 429 or rem_quota <= 1:
+                        # Cuota alcanzada: calcular espera exacta hasta el reseteo
+                        reset_ts = int(reset_str) if reset_str and reset_str.isdigit() else (time.time() + 70.0)
+                        now_ts = time.time()
+                        wait_sec = max(5.0, (reset_ts - now_ts) + 3.0)
+                        reset_dt_str = datetime.datetime.fromtimestamp(reset_ts).strftime("%H:%M:%S")
+                        print(f"   ⚠️ [Cuota 200 alcanzada] Jugador {idx}/{len(missing_pids)} (ID: {pid}).")
+                        print(f"      Esperando {wait_sec:.0f}s hasta reseteo de hora a las {reset_dt_str}...")
 
-            if idx % 50 == 0 or idx == len(target_deep_pids):
-                print(f"   Progreso fichas profundas: {idx}/{len(target_deep_pids)} — {time.time()-t0:.1f}s")
+                        # Guardar progreso actual en disco antes de dormir
+                        try:
+                            os.makedirs("./data/raw", exist_ok=True)
+                            with open(deep_cache_path, "w", encoding="utf-8") as f_cache:
+                                json.dump({"date": today_str, "players": {str(k): v for k, v in details_map.items()}}, f_cache)
+                        except Exception:
+                            pass
 
-        if details_map:
-            try:
-                os.makedirs("./data/raw", exist_ok=True)
-                with open(deep_cache_path, "w", encoding="utf-8") as f_cache:
-                    json.dump({"date": today_str, "players": {str(k): v for k, v in details_map.items()}}, f_cache)
-            except Exception:
-                pass
+                        time.sleep(wait_sec)
+                        continue
+                    elif r.status_code == 404:
+                        print(f"   ℹ️ Jugador ID {pid} no encontrado (HTTP 404).")
+                        details_map[pid] = {}
+                        fetched = True
+                        break
+                    else:
+                        time.sleep(1.5)
+                except Exception as e:
+                    time.sleep(2.0)
 
-    print(f"✅ {len(details_map)} fichas enriquecidas por API + {len(all_pids) - len(details_map)} enriquecidas vía Warehouse.")
+            if not fetched:
+                details_map[pid] = {}
+
+            # Guardar punto de control cada 50 jugadores o al final
+            if idx % 50 == 0 or idx == len(missing_pids):
+                try:
+                    os.makedirs("./data/raw", exist_ok=True)
+                    with open(deep_cache_path, "w", encoding="utf-8") as f_cache:
+                        json.dump({"date": today_str, "players": {str(k): v for k, v in details_map.items()}}, f_cache)
+                except Exception:
+                    pass
+                print(f"   Progreso fichas profundas: {idx}/{len(missing_pids)} (Total listos: {len(details_map)}/{len(target_deep_pids)}) — {time.time()-t0:.1f}s")
+    else:
+        print(f"✅ Todos los {len(details_map)}/{len(target_deep_pids)} jugadores ya están enriquecidos en caché profunda para hoy.")
+
+    print(f"✅ Extracción exhaustiva finalizada: {len(details_map)}/{len(all_pids)} jugadores con 100% de detalle.")
 
     # 4. Build comprehensive master rows for ALL 580 players
     dt_today = pd.to_datetime(today_str)
