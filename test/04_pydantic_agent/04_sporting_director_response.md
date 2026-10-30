@@ -1,0 +1,293 @@
+# 👔 PLAN ESTRATÉGICO DEL DIRECTOR DEPORTIVO
+
+# Informe ejecutivo — Dani SR
+
+## 1. Diagnóstico financiero
+
+- **Saldo bancario:** 14.531.549 €
+- **Deuda a sanear:** **0 €**
+- **Valor de plantilla:** 42.560.000 €
+- **Jugadores:** 19
+- **Ofertas activas:** ninguna
+- **Bloqueos de venta:** ninguno; todos los jugadores pueden venderse hoy.
+
+### Conclusión financiera
+
+La deuda ya está completamente saneada. Por tanto, **no es necesario vender para evitar una penalización antes de la jornada de mañana**. Disponemos de liquidez suficiente para reforzar la plantilla sin comprometer el saldo.
+
+---
+
+## 2. Diagnóstico deportivo del entrenador
+
+El once recomendado es un **3-5-2**:
+
+- **Portero:** Remiro, 100 %
+- **Defensas:** Ángel Pérez, El Hilali y Sergi Cardona, todos al 100 %
+- **Mediocampo:** Tchouameni, Danjuma, Ceballos, Lo Celso y Guridi
+- **Delantera:** Oyarzabal y Marcos Fernández
+
+### Necesidades prioritarias
+
+1. **Segundo delantero titular o con minutos fiables**
+   - Marcos Fernández parte con 0 % de titularidad.
+   - Borja Iglesias está lesionado hasta diciembre.
+   - Brahim tampoco ofrece una solución inmediata.
+   - La línea ofensiva necesita una alternativa real junto a Oyarzabal.
+
+2. **Portero suplente**
+   - Solo tenemos a Remiro.
+   - El entrenador recomienda incorporar una cobertura barata.
+
+3. **Profundidad defensiva**
+   - El once titular está cubierto, pero la rotación es mejorable.
+   - Drkusic aparece como una oportunidad económica con titularidad actual.
+
+4. **No tocar los activos estructurales**
+   - **Oyarzabal y Tchouameni son intocables.**
+   - **Bigas debe mantenerse**: aunque actualmente no es titular, la directiva indica que volverá cuando supere sus molestias.
+   - **Lo Celso no debe venderse ahora**: sube 110.000 €/día y es un activo en crecimiento.
+
+---
+
+# 3. Opciones de venta
+
+## Ventas prioritarias
+
+### 1. Borja Iglesias — 1.850.000 €
+
+- Lesionado hasta diciembre.
+- 0 % de titularidad.
+- Pierde 40.000 €/día.
+- No aporta valor inmediato para la jornada 11.
+
+**Decisión:** vender. Es una venta de saneamiento y liberación de plaza claramente justificada.
+
+### 2. Marcos Fernández — 1.660.000 €
+
+- 0 % de titularidad.
+- Pierde 50.000 €/día.
+- Es precisamente el jugador que está provocando la necesidad estructural en la delantera.
+
+**Decisión:** vender si incorporamos un delantero con mejor perspectiva. No tiene sentido mantenerlo bloqueando capital y una plaza ofensiva.
+
+## Ventas secundarias, no imprescindibles
+
+### Brahim — 1.060.000 €
+
+- 0 % de titularidad.
+- Pérdida moderada de 10.000 €/día.
+- Puede venderse si necesitamos hacer limpieza adicional, pero no es urgente.
+
+### Calero — 680.000 €
+
+- 0 % de titularidad.
+- Pierde 40.000 €/día.
+- Es prescindible porque la defensa titular está cubierta y existen alternativas baratas en el mercado.
+
+### No vender ahora
+
+- **Bigas:** mantener por la directiva del mánager y su posible recuperación.
+- **Lo Celso:** mantener por su subida de 110.000 €/día.
+- **Guridi y Ceballos:** son excedentes potenciales, pero no existe necesidad financiera.
+- **Danjuma:** titular al 100 % según el entrenador.
+- **Ángel Pérez:** titular y aporta valor multiposición.
+- **Tchouameni y Oyarzabal:** intocables.
+
+---
+
+# 4. Mercado estudiado
+
+## Delanteros
+
+### Enes Ünal — mercado abierto
+
+- Precio de salida: **2.540.000 €**
+- Valor de mercado aproximado: **2.430.000 €**
+- Titularidad proyectada: 100 %, aunque con cierta cautela por sus últimas suplencias.
+- Próximo partido: Getafe-Sevilla, en casa.
+- Media actual: 3 puntos por partido.
+- No es un fichaje diferencial, pero sí una solución inmediata y disponible.
+
+**Oferta máxima recomendada:** **2.551.500 €**, equivalente al 105 % de su valor de mercado.  
+La salida actual de 2.540.000 € está dentro del límite.
+
+### Adrián Niño — objetivo prioritario de rival endeudado
+
+- Valor de mercado: **3.790.000 €**
+- Titularidad proyectada: 100 %
+- 44 puntos en 10 jornadas y 4 goles.
+- Está creciendo 100.000 €/día.
+- Es el mejor perfil deportivo del mercado analizado.
+- Pertenece a un rival endeudado, pero **no está actualmente en venta**, por lo que no se puede contar con él para mañana.
+
+**Oferta máxima recomendada:** **3.979.500 €**.  
+No superar el 105 % de su VM. Si el rival acepta una venta directa alrededor de 3,8-3,95 M€, sería nuestra operación preferente.
+
+### Thiago Fernández — alternativa especulativa
+
+- Valor de mercado: **1.540.000 €**
+- Titularidad proyectada: 100 %
+- Sube 110.000 €/día.
+- 36 puntos y buena producción por 90 minutos.
+- Pertenece a un rival endeudado, pero tampoco está anunciado en venta.
+
+**Oferta máxima:** **1.617.000 €**.  
+Buena oportunidad de crecimiento, pero su próximo rival es el Atlético y su producción es menos segura que la de Adrián Niño.
+
+### Larrubia — descartar
+
+- Titularidad proyectada: 100 %, pero caída de valor sostenida.
+- Puntuación deportiva aceptable, aunque con tendencia patrimonial negativa.
+- Precio de salida: 3.610.000 €, ligeramente por encima del máximo razonable del 105 %.
+
+**Decisión:** no pujar por encima de 3.591.000 €. La recomendación operativa es pasar.
+
+### Cepeda — no prioritario
+
+- Tiene buenos puntos por minuto, pero su titularidad no es estable.
+- Su crecimiento se ha frenado y se encuentra cerca de techo de mercado.
+- No resuelve de forma tan clara el problema del segundo delantero.
+
+---
+
+## Porteros
+
+### Adrián Rodríguez — opción recomendada de cobertura
+
+- Precio: **150.000 €**
+- 0 % de titularidad, pero cumple la función de suplente barato.
+- Permite no depender exclusivamente de Remiro.
+
+### Rivero / Rubén Gómez
+
+- También cuestan aproximadamente 150.000-160.000 €.
+- No ofrecen una ventaja clara sobre Adrián Rodríguez.
+
+**Decisión:** fichar a **Adrián Rodríguez por 150.000 €** si se confirma que la compra no genera bloqueo perjudicial para la jornada.
+
+### Dituro — demasiado caro
+
+- Valor de mercado: 2.210.000 €
+- Titular y en buena dinámica de puntos.
+- Sin embargo, inmovilizar más de 2 M€ en un portero suplente no es eficiente cuando la prioridad es reforzar la delantera.
+
+---
+
+## Defensa
+
+### Drkusic — buena oportunidad de rotación
+
+- Precio de mercado: 950.000 €
+- Precio de salida: **740.000 €**
+- Titularidad proyectada: 100 %
+- Está subiendo 50.000 €/día.
+- Coste bajo para añadir un defensa con posibilidades de entrar en el once.
+
+**Oferta máxima recomendada:** **997.500 €**.  
+A 740.000 € es una operación atractiva, aunque secundaria frente al delantero.
+
+---
+
+# 5. Simulaciones realizadas
+
+## Plan conservador recomendado
+
+### Ventas
+
+- Borja Iglesias: +1.850.000 €
+- Marcos Fernández: +1.660.000 €
+
+**Ingresos totales:** 3.510.000 €
+
+### Compras
+
+- Enes Ünal: -2.540.000 €
+- Adrián Rodríguez: -150.000 €
+
+**Gasto total:** 2.690.000 €
+
+### Resultado
+
+- **Saldo final simulado:** 15.351.549 €
+- **Saldo positivo:** sí
+- **Efectivos por línea:**  
+  - GK: 1  
+  - DF: 6  
+  - MF: 6  
+  - FW: 4  
+
+La simulación es válida y mantiene la plantilla equilibrada. La cifra de GK aparece como una única línea agregada porque el simulador no refleja separadamente la cobertura del portero titular, pero la incorporación de Adrián Rodríguez cumple la función de suplente.
+
+---
+
+## Plan ampliado
+
+### Ventas
+
+- Borja Iglesias
+- Marcos Fernández
+
+### Compras
+
+- Enes Ünal
+- Adrián Rodríguez
+- Drkusic
+
+### Resultado
+
+- **Gasto total:** 3.430.000 €
+- **Saldo final simulado:** 14.611.549 €
+- **Efectivos:** 4 FW, 5 DF, 6 MF y 1 GK según el desglose del simulador.
+- Operación válida y en positivo.
+
+Drkusic mejora la profundidad defensiva, pero no es imprescindible para resolver la jornada.
+
+---
+
+## Limpieza máxima — no necesaria de momento
+
+Vender también:
+
+- Brahim
+- Calero
+
+Con Enes Ünal, Adrián Rodríguez y Drkusic:
+
+- **Ingresos por ventas:** 5.250.000 €
+- **Gasto en compras:** 3.430.000 €
+- **Saldo final:** 16.351.549 €
+- Efectivos: 3 FW, 5 DF, 6 MF y 1 GK.
+
+Este plan mejora la liquidez, pero deja la delantera con menos fondo de armario. Solo lo ejecutaría si se confirma posteriormente una incorporación como Adrián Niño o Thiago Fernández.
+
+---
+
+# Plan de acción ejecutivo
+
+## Ejecutar hoy
+
+1. **Vender Borja Iglesias.**
+2. **Vender Marcos Fernández.**
+3. **Fichar Enes Ünal por 2.540.000 €; no superar 2.551.500 €.**
+4. **Fichar Adrián Rodríguez por 150.000 €.**
+5. Ajustar el once para que Enes Ünal sea la primera alternativa a Oyarzabal, sujeto a las últimas alineaciones confirmadas.
+
+## Ejecutar solo si queda liquidez de mercado y no altera el once
+
+6. **Fichar Drkusic por 740.000 €; máximo 997.500 €.**
+7. Vender Calero si se necesita liberar una plaza, pero no es obligatorio.
+
+## Negociación paralela con rivales endeudados
+
+8. Contactar por **Adrián Niño** con oferta máxima de **3.979.500 €**.
+9. Si no acepta o exige más, mantener el plan Enes Ünal.
+10. No pagar más de **1.617.000 € por Thiago Fernández** como alternativa de inversión.
+11. No pujar por Larrubia por encima de 3.591.000 €.
+
+## Decisión final
+
+La operación mínima y equilibrada es:
+
+> **Vender Borja Iglesias y Marcos Fernández; fichar Enes Ünal y Adrián Rodríguez.**
+
+No existe deuda actualmente, el saldo final queda por encima de 15,3 M€, se cubre el portero suplente y se soluciona la principal debilidad del once sin desmontar la plantilla.

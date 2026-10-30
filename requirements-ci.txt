@@ -1,0 +1,19 @@
+# Minimal dependencies for CI (GitHub Actions).
+# The root requirements.txt was exported from a local desktop environment and
+# contains system packages (dbus-python, pycups, wxPython...) that cannot be
+# installed by pip on a CI runner. This file contains only what the agent needs.
+
+pandas
+numpy
+requests
+pydantic
+python-dotenv
+python-dateutil
+thefuzz
+feedparser
+beautifulsoup4
+jinja2
+openai
+langgraph
+openpyxl
+tabulate

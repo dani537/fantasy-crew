@@ -1,0 +1,65 @@
+name: Daily Biwenger Market & League Tracker
+
+on:
+  # Disparador externo vía cron-job / API (cero retraso)
+  repository_dispatch:
+    types: [run-market-tracker, daily-market-capture]
+  # Disparador manual con botón desde la interfaz de GitHub
+  workflow_dispatch:
+  # Desactivado cron interno de GitHub para evitar ejecuciones duplicadas
+  # schedule:
+  #   - cron: '15 5 * * *'  # 05:15 UTC = 07:15 Madrid
+
+permissions:
+  contents: read
+
+jobs:
+  daily-market-capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+            python-version: '3.10'
+            cache: 'pip'
+
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🚀 Run Daily Extraction, Tracker & Predictions (Google Sheets Sync)
+        env:
+          PYTHONUNBUFFERED: "1"
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SERVICE_ACCOUNT_FILE: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_FILE }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          GOOGLE_SHEET_ID_MARKET: ${{ secrets.GOOGLE_SHEET_ID_MARKET || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          BIWENGER_TOKEN: ${{ secrets.BIWENGER_TOKEN }}
+          BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
+          BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
+          BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID }}
+          BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          # 1. Update general league context, incremental movements, rival finances & save session cache
+          python -u -m src.tools.data_extraction.runner
+
+          # 2. Update all historical tables (Rounds, Lineups, Bids, Daily Manager Snapshots, Market History, Comuniate)
+          python -u -m src.tools.data_extraction.historical_backfill --comuniate-history
+
+          # 3. Run master 40-dimensional market tracker (appends to Historico_Continuo using Warehouse + safe API quota)
+          python -u src/tools/data_extraction/daily_market_tracker.py
+
+          # 4. Train predictive ML model & sync Predicciones_IA
+          python -u test/05_market_prediction/run.py --sync-sheets || true
+
+          # 5. Run Fantasy Champion Autonomous Strategy Engine (Autopilot SEMI_AUTO / Friday Solvency)
+          python -u -m src.tools.strategy_engine.autopilot --mode SEMI_AUTO || true

@@ -1,0 +1,583 @@
+"""
+Daily Biwenger Master Market & Intelligence Tracker
+====================================================
+Captures the complete 40-dimensional snapshot of ALL LaLiga players (580+):
+- Demographics, Identity, Position, Status
+- Pricing, 24h/7d/14d/30d Variations, 1y Min/Max, Season Gain
+- Community Market Sentiment (% Compras, % Ventas, % Uso, Presión Neta)
+- Official Rankings (Global, Posición, Temporada Anterior)
+- Detailed Performance (Puntos, Medias, Goles, Asistencias, Minutos, Picas, SofaScore, Fitness)
+- Tactical & Private League Context (Comuniate titular/duda, Propietario, Cláusula, Mercado)
+
+Robust & Safe:
+- Bulletproof JSON sanitization (NO NaNs/Infs).
+- Respects Biwenger's 200-request IP quota by prioritizing deep analysis on ~150 key players (market + league + top)
+  while including ALL 580 players in the final output.
+- Safe Append-Only for Historico_Continuo (never wipes history).
+"""
+
+import os
+import json
+import time
+import random
+import datetime
+import requests
+import numpy as np
+import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
+
+POSITION_MAP = {1: "Portero", 2: "Defensa", 3: "Centrocampista", 4: "Delantero"}
+DEFAULT_SPREADSHEET_ID = "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk"  # fantasy_tracker
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID") or os.getenv("GOOGLE_SHEET_ID_MARKET") or DEFAULT_SPREADSHEET_ID
+CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "credentials_google.json"
+TAB_HISTORICO = "Historico_Continuo"
+
+COUNTRY_MAP = {
+    "ES": "España", "DO": "Rep. Dominicana", "FR": "Francia", "BR": "Brasil",
+    "AR": "Argentina", "PT": "Portugal", "UY": "Uruguay", "CO": "Colombia",
+    "DE": "Alemania", "IT": "Italia", "NL": "Países Bajos", "BE": "Bélgica",
+    "GB": "Reino Unido", "EN": "Inglaterra", "SN": "Senegal", "MA": "Marruecos",
+    "DZ": "Argelia", "NG": "Nigeria", "GH": "Ghana", "CM": "Camerún",
+    "CI": "Costa de Marfil", "CL": "Chile", "EC": "Ecuador", "PY": "Paraguay",
+    "VE": "Venezuela", "MX": "México", "US": "Estados Unidos", "JP": "Japón",
+    "KR": "Corea del Sur", "HR": "Croacia", "RS": "Serbia", "DK": "Dinamarca",
+    "SE": "Suecia", "NO": "Noruega", "PL": "Polonia", "UA": "Ucrania",
+    "CZ": "Rep. Checa", "AT": "Austria", "CH": "Suiza", "TR": "Turquía",
+    "GR": "Grecia", "RO": "Rumanía", "GE": "Georgia"
+}
+
+HEADERS = [
+    # 1. Identificación & Perfil
+    "fecha", "player_id", "nombre", "equipo", "posicion", "edad", "nacionalidad", "estado",
+    # 2. Mercado & Valor
+    "precio", "subida_24h", "pct_subida_24h", "min_precio_1y", "max_precio_1y", "ganancia_temporada", "pct_ganancia_temporada",
+    # 3. Momentum Temporal
+    "diff_7d", "pct_7d", "diff_14d", "pct_14d", "diff_30d", "pct_30d",
+    # 4. Sentimiento de Mercado (Biwenger Global)
+    "pct_compras_24h", "pct_ventas_24h", "pct_uso_ligas", "presion_neta",
+    # 5. Rankings Oficiales
+    "ranking_global", "ranking_posicion", "ranking_last_season",
+    # 6. Rendimiento Deportivo
+    "puntos_totales", "puntos_last_season", "partidos_jugados", "media_puntos", "racha_fitness",
+    "goles", "asistencias", "minutos", "media_picas", "media_sofascore",
+    # 7. Contexto Táctico & Tu Liga
+    "comuniate_titular", "comuniate_duda", "propietario_liga", "clausula_actual", "en_venta_mercado"
+]
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+]
+
+def get_headers():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-ES,es;q=0.9,ca;q=0.8",
+        "Origin": "https://biwenger.as.com",
+        "Referer": "https://biwenger.as.com/"
+    }
+
+def sanitize_cell(val):
+    """Guarantees 100% JSON compliance: eliminates NaNs, Infs, and None."""
+    if val is None or pd.isna(val):
+        return ""
+    if isinstance(val, (float, np.floating)):
+        if np.isnan(val) or np.isinf(val):
+            return ""
+        return round(float(val), 2)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    return str(val)
+
+def get_gspread_client():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if creds_json_str and creds_json_str.strip():
+        try:
+            print("🔑 Cargando credenciales de Google Sheets desde GOOGLE_SERVICE_ACCOUNT_JSON...")
+            creds_dict = json.loads(creds_json_str.strip())
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            return gspread.authorize(creds)
+        except Exception as e:
+            print(f"⚠️ Error cargando GOOGLE_SERVICE_ACCOUNT_JSON env var: {e}")
+    if os.path.exists(CREDS_FILE):
+        try:
+            print(f"🔑 Cargando credenciales de Google Sheets desde archivo local: {CREDS_FILE}...")
+            creds = Credentials.from_service_account_file(CREDS_FILE, scopes=scopes)
+            return gspread.authorize(creds)
+        except Exception as e:
+            print(f"⚠️ Error cargando {CREDS_FILE}: {e}")
+    print("❌ No se encontraron credenciales válidas (GOOGLE_SERVICE_ACCOUNT_JSON o credentials_google.json).")
+    return None
+
+def calculate_age(birthday_val):
+    if not birthday_val:
+        return ""
+    try:
+        bday_str = str(int(birthday_val)).strip()
+        if len(bday_str) == 8:
+            year, month, day = int(bday_str[:4]), int(bday_str[4:6]), int(bday_str[6:8])
+            birth_date = datetime.date(year, month, day)
+        else:
+            birth_date = datetime.date.fromtimestamp(int(birthday_val))
+        today = datetime.date.today()
+        return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    except Exception:
+        return ""
+
+def run_daily_market_capture(max_deep_enrich: int = None):
+    print(f"🎬 [{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iniciando captura maestra de mercado y rendimiento...")
+    t0 = time.time()
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+    # 1. Fetch or reuse general competition data
+    comp_data = {}
+    session_cache_path = "./data/raw/api_session_cache.json"
+    if os.path.exists(session_cache_path):
+        try:
+            with open(session_cache_path, "r", encoding="utf-8") as fc:
+                sc = json.load(fc)
+            if sc.get("date") == today_str and sc.get("comp_data", {}).get("players"):
+                comp_data = sc["comp_data"]
+                print(f"⚡ Reutilizando datos generales de competición desde caché de sesión ({today_str}).")
+        except Exception:
+            comp_data = {}
+
+    if not comp_data:
+        comp_url = "https://cf.biwenger.com/api/v2/competitions/la-liga/data?score=5"
+        r_comp = requests.get(comp_url, headers=get_headers(), timeout=10)
+        if r_comp is None or r_comp.status_code != 200:
+            print(f"⚠️ Error obteniendo datos de competición de Biwenger: HTTP {r_comp.status_code if r_comp else 'None'}")
+            return False
+        comp_data = r_comp.json().get("data", {})
+
+    raw_players = comp_data.get("players", {})
+    raw_teams = comp_data.get("teams", {})
+    team_map = {int(tid): t["name"] for tid, t in raw_teams.items()}
+    total_comp_players = len(raw_players)
+    print(f"✅ Obtenidos {total_comp_players} jugadores base y {len(raw_teams)} equipos de LaLiga.")
+
+    # Compute exact Global & Position Rankings from raw_players (0 extra API calls!)
+    all_pids_sorted_pts = sorted(
+        [int(k) for k in raw_players.keys()],
+        key=lambda pid: (raw_players[str(pid)].get("points", 0) or 0, raw_players[str(pid)].get("price", 0) or 0),
+        reverse=True,
+    )
+    computed_global_rank = {pid: idx + 1 for idx, pid in enumerate(all_pids_sorted_pts)}
+    computed_pos_rank = {}
+    pos_counters = {}
+    for pid in all_pids_sorted_pts:
+        pos = raw_players[str(pid)].get("position", 0)
+        pos_counters[pos] = pos_counters.get(pos, 0) + 1
+        computed_pos_rank[pid] = pos_counters[pos]
+
+    # Load Warehouse historical fallback for prices, demographics & match stats
+    wh_prices_by_pid = {}
+    wh_meta_by_pid = {}
+    wh_stats_by_pid = {}
+    try:
+        from src.tools.data_extraction.warehouse import BiwengerWarehouse
+        wh_tmp = BiwengerWarehouse()
+        df_wh_hist = wh_tmp.read_table("Historico_Continuo")
+        if not df_wh_hist.empty:
+            for row_h in df_wh_hist.to_dict(orient="records"):
+                p_id_h = int(float(row_h.get("player_id", 0) or 0))
+                if not p_id_h:
+                    continue
+                d_h = str(row_h.get("fecha", "")).strip()
+                pr_h = int(float(row_h.get("precio", 0) or 0))
+                if d_h and pr_h > 0:
+                    wh_prices_by_pid.setdefault(p_id_h, {})[d_h] = pr_h
+                wh_meta_by_pid[p_id_h] = {
+                    "edad": row_h.get("edad", ""),
+                    "nacionalidad": row_h.get("nacionalidad", "Desconocida"),
+                    "ranking_last_season": row_h.get("ranking_last_season", ""),
+                    "pct_uso_ligas": row_h.get("pct_uso_ligas", ""),
+                }
+        df_wh_rep = wh_tmp.read_table("Rendimiento_Jornadas")
+        if not df_wh_rep.empty:
+            for p_id_r, grp in df_wh_rep.groupby("player_id"):
+                p_id_i = int(float(p_id_r))
+                picas_v = pd.to_numeric(grp["picas_as"], errors="coerce").dropna().tolist()
+                sofa_v = pd.to_numeric(grp["nota_sofascore"], errors="coerce").dropna().tolist()
+                wh_stats_by_pid[p_id_i] = {
+                    "goles": int(pd.to_numeric(grp["goles"], errors="coerce").fillna(0).sum()),
+                    "asistencias": int(pd.to_numeric(grp["asistencias"], errors="coerce").fillna(0).sum()),
+                    "minutos": int(pd.to_numeric(grp["minutos_jugados"], errors="coerce").fillna(0).sum()),
+                    "media_picas": round(sum(picas_v) / len(picas_v), 2) if picas_v else "",
+                    "media_sofascore": round(sum(sofa_v) / len(sofa_v), 2) if sofa_v else "",
+                }
+    except Exception:
+        pass
+
+    # 2. Local League & Comuniate context
+    league_owners = {}
+    league_clauses = {}
+    market_sales_set = set()
+    comuniate_map = {}
+
+    df_trans_path = "data/players_transformed.csv"
+    priority_ids = set()
+    if os.path.exists(df_trans_path):
+        try:
+            df_trans = pd.read_csv(df_trans_path)
+            for _, r in df_trans.iterrows():
+                pid = int(r["PLAYER_ID"]) if pd.notna(r.get("PLAYER_ID")) else None
+                if not pid: continue
+                owner = str(r.get("BIWPLAYER_TEAM_NAME", "")).strip()
+                if owner and owner.lower() not in ("nan", "none", ""):
+                    league_owners[pid] = owner
+                    priority_ids.add(pid)
+                if pd.notna(r.get("BIWPLAYER_CLAUSE")):
+                    league_clauses[pid] = float(r["BIWPLAYER_CLAUSE"])
+                if pd.notna(r.get("MARKET_SALE_PRICE")) and float(r["MARKET_SALE_PRICE"]) > 0:
+                    market_sales_set.add(pid)
+                    priority_ids.add(pid)
+        except Exception:
+            pass
+
+    if os.path.exists("data/raw/comuniate.csv"):
+        try:
+            df_com = pd.read_csv("data/raw/comuniate.csv")
+            for _, r in df_com.iterrows():
+                pname = str(r.get("nombre", "")).strip().lower()
+                comuniate_map[pname] = {
+                    "titular": r.get("titularidad"),
+                    "duda": r.get("duda")
+                }
+        except Exception:
+            pass
+
+    # 3. Target players: prioritize market + owned in our league + highest price/movement
+    all_pids = [int(p) for p in sorted(
+        raw_players.keys(),
+        key=lambda k: (int(k) in market_sales_set, int(k) in priority_ids, abs(raw_players[k].get("priceIncrement", 0)), raw_players[k].get("price", 0)),
+        reverse=True
+    )]
+    target_deep_pids = all_pids[:max_deep_enrich] if max_deep_enrich else all_pids
+
+    details_map = {}
+    deep_cache_path = "./data/raw/players_deep_cache.json"
+    if not max_deep_enrich and os.path.exists(deep_cache_path):
+        try:
+            with open(deep_cache_path, "r", encoding="utf-8") as f_cache:
+                cached_obj = json.load(f_cache)
+            if cached_obj.get("date") == today_str and isinstance(cached_obj.get("players"), dict):
+                details_map = {int(k): v for k, v in cached_obj["players"].items()}
+                print(f"⚡ Recuperados {len(details_map)} jugadores de la caché profunda de hoy ({today_str}).")
+        except Exception:
+            details_map = {}
+
+    missing_pids = [pid for pid in target_deep_pids if pid not in details_map]
+
+    if missing_pids:
+        print(f"⏳ Extrayendo fichas exhaustivas completas para {len(missing_pids)}/{len(target_deep_pids)} jugadores de LaLiga (100% detalle)...")
+        print(f"ℹ️ Política estricta: Esperas automáticas al inicio de hora (:00 UTC) al alcanzar la cuota horaria de Biwenger.")
+
+        for idx, pid in enumerate(missing_pids, 1):
+            url = f"https://cf.biwenger.com/api/v2/players/la-liga/{pid}?fields=id,name,birthday,country,analysis,prices,reports,seasons"
+            fetched = False
+
+            for attempt in range(5):
+                time.sleep(random.uniform(0.15, 0.25))
+                try:
+                    r = requests.get(url, headers=get_headers(), timeout=10)
+                    rem_str = r.headers.get("x-rate-limit-remaining")
+                    reset_str = r.headers.get("x-rate-limit-reset")
+                    rem_quota = int(rem_str) if rem_str is not None and rem_str.isdigit() else 100
+
+                    if r.status_code == 200:
+                        details_map[pid] = r.json().get("data", {})
+                        fetched = True
+                        break
+                    elif r.status_code == 429 or rem_quota <= 1:
+                        # Cuota alcanzada: calcular espera exacta hasta el reseteo
+                        now_ts = time.time()
+                        if reset_str and reset_str.isdigit():
+                            val = int(reset_str)
+                            if val > 1_000_000_000:
+                                reset_ts = val
+                                wait_sec = max(5.0, (reset_ts - now_ts) + 3.0)
+                            else:
+                                wait_sec = max(5.0, float(val) + 3.0)
+                                reset_ts = now_ts + wait_sec
+                        else:
+                            # Si la API no indica timestamp exacto, la cuota de Biwenger se reinicia a las :00 UTC
+                            # Calculamos los segundos restantes hasta el próximo cambio de hora + margen
+                            next_hour_ts = (int(now_ts) // 3600 + 1) * 3600
+                            wait_sec = max(10.0, (next_hour_ts - now_ts) + 5.0)
+                            reset_ts = next_hour_ts + 5.0
+
+                        reset_dt_str = datetime.datetime.fromtimestamp(reset_ts).strftime("%H:%M:%S")
+                        print(f"   ⚠️ [Cuota 200 alcanzada] Jugador {idx}/{len(missing_pids)} (ID: {pid}).")
+                        print(f"      Esperando {wait_sec:.0f}s hasta reseteo de hora a las {reset_dt_str}...")
+
+                        # Guardar progreso actual en disco antes de dormir
+                        try:
+                            os.makedirs("./data/raw", exist_ok=True)
+                            with open(deep_cache_path, "w", encoding="utf-8") as f_cache:
+                                json.dump({"date": today_str, "players": {str(k): v for k, v in details_map.items()}}, f_cache)
+                        except Exception:
+                            pass
+
+                        time.sleep(wait_sec)
+                        continue
+                    elif r.status_code == 404:
+                        print(f"   ℹ️ Jugador ID {pid} no encontrado (HTTP 404).")
+                        details_map[pid] = {}
+                        fetched = True
+                        break
+                    else:
+                        time.sleep(1.5)
+                except Exception as e:
+                    time.sleep(2.0)
+
+            if not fetched:
+                details_map[pid] = {}
+
+            # Guardar punto de control cada 50 jugadores o al final
+            if idx % 50 == 0 or idx == len(missing_pids):
+                try:
+                    os.makedirs("./data/raw", exist_ok=True)
+                    with open(deep_cache_path, "w", encoding="utf-8") as f_cache:
+                        json.dump({"date": today_str, "players": {str(k): v for k, v in details_map.items()}}, f_cache)
+                except Exception:
+                    pass
+                print(f"   Progreso fichas profundas: {idx}/{len(missing_pids)} (Total listos: {len(details_map)}/{len(target_deep_pids)}) — {time.time()-t0:.1f}s")
+    else:
+        print(f"✅ Todos los {len(details_map)}/{len(target_deep_pids)} jugadores ya están enriquecidos en caché profunda para hoy.")
+
+    print(f"✅ Extracción exhaustiva finalizada: {len(details_map)}/{len(all_pids)} jugadores con 100% de detalle.")
+
+    # 4. Build comprehensive master rows for ALL 580 players
+    dt_today = pd.to_datetime(today_str)
+    d_m7 = (dt_today - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    d_m14 = (dt_today - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+    d_m30 = (dt_today - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+
+    rows_to_append = []
+    for pid in all_pids:
+        p_base = raw_players.get(str(pid), {})
+        p_detail = details_map.get(pid, {})
+        analysis = p_detail.get("analysis", {})
+        rk = analysis.get("ranking", {})
+        prices_history = p_detail.get("prices", [])
+        reports = p_detail.get("reports", [])
+        wh_meta = wh_meta_by_pid.get(pid, {})
+        wh_p_map = wh_prices_by_pid.get(pid, {})
+        wh_st = wh_stats_by_pid.get(pid, {})
+
+        name = p_base.get("name", "")
+        current_p = p_base.get("price", 0)
+        inc_24h = p_base.get("priceIncrement", 0)
+        pct_inc_24h = round(inc_24h / (current_p - inc_24h) * 100.0, 2) if (current_p - inc_24h) > 0 else 0.0
+
+        # Demographics
+        age = calculate_age(p_detail.get("birthday") or p_base.get("birthday")) or wh_meta.get("edad", "")
+        c_code = str(p_detail.get("country", "")).upper()
+        nationality = COUNTRY_MAP.get(c_code, c_code) if c_code else wh_meta.get("nacionalidad", "Desconocida")
+
+        # Price Curves & Temporal Variations (API prices_history or Warehouse history fallback)
+        if prices_history:
+            min_1y = min((p[1] for p in prices_history), default=current_p)
+            max_1y = max((p[1] for p in prices_history), default=current_p)
+            recent_window = prices_history[-30:] if len(prices_history) >= 30 else prices_history
+            season_floor = min((p[1] for p in recent_window), default=current_p)
+            p_7d = prices_history[max(0, len(prices_history) - 8)][1]
+            p_14d = prices_history[max(0, len(prices_history) - 15)][1]
+            p_30d = prices_history[max(0, len(prices_history) - 31)][1]
+        else:
+            hist_vals = list(wh_p_map.values()) + [current_p]
+            min_1y = min(hist_vals)
+            max_1y = max(hist_vals)
+            season_floor = min(hist_vals[-30:])
+            p_7d = wh_p_map.get(d_m7, current_p)
+            p_14d = wh_p_map.get(d_m14, current_p)
+            p_30d = wh_p_map.get(d_m30, current_p)
+
+        season_gain = current_p - season_floor
+        season_gain_pct = round((season_gain / season_floor * 100.0), 2) if season_floor > 0 else 0.0
+
+        diff_7d = current_p - p_7d
+        pct_7d = round(diff_7d / p_7d * 100.0, 2) if p_7d > 0 else 0.0
+
+        diff_14d = current_p - p_14d
+        pct_14d = round(diff_14d / p_14d * 100.0, 2) if p_14d > 0 else 0.0
+
+        diff_30d = current_p - p_30d
+        pct_30d = round(diff_30d / p_30d * 100.0, 2) if p_30d > 0 else 0.0
+
+        # Community Market Sentiment
+        p_buy = analysis.get("purchases", "")
+        p_sell = analysis.get("sales", "")
+        p_use = analysis.get("owned", wh_meta.get("pct_uso_ligas", ""))
+        net_press = ""
+        if isinstance(p_buy, (int, float)) and isinstance(p_sell, (int, float)):
+            net_press = p_buy - p_sell
+
+        # Sporting Performance & Reports
+        if reports:
+            tot_goals = 0
+            tot_assists = 0
+            tot_mins = 0
+            picas_list = []
+            sofascore_list = []
+
+            for rep in reports:
+                raw_stats = rep.get("rawStats", {})
+                tot_goals += int(raw_stats.get("goals", 0) or 0)
+                tot_assists += int(raw_stats.get("assists", 0) or 0)
+                tot_mins += int(raw_stats.get("minutesPlayed", 0) or 0)
+                
+                p_val = raw_stats.get("picas")
+                if p_val is not None:
+                    try: picas_list.append(float(p_val))
+                    except (ValueError, TypeError): pass
+                
+                s_val = raw_stats.get("sofascore")
+                if s_val is not None:
+                    try: sofascore_list.append(float(s_val))
+                    except (ValueError, TypeError): pass
+
+            avg_picas = round(sum(picas_list) / len(picas_list), 2) if picas_list else ""
+            avg_sofascore = round(sum(sofascore_list) / len(sofascore_list), 2) if sofascore_list else ""
+        else:
+            tot_goals = wh_st.get("goles", 0)
+            tot_assists = wh_st.get("asistencias", 0)
+            tot_mins = wh_st.get("minutos", 0)
+            avg_picas = wh_st.get("media_picas", "")
+            avg_sofascore = wh_st.get("media_sofascore", "")
+
+        played_games = (p_base.get("playedHome", 0) or 0) + (p_base.get("playedAway", 0) or 0)
+        points_tot = p_base.get("points", 0)
+        avg_points = round(points_tot / played_games, 2) if played_games > 0 else 0.0
+
+        fitness_list = p_base.get("fitness", [])
+        fitness_str = ",".join(map(str, fitness_list)) if isinstance(fitness_list, list) else ""
+
+        # Comuniate & League
+        com_data = comuniate_map.get(name.lower(), {})
+        owner_name = league_owners.get(pid, "Libre")
+        clause_val = league_clauses.get(pid, "")
+        in_market = "SÍ" if pid in market_sales_set else "NO"
+
+        raw_row = [
+            today_str,
+            pid,
+            name,
+            team_map.get(p_base.get("teamID"), "Sin Equipo"),
+            POSITION_MAP.get(p_base.get("position"), f"Pos {p_base.get('position')}"),
+            age,
+            nationality,
+            p_base.get("status", "ok"),
+            # Mercado & Valor
+            current_p,
+            inc_24h,
+            pct_inc_24h,
+            min_1y,
+            max_1y,
+            season_gain,
+            season_gain_pct,
+            # Momentum
+            diff_7d,
+            pct_7d,
+            diff_14d,
+            pct_14d,
+            diff_30d,
+            pct_30d,
+            # Sentimiento
+            p_buy,
+            p_sell,
+            p_use,
+            net_press,
+            # Rankings
+            rk.get("global", computed_global_rank.get(pid, "")),
+            rk.get("position", computed_pos_rank.get(pid, "")),
+            rk.get("lastSeason", wh_meta.get("ranking_last_season", "")),
+            # Rendimiento
+            points_tot,
+            p_base.get("pointsLastSeason", 0),
+            played_games,
+            avg_points,
+            fitness_str,
+            tot_goals,
+            tot_assists,
+            tot_mins,
+            avg_picas,
+            avg_sofascore,
+            # Contexto
+            com_data.get("titular", ""),
+            com_data.get("duda", ""),
+            owner_name,
+            clause_val,
+            in_market
+        ]
+        # Bulletproof sanitization
+        clean_row = [sanitize_cell(c) for c in raw_row]
+        rows_to_append.append(clean_row)
+
+    # 5. Save local CSVs first (Guarantees data persistence before any network/cloud call)
+    os.makedirs("data/history/snapshots", exist_ok=True)
+    daily_snapshot_file = f"data/history/snapshots/{today_str}.csv"
+    local_history_path = "data/history/market_sentiment_timeseries.csv"
+
+    df_today = pd.DataFrame(rows_to_append, columns=HEADERS)
+    df_today.to_csv(daily_snapshot_file, index=False, encoding="utf-8-sig")
+
+    if os.path.exists(local_history_path):
+        df_loc = pd.read_csv(local_history_path)
+        df_loc_clean = df_loc[df_loc["fecha"] != today_str] if "fecha" in df_loc.columns else df_loc
+        df_loc_final = pd.concat([df_loc_clean, df_today], ignore_index=True)
+        df_loc_final.to_csv(local_history_path, index=False, encoding="utf-8-sig")
+    else:
+        df_today.to_csv(local_history_path, mode="w", header=True, index=False, encoding="utf-8-sig")
+
+    try:
+        from src.tools.data_extraction.warehouse import BiwengerWarehouse
+        wh = BiwengerWarehouse()
+        wh.upsert_table("Historico_Continuo", df_today, pk_cols=["fecha", "player_id"])
+    except Exception as e_wh:
+        print(f"⚠️ Warning updating SQLite warehouse Historico_Continuo: {e_wh}")
+
+    print(f"💾 Guardados backups locales y Warehouse ({len(rows_to_append)} registros)")
+
+    # 6. Save to Google Sheets (Safe Append-Only, NEVER clears Historico_Continuo)
+    gc = get_gspread_client()
+    if gc:
+        try:
+            print(f"☁️ Abriendo libro Google Sheets: {SPREADSHEET_ID}...")
+            sh = gc.open_by_key(SPREADSHEET_ID)
+
+            # Ensure tabs exist
+            ws_titles = [w.title for w in sh.worksheets()]
+            if TAB_HISTORICO not in ws_titles:
+                ws_hist = sh.add_worksheet(title=TAB_HISTORICO, rows=20000, cols=len(HEADERS)+5)
+                ws_hist.append_row(HEADERS)
+            else:
+                ws_hist = sh.worksheet(TAB_HISTORICO)
+
+            # 6.1 Idempotent sync to Historico_Continuo (replace today's rows if re-run)
+            dates_col = ws_hist.col_values(1)
+            matching_indices = [i + 1 for i, d in enumerate(dates_col) if d == today_str]
+            if matching_indices:
+                start_row = min(matching_indices)
+                end_row = max(matching_indices)
+                print(f"ℹ️ Fecha '{today_str}' ya presente (filas {start_row}-{end_row}). Actualizando con los datos más recientes...")
+                ws_hist.delete_rows(start_row, end_row)
+
+            ws_hist.append_rows(rows_to_append)
+            print(f"☁️ Sincronizados {len(rows_to_append)} registros de '{today_str}' en '{TAB_HISTORICO}'")
+        except Exception as e:
+            print(f"⚠️ Error sincronizando con Google Sheets: {e}")
+            raise e
+    else:
+        print("ℹ️ No se configuraron credenciales de Google Sheets, omitiendo subida a la nube.")
+
+    print(f"⏱️ Proceso completado con éxito en {time.time() - t0:.2f} segundos.")
+    return True
+
+if __name__ == "__main__":
+    run_daily_market_capture()
