@@ -348,11 +348,7 @@ class PortfolioOptimizer:
             current_cash=current_cash,
             must_be_solvent=False,
         )
-        core_xi_ids = {
-            s["player_id"]
-            for s in base_milp["lineup_slots"]
-            if s["xp"] >= 4.2
-        }
+        core_xi_ids = {s["player_id"] for s in base_milp["lineup_slots"]}
 
         # Step 1: Immediate Profit-Taking (+3.5%..+5% Computer Offer on Plateau) & Toxic Stop-Loss
         routine_sales: List[Dict[str, Any]] = []
