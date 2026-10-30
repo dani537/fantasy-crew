@@ -35,7 +35,7 @@ ENDPOINTS_VERIFIED: Dict[str, bool] = {
     "place_bid": False,
     "list_player": False,
     "unlist_player": False,
-    "accept_offer": False,
+    "accept_offer": True,        # Verified live on 2026-10-30
     "pay_clause": False,
     "raise_clause": False,
 }
