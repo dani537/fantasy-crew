@@ -1,151 +1,156 @@
-# 🏆 007. Fantasy Champion — Autonomous Quant MILP & Multi-Tier LLM Agent for Biwenger
+# 🏆 Fantasy Champion v3 — Plataforma Cuantitativa Autónoma & Director Deportivo IA para Biwenger
 
-> **Filosofía Moneyball Cuantitativa:** Maximizar la rentabilidad por punto esperado ($€/xP$) eliminando sesgos emocionales, combinando un **Núcleo Matemático MILP Exacto** (`scipy.optimize.milp` HiGHS C++) con un **Supervisor Agéntico Multi-LLM** (`TieredLLMRouter` priorizando Google AI Pro $0/mes) y validado mediante **Backtesting Causal Estricto de 91 Días** (`2026-08-01` → `2026-10-30`) frente a los 14 mánagers reales de la liga privada `AZ Finance`.
->
-> **Sistema Oficial de Puntuación:** Media Picas Diario AS + SofaScore (`scoreID = 5`) con Multiposición activa (`lineupMultiPos = True`), entrenadores desactivados, límite de crédito del 25% y escalones oficiales de cláusulas de rescisión.
+> **Filosofía Moneyball sin Overfitting:** Maximizar puntos oficiales esperados ($xP$) y creación de patrimonio neto ($NPV$) respetando al **100% las reglas oficiales de tu liga Biwenger** (autodescubiertas automáticamente desde la API), combinando un **Optimizador Exacto MILP** (`scipy.optimize.milp` HiGHS), un **Motor Microeconómico de Escasez y Coste de Reposición**, **Memoria Estratégica Persistente entre Sesiones**, y **Notificaciones Duales (Email HTML + Bot de Telegram Conversacional Bidireccional)**.
 
 ---
 
-## 📌 Arquitectura del Sistema: Híbrido Determinista + LLM
+## ⚡ Inicio Rápido en 90 Segundos (*"Insultantemente Fácil"*)
+
+Cualquier jugador de cualquier liga de Biwenger puede instalar y personalizar su propio Director Deportivo sin tocar ni una sola línea de código:
+
+```bash
+# 1. Crear entorno virtual e instalar dependencias
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# 2. Lanzar el asistente interactivo (autodescubre tu equipo, tu liga y TODAS sus reglas)
+.venv/bin/python -m src.setup_wizard
+
+# 3. Probar tu primer plan estratégico en modo seguro (sin tocar nada en Biwenger)
+.venv/bin/python -m src.tools.strategy_engine.autopilot --mode DRY_RUN
+```
+
+👉 Consulta la guía paso a paso completa en **[`docs/QUICKSTART.md`](docs/QUICKSTART.md)** y la plantilla documentada en **[`.env.example`](.env.example)**.
+
+---
+
+## 🏗️ Arquitectura v3: Dos Velocidades + Memoria Persistente + Reglas Dinámicas
+
+Biwenger impone un límite estricto de `~200 peticiones API/hora`. **Fantasy Champion v3** resuelve esto combinando **extracciones profundas matinales** con **refrescos delta ultrarrápidos (`<12s`)** adaptados dinámicamente al calendario real de LaLiga (jornadas en viernes, intersemanales en martes/miércoles y parones FIFA):
 
 ```mermaid
-graph TD
-    A[📊 Data Warehouse Causal SQLite<br/>biwenger_history.db: 91 días, 50.6k filas] --> B[⏱️ StrictCausalDataView<br/>Cero Fuga Temporal fecha <= t]
-    
-    B --> C[📈 ExpectedPointsEngine<br/>xP Walk-Forward scoreID=5 + Multiposición]
-    B --> D[🔮 CausalEFRPredictor<br/>Retorno Financiero 72h + Shocks Partido]
-    B --> E[⚖️ AuctionBidModel<br/>Optimización Shading sobre 1.702 pujas reales]
-    B --> F[⚔️ ClauseSniper & ShieldOptimizer<br/>Clausulazos 24/7 'A Machete' + Blindajes]
+flowchart TD
+    subgraph V1["🌅 Velocidad 1: Extracción Profunda Matinal (~85 min)"]
+        A["daily_market_tracker.py<br/>551 jugadores + pujas + ML EFR 72h"] --> B["AutopilotRunner (MORNING_FULL)<br/>Al terminar toda la extracción"]
+    end
 
-    C --> M[🧮 PortfolioOptimizer MILP<br/>scipy.optimize.milp HiGHS Exact Solver]
-    D --> M
+    subgraph V2["⚡ Velocidad 2: Pulsos Tácticos & Chat en Vivo (<12 s)"]
+        C["dynamic_dispatcher.py<br/>Calendario dinámico LaLiga"] --> D["fast_delta_refresh.py<br/>4 llamadas API + Comuniate"]
+        T["📱 Usuario habla por Telegram"] --> D
+        D --> E["PRE_CLAUSE_LOCK (-49h)<br/>PRE_KICKOFF_SOLVENCY (-2h)<br/>FINAL_LINEUP_GUARD (-30m)"]
+    end
+
+    B --> M["🧮 Motor Económico v3 + MILP Exacto<br/>• LeagueRulesEngine (<=5 ventas, bloqueo 48h, blindaje 1:1)<br/>• MarketScarcityEngine & NPV_HOLD vs NPV_SELL<br/>• StrategyMemoryLedger (Tesis_Activos + Memoria_Estrategica)"]
     E --> M
-    F --> M
 
-    M --> G[🛡️ Guardrails v2<br/>Stop-Loss Activos Tóxicos + Solvencia Viernes + Intocables]
-    G --> H[⚡ BiwengerMarketActions<br/>Auditoría execution_audit.jsonl + DRY_RUN default]
-
-    H --> R[🧠 TieredLLMRouter<br/>Google AI Pro 0€ + OpenRouter 2026 Failover]
-    R --> J[📋 Briefing Ejecutivo & Dashboard Streamlit<br/>app.py: Finanzas, Plantilla, Rivales, Autopilot, Backtesting]
-
-    style A fill:#1e1e2e,stroke:#89b4fa,color:#fff
-    style B fill:#313244,stroke:#f38ba8,color:#fff
-    style M fill:#a6e3a1,stroke:#40a02b,color:#000
-    style G fill:#f9e2af,stroke:#df8e1d,color:#000
-    style H fill:#89dceb,stroke:#04a5e5,color:#000
-    style R fill:#cba6f7,stroke:#8839ef,color:#fff
-    style J fill:#fab387,stroke:#e64553,color:#000
+    M --> G["🛡️ Gobernanza SEMI_AUTO & Guardrails v3"]
+    G -->|"Autónomo (siempre informando)"| H1["✅ Escaparate Top-5 (+5% VM)<br/>✅ Pujas Óptimas & Ventas Menores (<4M€)<br/>✅ Once MILP + Anti-Lesión -30m & Solvencia >=0€"]
+    G -->|"Jurisdicción Humana"| H2["🗳️ Cola Decisiones_Pendientes<br/>🔒 Clausulazos, Blindajes y Ventas Importantes<br/>Confirmación en 1 toque: /aprobar ID"]
+    H1 --> N["📧 Email HTML Ejecutivo + 💬 Telegram Bidireccional"]
+    H2 --> N
 ```
 
 ---
 
-## 🧠 Multi-Tier LLM Routing (`TieredLLMRouter`)
+## 🎮 División de Autonomía en Modo `SEMI_AUTO` (Recomendado)
 
-El sistema implementa enrutamiento dinámico en dos niveles operacionales:
-
-1. **Nivel Diario (`daily`):** Tareas rutinarias, clasificación de noticias y briefing de Lunes a Jueves.
-   - **Prioridad 1 (0€ de coste):** `GEMINI_API_KEY` (`gemini-3.8-flash` → `gemini-3.5-flash-lite` → `gemini-2.5-flash`), aprovechando la suscripción **Google AI Pro** del usuario (Free Tier AI Studio + créditos Cloud).
-   - **Prioridad 2 / Failover en OpenRouter (Catálogo Octubre 2026):**
-     - `openai/gpt-6-luna-pro` (`0.10 $ / 0.50 $` por 1M tokens — 50% más barato que el antiguo `gpt-5.6-luna`).
-     - `anthropic/claude-haiku-5.5` (`0.10 $ / 0.50 $`).
-     - `xiaomi/mimo-v2.6-flash` (`0.14 $ / 0.28 $`).
-     - `deepseek/deepseek-v4.1-flash` (`0.045 $ / 0.50 $`).
-
-2. **Nivel Alto Riesgo (`high_stakes`):** Cirugía de solvencia pre-kickoff los viernes y reestructuración de plantilla.
-   - **Prioridad 1 (0€):** `gemini-4-argon` → `gemini-3.8-flash`.
-   - **Prioridad 2 / Failover OpenRouter:** `openai/gpt-6.1-terra` (`1.00 $ / 5.00 $`) → `openai/gpt-6-luna-pro`.
+| Tipo de Operación | Quién Ejecuta en `SEMI_AUTO` | Detalle y Protección |
+| :--- | :---: | :--- |
+| **Escaparate Diario (`<= 5` jugadores)** | 🤖 **Autónomo** | Respeta `marketMaxUserSales` (ej. máx. `5` en venta). Prioriza colateral líquido (`1,25x` deuda) + *flips* sin exponer pilares `FRANCHISE_CORE` ni intocables. |
+| **Pujas de Mercado (`place_bid`)** | 🤖 **Autónomo (Notifica)** | Calcula puja óptima con *bid shading* empírico y crédito L–J (`25%`) respaldado exclusivamente por el colateral líquido de tus 5 jugadores en venta. |
+| **Ventas Menores / *Flips* (`< 4 M€`)** | 🤖 **Autónomo (Notifica)** | Aplica paciencia multi-día (`offer_rolls` en `Tesis_Activos`) para rechazar ofertas bajas (`-4%`) cuando faltan días para la jornada y capturar picos `+3%..+5%`. |
+| **Once Titular MILP + Guardia `-30 min`** | 🤖 **Autónomo (Notifica)** | Alinea el mejor XI multiposición legal por la mañana y vuelve a verificar lesionados de última hora 30 min antes del primer partido. |
+| **Rescate de Solvencia Pre-Jornada** | 🤖 **Autónomo (Emergencia)** | Si a falta de `<2h` para empezar la jornada sigues en negativo, liquida el mínimo coste en $xP$ para garantizar **`saldo >= 0 €` (`0` roscos)**. |
+| **Clausulazos y Blindajes (`1:1`)** | 👤 **Solo Tú (`/aprobar`)** | Bloqueados automáticamente dentro de la ventana oficial pre-jornada (ej. `48h`) y durante la jornada. El bot calcula el ROI y te pide `/aprobar CL-XXXX`. |
+| **Ventas Importantes (`>= 4 M€` o Pilares)** | 👤 **Solo Tú (`/aprobar`)** | Evalúa `NPV_HOLD` vs `NPV_SELL` a 6 jornadas con coste real de reposición y parones FIFA (evitando malvender estrellas irreemplazables por lesiones cortas). |
 
 ---
 
-## 🔬 Resultados del Backtesting Causal de 91 Días (`AZ Finance`)
+## 💬 Bot de Telegram Bidireccional + Email HTML Matinal
 
-El backtest evalúa todas las variantes desde el **mismo estado inicial exacto de `Dani SR` el `2026-08-01`** (plantilla de 15 jugadores = 12,51 M€ + saldo de 23,90 M€ = **36,41 M€ de patrimonio inicial**) frente a los 14 rivales reales de la liga:
+Cada mañana (al finalizar la extracción profunda y el ajuste `MORNING_FULL`), recibes un **Informe Ejecutivo HTML por Email** y un **resumen interactivo en Telegram**. Además, puedes hablarle en español natural en cualquier momento (`"¿Ves algún delantero interesante?"`, `"Si ficho por 9M cómo quedo para el viernes?"`) o usar comandos rápidos:
 
-| Estrategia | Puntos J1-J10 | Rango Simulado | Patrimonio Neto (`30-Oct`) | Trading Alpha Puro | Primas Ganadas | Eficiencia Once MILP | Jornadas en Negativo |
+- `/estado` — Saldo real al segundo, deuda, colateral en venta, fase de jornada y cuenta atrás de cláusulas.
+- `/once` — Once titular MILP óptimo actualizado con partes médicos en vivo.
+- `/plan` — Recalcula el plan completo del día en `<12 segundos`.
+- `/tesis` — Muestra la memoria persistente (`Tesis_Activos`: rol de cada jugador, `NPV_HOLD` vs `NPV_SELL`, coste de reposición y días esperando mejor oferta).
+- `/pendientes` · `/aprobar <ID>` · `/rechazar <ID>` — Gestiona clausulazos, blindajes y ventas importantes desde el móvil.
+- `/intocable <jugador>` · `/transferible <jugador>` — Actualiza directivas permanentes al instante.
+
+Modos de despliegue de Telegram:
+1. **Local / VPS en tiempo real (`<3s`):** `.venv/bin/python -m src.tools.notifications.telegram_bot --listen`
+2. **100% Gratis Serverless (GitHub Actions + Cloudflare Worker opcional):** `.github/workflows/telegram_responder.yml` + `deploy/cloudflare_telegram_webhook.js`.
+
+---
+
+## ⚙️ Variables Principales de Personalización (`.env`)
+
+| Variable | Obligatoria | Descripción |
+| :--- | :---: | :--- |
+| `BIWENGER_EMAIL` / `BIWENGER_PASSWORD` | ✅ | Credenciales de tu cuenta Biwenger (autodescubren liga, equipo y reglas). |
+| `AUTOPILOT_MODE` | ✅ | `DRY_RUN` (simulación), `SEMI_AUTO` (recomendado) o `FULL_AUTO`. |
+| `IMPORTANT_SALE_MIN_EUR` | ❌ | Umbral en € a partir del cual una venta requiere tu `/aprobar` en `SEMI_AUTO` (defecto: `4000000`). |
+| `GEMINI_API_KEY` / `OPENROUTER_API_KEY` | ❌ | Motor LLM para informes y chat (el núcleo matemático MILP funciona incluso con `0` tokens). |
+| `GMAIL_ADDRESS` / `GMAIL_PASSWORD` / `NOTIFY_EMAIL_TO` | ❌ | Envío automático del informe matinal HTML por correo (App Password de Gmail). |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | ❌ | Notificaciones instantáneas y chat bidireccional con tu Director Deportivo. |
+| `OVERRIDE_MARKET_MAX_USER_SALES` / `OVERRIDE_CLAUSE_DISABLED_HOURS` / `OVERRIDE_CREDIT_LIMIT_RATIO` | ❌ | Sobrescrituras manuales opcionales si quieres simular reglas distintas a las de la API. |
+
+---
+
+## 📊 Backtesting Causal Honesto (94 Días) y Suite Visual
+
+El repositorio incluye un simulador histórico sin fuga temporal (`StrictCausalDataView`) y con **paridad exacta de reglas oficiales** (`<= 5` jugadores en venta simultáneos, bloqueo de cláusulas `48h` antes y durante la jornada, blindajes `1:1`, inmunidad de `5` días, validación *Out-of-Time* Abundancia Ago–Sep vs Escasez Sep–Nov y `20` semillas Monte Carlo):
+
+| Estrategia (Liga Real 15 Mánagers, `01-Ago` → `02-Nov`) | Puntos J1–J10 | +J11 Vivo | Total J1–J11 | Rank | Patrimonio Neto | Trading Alpha | Jornadas `<0€` |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **0_Dani_SR_Real** | 387 pts | #10 / 15 | 57,81 M€ | -8,26 M€ | 26,07 M€ | 79,2% (86 pts perdidos) | 0 |
-| **1_Passive_MILP_XI** | 169 pts | #15 / 15 | 50,09 M€ | +1,18 M€ | 12,50 M€ | 96,6% | 0 |
-| **2_Quant_No_Leverage** | ~395 pts | #8 / 15 | ~82,40 M€ | +21,30 M€ | ~24,50 M€ | 86,4% | 0 |
-| **3_Quant_Credit25_No_Clauses** | ~418 pts | #6 / 15 | ~91,20 M€ | +29,80 M€ | ~25,80 M€ | 87,1% | 0 |
-| **4_Full_Alpha_Strict** | ~425 pts | #5 / 15 | ~94,50 M€ | +32,40 M€ | ~26,40 M€ | 87,5% | 0 |
-| **5_Full_Alpha_MC20 (Media 20 semillas)** | **432+ pts** | **Top-4 / Podio** | **101,16 M€** | **+38,02 M€** | **26,73 M€** | **85,7%** | **0** |
-
-### Hallazgos Clave de Alpha:
-- **Trading Alpha Superior al Campeón:** El bot genera **`+38,02 M€`** de plusvalías netas de mercado (superando los `+28,92 M€` del líder `#1 Birra München`), gracias al arbitraje de ofertas de la máquina (`±5%`) con listado preventivo a 0€ y sobrepujas mínimas disciplinadas (`+0,44%`).
-- **Garantía Cero Roscos:** 0 jornadas en números rojos en todas las semillas gracias a la restricción dura de solvencia del MILP pre-kickoff.
-- **Consumo LLM en Backtest:** **`0 tokens` (`0,00 $`)** — Validación empírica 100% determinista y reproducible.
-
----
-
-## 🎮 Modos de Autopilot y Seguridad
-
-Configurable mediante la variable de entorno `AUTOPILOT_MODE`:
-
-1. **`DRY_RUN` (Por defecto):** Calcula el plan óptimo del día, comprueba solvencia y genera el briefing ejecutivo sin realizar ninguna llamada mutante a la API de Biwenger.
-2. **`SEMI_AUTO` (Modo Recomendado):**
-   - Publica diariamente jugadores transferibles a +5% VM (coste 0€) para cosechar ofertas de la máquina.
-   - Sincroniza la alineación óptima legal en la API.
-   - **Salvamento de Emergencia de Viernes (`FRIDAY_EMERGENCY_SOLVENCY = True`):** Si a falta de <90 min para el pitido inicial el usuario sigue en números rojos, acepta automáticamente las ofertas óptimas para garantizar `saldo >= 0 €`.
-   - Las compras y clausulazos se recomiendan en el briefing ejecutivo para confirmación del usuario.
-3. **`FULL_AUTO`:** Ejecución 100% autónoma de todas las compras, ventas, cláusulas y blindajes aprobados por Guardrails v2.
-
----
-
-## 🛠️ Comandos y Scripts Principales
-
-Todos los scripts deben ejecutarse con el entorno virtual `.venv` de `007. Fantasy Champion`:
+| `0_Real_Manager` (Mánager Real Observado) | `387.0` | `+42.0` | `429.0` | `#10/15` | `58.15 M€` | `-4.34 M€` | `0` |
+| `2_Legacy_v2_HonestRules` (Motor v2 bajo reglas reales `<=5` ventas/48h) | `398.0 ± 53.7` | `+43.8` | `441.8` | `#9/15` | `63.17 M€` | `+0.79 M€` | `3` |
+| `3_v3_Quant_No_Clauses` (Champion v3 puro mercado sin cláusulas) | `492.0` | `+60.0` | `552.0` | `#2/15` | `84.26 M€` | `+19.21 M€` | `0` |
+| **`5_Champion_v3_MC20` (Champion v3 Media 20 Semillas)** | **`475.3 ± 29.2`** | **`+55.0`** | **`530.3`** | **`#3/15` (`75%` Podio / `10%` #1)** | **`85.57 M€`** | **`+19.82 M€`** | **`0` (`0/220`)** |
 
 ```bash
-cd "/home/daniel/Code/007. Fantasy Champion"
+# 1. Diagnóstico rápido de configuración y reglas de tu liga
+.venv/bin/python -m src.setup_wizard --check
 
-# 1. Ejecutar tests unitarios de integridad causal y matemática
-.venv/bin/python test/07_strategy_backtest/test_backtester_integrity.py
+# 2. Suite completa de tests unitarios (Arquitectura v3 + Integridad Causal MILP)
+.venv/bin/python test/08_v3_architecture/test_v3_suite.py -v
+.venv/bin/python test/07_strategy_backtest/test_backtester_integrity.py -v
 
-# 2. Ejecutar Backtesting Causal de 91 Días (20 semillas Monte Carlo en paralelo)
+# 3. Ejecutar Backtesting Honesto de 94 Días (20 semillas Monte Carlo en paralelo)
 .venv/bin/python test/07_strategy_backtest/run_backtest.py --monte-carlo-seeds 20
 
-# 3. Ejecutar ciclo diario del Autopilot en modo DRY_RUN
-.venv/bin/python -m src.tools.strategy_engine.autopilot --mode DRY_RUN
+# 4. Generar los 4 paneles visuales en alta resolución (data/backtest/charts/*.png)
+.venv/bin/python -m src.tools.backtester.visual_diagnostics
 
-# 4. Lanzar el Cuadro de Mando Ejecutivo en Streamlit
+# 5. Abrir el Cuadro de Mando Ejecutivo en Streamlit
 .venv/bin/streamlit run app.py
 ```
 
 ---
 
-## 📁 Estructura del Proyecto
+## 📁 Estructura del Repositorio
 
-```
-007. Fantasy Champion/
+```text
+Fantasy Champion v3/
+├── .env.example                          # Plantilla documentada multi-usuario ("insultantemente fácil")
+├── app.py                                # Cuadro de mando Streamlit (Finanzas, Tesis, Autopilot, Backtest Visual)
+├── docs/QUICKSTART.md                    # Guía paso a paso para cualquier usuario y liga
+├── deploy/cloudflare_telegram_webhook.js # Webhook serverless opcional para respuesta inmediata en Telegram
+├── .github/workflows/                    # Orquestación CI: tracker matinal, pulsos tácticos y bot Telegram
 ├── src/
-│   ├── config.py                         # Variables dinámicas, credenciales y políticas de estrategia
-│   ├── llm_endpoints/                    # Router multi-LLM (Google AI Pro $0 + OpenRouter 2026)
-│   │   ├── client.py                     # Cliente HTTP con tracking de costes USD
-│   │   └── router.py                     # TieredLLMRouter (daily vs high_stakes)
-│   ├── tools/
-│   │   ├── strategy_engine/              # Motor cuantitativo central
-│   │   │   ├── xp_model.py               # ExpectedPointsEngine (scoreID=5, Comuniate, multiposición)
-│   │   │   ├── auction_model.py          # AuctionBidModel (quantiles sobre 1.702 pujas)
-│   │   │   ├── clause_sniper.py          # ClauseSniper ('A Machete' 24/7 + ShieldOptimizer)
-│   │   │   ├── portfolio_optimizer.py    # PortfolioOptimizer (scipy.optimize.milp exact solver)
-│   │   │   └── autopilot.py              # AutopilotRunner (DRY_RUN, SEMI_AUTO, FULL_AUTO)
-│   │   ├── backtester/                   # Motor de backtesting causal de 91 días
-│   │   │   ├── causal_clock.py           # StrictCausalDataView + CausalEFRPredictor
-│   │   │   ├── market_env.py             # AZFinanceMarketEnv (simulador determinista + Monte Carlo)
-│   │   │   └── benchmark_suite.py        # BacktestBenchmarkSuite (ablación + exportación informes)
-│   │   ├── biwenger_actions/             # Cliente de ejecución Biwenger (auditoría JSONL)
-│   │   ├── coach_analytic/               # Guardrails v2 y selector de alineaciones
-│   │   └── data_extraction/              # Warehouse, tracker y sincronización histórica
-│   └── agent/
-│       └── pydantic_biwenger_agent.py    # Agente interactivo Pydantic AI
-├── test/
-│   └── 07_strategy_backtest/
-│       ├── test_backtester_integrity.py  # Tests unitarios de integridad
-│       └── run_backtest.py               # CLI runner del backtest
-├── data/
-│   ├── warehouse/biwenger_history.db     # Base de datos histórica SQLite completa (91 días)
-│   ├── backtest/                         # Informes generados (Markdown, CSV, Excel audit)
-│   └── autopilot/                        # Planes diarios y auditoría execution_audit.jsonl
-├── app.py                                # Dashboard interactivo Streamlit (Pestañas 1 a 6)
-└── requirements.txt                      # Dependencias fijadas (scipy>=1.11.0, plotly, pydantic-ai)
+│   ├── config.py                         # Autodescubrimiento de identidad y configuración centralizada
+│   ├── setup_wizard.py                   # Asistente interactivo de instalación y diagnóstico (--check)
+│   ├── llm_endpoints/                    # TieredLLMRouter (Gemini 0€ + OpenRouter failover)
+│   └── tools/
+│       ├── data_extraction/              # daily_market_tracker.py, fast_delta_refresh.py (<12s), sync_local.py
+│       ├── strategy_engine/              # league_rules.py, replacement_cost.py, strategy_memory.py,
+│       │                                 # xp_model.py, clause_sniper.py, portfolio_optimizer.py, autopilot.py
+│       ├── notifications/                # notifier.py (Email HTML + Telegram) & telegram_bot.py (chat 2 vías)
+│       ├── scheduler/                    # dynamic_dispatcher.py (ventanas dinámicas según calendario LaLiga)
+│       ├── coach_analytic/               # guardrails.py (protección dura de intocables, <=5 ventas, bloqueo 48h)
+│       ├── biwenger_actions/             # market_actions.py (sync_market_listings, control cuota API, JSONL audit)
+│       └── backtester/                   # causal_clock.py, market_env.py, benchmark_suite.py, visual_diagnostics.py
+└── test/
+    ├── 07_strategy_backtest/             # Tests de integridad causal + runner CLI multi-semilla
+    └── 08_v3_architecture/               # Suite de verificación v3 (calendario dinámico, NPV sin overfitting, 0 hardcoding)
 ```

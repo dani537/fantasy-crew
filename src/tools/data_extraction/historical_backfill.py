@@ -50,7 +50,7 @@ import requests
 from dotenv import load_dotenv
 from thefuzz import process
 
-from src.config import Credentials, GeneralSettings
+from src.config import Credentials, GeneralSettings, resolve_active_user_identity
 from src.tools.data_extraction.auth import BiwengerAuth
 from src.tools.data_extraction.biwenger_data import BiwengerGeneralData, UserLeagueData
 from src.tools.data_extraction.external_data import ComuniateData, EuroClubIndexData
@@ -1610,7 +1610,7 @@ def build_daily_market_listings_history(
                 "precio_mercado_dia": mkt_p,
                 "precio_salida_o_oferta": off_amt,
                 "importe_adjudicado": "",
-                "comprador_o_destinatario": "Dani SR",
+                "comprador_o_destinatario": resolve_active_user_identity().get("team_name", "Mi Equipo"),
                 "num_pujadores": 1,
                 "fecha_expiracion": until_str,
             })
@@ -1658,11 +1658,12 @@ def run_historical_pipeline(
             session_cache = {}
 
     # 2. Authenticate with Biwenger (or fallback to local user_info.csv if rate limited)
+    active_id = resolve_active_user_identity()
     auth_session = None
     auth_token = Credentials.BIWENGER_TOKEN
-    my_uid = _safe_int(os.getenv("BIWENGER_USER_ID"), 9878097)
-    my_balance = None
-    league_id = _safe_int(os.getenv("BIWENGER_LEAGUE_ID"), 1643248)
+    my_uid = _safe_int(os.getenv("BIWENGER_USER_ID"), int(active_id.get("team_id") or 0))
+    my_balance = active_id.get("balance")
+    league_id = _safe_int(os.getenv("BIWENGER_LEAGUE_ID"), int(active_id.get("league_id") or 0))
 
     try:
         auth = BiwengerAuth(

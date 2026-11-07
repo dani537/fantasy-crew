@@ -1,0 +1,96 @@
+name: Dynamic Matchday Tactical Pulse & Decision Executor (v3)
+
+on:
+  schedule:
+    # Pulso ligero cada 30 min (<3s en reposo, 0 llamadas a Biwenger fuera de ventanas críticas):
+    #   1) Procesa aprobaciones SEMI_AUTO marcadas como APROBAR en Google Sheets (Decisiones_Pendientes)
+    #   2) Drena mensajes de Telegram (si está configurado)
+    #   3) Dispara Autopilot automáticamente en las 3 ventanas críticas reales del calendario LaLiga:
+    #      - T_kickoff - 48h (PRE_CLAUSE_LOCK: antes del cierre de cláusulas)
+    #      - T_kickoff - 2.5h (PRE_KICKOFF_SOLVENCY: garantía saldo >= 0€ para no puntuar 0)
+    #      - T_kickoff - 30m (FINAL_LINEUP_GUARD: guardia anti-lesión del Once Titular MILP)
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      approve_decision_id:
+        description: 'Aprobar y ejecutar orden SEMI_AUTO pendiente (ej. CL-19577, BL-19577, VT-2009)'
+        required: false
+        default: ''
+      reject_decision_id:
+        description: 'Rechazar orden SEMI_AUTO pendiente (ej. CL-19577)'
+        required: false
+        default: ''
+      force_phase:
+        description: 'Forzar ciclo inmediato (opcional: MORNING_FULL, PRE_CLAUSE_LOCK, PRE_KICKOFF_SOLVENCY, FINAL_LINEUP_GUARD)'
+        required: false
+        default: ''
+
+concurrency:
+  group: fantasy-champion-biwenger
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tactical-pulse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 📦 Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: ⚡ Evaluate Dynamic Calendar Window, Sheet Approvals & Telegram Drain
+        env:
+          PYTHONUNBUFFERED: "1"
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SERVICE_ACCOUNT_FILE: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_FILE }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || vars.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          GOOGLE_SHEET_ID_MARKET: ${{ secrets.GOOGLE_SHEET_ID_MARKET || secrets.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          BIWENGER_TOKEN: ${{ secrets.BIWENGER_TOKEN }}
+          BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
+          BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
+          BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID || vars.BIWENGER_LEAGUE_ID }}
+          BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID || vars.BIWENGER_USER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || secrets.LLM_PROVIDER }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || secrets.LLM_BASE_URL }}
+          SCORE_TYPE: ${{ vars.SCORE_TYPE || secrets.SCORE_TYPE || '5' }}
+          LANGUAGE: ${{ vars.LANGUAGE || 'es' }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS || secrets.GMAIL_ADRESS || vars.GMAIL_ADDRESS || vars.GMAIL_ADRESS }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO || vars.NOTIFY_EMAIL_TO || vars.GMAIL_ADRESS || secrets.GMAIL_ADRESS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
+          AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'SEMI_AUTO' }}
+          FORCE_PHASE: ${{ github.event.inputs.force_phase }}
+          APPROVE_ID: ${{ github.event.inputs.approve_decision_id }}
+          REJECT_ID: ${{ github.event.inputs.reject_decision_id }}
+        run: |
+          if [ -n "$GOOGLE_SHEET_ID" ] && [ -n "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            python -u -m src.tools.data_extraction.sync_local --pulse-light --no-api || true
+          fi
+          ARGS=()
+          if [ -n "$FORCE_PHASE" ]; then
+            ARGS+=(--force-phase "$FORCE_PHASE")
+          fi
+          if [ -n "$APPROVE_ID" ]; then
+            ARGS+=(--approve-id "$APPROVE_ID")
+          fi
+          if [ -n "$REJECT_ID" ]; then
+            ARGS+=(--reject-id "$REJECT_ID")
+          fi
+          python -u -m src.tools.scheduler.dynamic_dispatcher "${ARGS[@]}"

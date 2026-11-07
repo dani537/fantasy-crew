@@ -748,7 +748,9 @@ class BiwengerSheetsTracker:
         """Syncs Mi_Plantilla, Estado_Usuario, and Mercado_Fichajes into fantasy_tracker."""
         print("📊 Sincronizando hojas operativas para Dashboard y Agente...")
         
-        my_team_name = getattr(auth_player_info, 'team_name', 'Dani SR') if auth_player_info else 'Dani SR'
+        from src.config import resolve_active_user_identity
+        fallback_team = resolve_active_user_identity().get("team_name", "Mi Equipo")
+        my_team_name = getattr(auth_player_info, 'team_name', fallback_team) if auth_player_info else fallback_team
         my_balance = float(getattr(auth_player_info, 'balance', 0.0) or 0.0) if auth_player_info else 0.0
 
         # 1. Mi_Plantilla

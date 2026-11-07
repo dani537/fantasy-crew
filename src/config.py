@@ -1,13 +1,18 @@
 """
-Configuration and Credentials Manager (Fantasy Champion Edition)
-================================================================
-Centralized, dynamic loading of environment variables, Streamlit Cloud secrets,
-Multi-Tier LLM Routing (Google AI Pro / Gemini API + OpenRouter 2026 Tiered Models),
-and Competitive Autopilot policy settings.
+Configuration and Credentials Manager (Fantasy Champion v3 — Multi-User Plug & Play)
+====================================================================================
+Centralized, zero-hardcoding configuration loader supporting:
+- Environment variables (`.env` / GitHub Actions Secrets & Variables)
+- Streamlit Cloud `st.secrets`
+- Auto-discovery of Biwenger User/League IDs & Official League Rules via API
+- Multi-Tier LLM Routing (Google AI Pro $0 tier prioritized + OpenRouter failover)
+- Dual Notifications (HTML Email SMTP + Bidirectional Interactive Telegram Bot)
+- Granular `SEMI_AUTO` Autonomy Governance
 """
 
 import os
-from typing import List
+import json
+from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 
 # Load local .env
@@ -21,25 +26,21 @@ def _get_config_var(key: str, default: str = "") -> str:
     2. Checks streamlit.secrets (case-insensitive, top level or nested sections)
     3. Returns default
     """
-    # 1. os.environ check
     for k in (key, key.upper(), key.lower()):
         val = os.getenv(k)
         if val is not None and str(val).strip() != "":
             return str(val).strip()
 
-    # 2. streamlit.secrets check
     try:
         import streamlit as st
         if hasattr(st, "secrets") and st.secrets is not None:
-            # Direct key match
             for k in (key, key.upper(), key.lower()):
                 if k in st.secrets:
                     val = st.secrets[k]
                     if val is not None and str(val).strip() != "":
                         return str(val).strip()
 
-            # Nested sections check (e.g. [biwenger], [openrouter], etc.)
-            for sec_name, sec_dict in st.secrets.items():
+            for _, sec_dict in st.secrets.items():
                 if isinstance(sec_dict, dict) or hasattr(sec_dict, "items"):
                     for sk, sv in sec_dict.items():
                         if sk.lower() == key.lower():
@@ -51,8 +52,79 @@ def _get_config_var(key: str, default: str = "") -> str:
     return default
 
 
+def resolve_active_user_identity() -> Dict[str, Any]:
+    """
+    Resolves active manager & league identity dynamically without any hardcoded names/IDs:
+    1. Explicit `.env` overrides (`BIWENGER_USER_ID`, `BIWENGER_LEAGUE_ID`, `BIWENGER_TEAM_NAME`, `BIWENGER_LEAGUE_NAME`)
+    2. Cached live profile (`./data/raw/live_league_profile.json`)
+    3. Extracted `./data/user_info.csv`
+    """
+    info: Dict[str, Any] = {
+        "user_id": 0,
+        "team_id": 0,
+        "team_name": "",
+        "league_id": 0,
+        "league_name": "",
+        "score_id": int(_get_config_var("SCORE_TYPE", "5") or 5),
+        "balance": None,
+    }
+
+    profile_path = "./data/raw/live_league_profile.json"
+    if os.path.exists(profile_path):
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                prof = json.load(f)
+            info.update({k: v for k, v in prof.items() if v not in (None, "", 0)})
+        except Exception:
+            pass
+
+    user_csv = "./data/user_info.csv"
+    if os.path.exists(user_csv):
+        try:
+            import pandas as pd
+            df_u = pd.read_csv(user_csv)
+            if not df_u.empty:
+                r = df_u.iloc[0]
+                if not info["team_id"] and pd.notna(r.get("team_id")):
+                    info["team_id"] = int(r["team_id"])
+                if not info["user_id"] and pd.notna(r.get("user_id")):
+                    info["user_id"] = int(r["user_id"])
+                if not info["team_name"] and pd.notna(r.get("team_name")):
+                    info["team_name"] = str(r["team_name"]).strip()
+                if not info["league_id"] and pd.notna(r.get("league_id")):
+                    info["league_id"] = int(r["league_id"])
+                if not info["league_name"] and pd.notna(r.get("league_name")):
+                    info["league_name"] = str(r["league_name"]).strip()
+                if info["balance"] is None and pd.notna(r.get("balance")):
+                    info["balance"] = float(r["balance"])
+        except Exception:
+            pass
+
+    # Explicit environment overrides take highest precedence
+    env_lid = _get_config_var("BIWENGER_LEAGUE_ID")
+    env_uid = _get_config_var("BIWENGER_USER_ID")
+    env_tname = _get_config_var("BIWENGER_TEAM_NAME")
+    env_lname = _get_config_var("BIWENGER_LEAGUE_NAME")
+
+    if env_lid.isdigit():
+        info["league_id"] = int(env_lid)
+    if env_uid.isdigit():
+        info["team_id"] = int(env_uid)
+    if env_tname:
+        info["team_name"] = env_tname
+    if env_lname:
+        info["league_name"] = env_lname
+
+    if not info["team_name"]:
+        info["team_name"] = "Mi Equipo"
+    if not info["league_name"]:
+        info["league_name"] = "Liga Biwenger"
+
+    return info
+
+
 class _CredentialsMeta(type):
-    """Metaclass allowing class-level property access (e.g. Credentials.BIWENGER_USERNAME)."""
+    """Metaclass allowing class-level dynamic property access."""
     @property
     def BIWENGER_TOKEN(cls) -> str:
         return _get_config_var("BIWENGER_TOKEN")
@@ -64,6 +136,16 @@ class _CredentialsMeta(type):
     @property
     def BIWENGER_PASSWORD(cls) -> str:
         return _get_config_var("BIWENGER_PASSWORD")
+
+    @property
+    def BIWENGER_LEAGUE_ID(cls) -> Optional[int]:
+        v = _get_config_var("BIWENGER_LEAGUE_ID")
+        return int(v) if v.isdigit() else None
+
+    @property
+    def BIWENGER_USER_ID(cls) -> Optional[int]:
+        v = _get_config_var("BIWENGER_USER_ID")
+        return int(v) if v.isdigit() else None
 
     @property
     def GEMINI_API_KEY(cls) -> str:
@@ -80,6 +162,26 @@ class _CredentialsMeta(type):
     @property
     def DEEPSEEK_API_KEY(cls) -> str:
         return _get_config_var("DEEPSEEK_API_KEY")
+
+    @property
+    def GMAIL_ADDRESS(cls) -> str:
+        return _get_config_var("GMAIL_ADDRESS") or _get_config_var("GMAIL_ADRESS")
+
+    @property
+    def GMAIL_PASSWORD(cls) -> str:
+        return _get_config_var("GMAIL_PASSWORD")
+
+    @property
+    def NOTIFY_EMAIL_TO(cls) -> str:
+        return _get_config_var("NOTIFY_EMAIL_TO") or cls.GMAIL_ADDRESS or cls.BIWENGER_USERNAME
+
+    @property
+    def TELEGRAM_BOT_TOKEN(cls) -> str:
+        return _get_config_var("TELEGRAM_BOT_TOKEN")
+
+    @property
+    def TELEGRAM_ALLOWED_CHAT_ID(cls) -> str:
+        return _get_config_var("TELEGRAM_ALLOWED_CHAT_ID") or _get_config_var("TELEGRAM_CHAT_ID")
 
 
 class Credentials(metaclass=_CredentialsMeta):
@@ -135,6 +237,10 @@ class _GeneralSettingsMeta(type):
         return _get_config_var("SCORE_TYPE", "5")
 
     @property
+    def TIMEZONE(cls) -> str:
+        return _get_config_var("TIMEZONE", "Europe/Madrid")
+
+    @property
     def DRY_RUN(cls) -> bool:
         return _get_config_var("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
@@ -142,11 +248,9 @@ class _GeneralSettingsMeta(type):
     def LLM_PROVIDER(cls) -> str:
         explicit = _get_config_var("LLM_PROVIDER", "").lower()
         if explicit in PROVIDER_BASE_URLS:
-            # If user explicitly set openrouter/gemini, honor it (so long as its key exists)
             if explicit == "gemini" and not Credentials.GEMINI_API_KEY and Credentials.OPENROUTER_API_KEY:
                 return "openrouter"
             return explicit
-        # Auto-prioritize Google AI Pro / AI Studio ($0 cost) when GEMINI_API_KEY is present
         if Credentials.GEMINI_API_KEY:
             return "gemini"
         if Credentials.OPENROUTER_API_KEY:
@@ -159,7 +263,6 @@ class _GeneralSettingsMeta(type):
     def LLM_MODEL(cls) -> str:
         prov = cls.LLM_PROVIDER
         raw_model = _get_config_var("LLM_MODEL", "")
-        # Upgrade legacy gpt-5.6-luna automatically to newer & 50% cheaper gpt-6-luna-pro
         if raw_model == "openai/gpt-5.6-luna":
             raw_model = "openai/gpt-6-luna-pro"
         if prov == "gemini":
@@ -198,7 +301,7 @@ class GeneralSettings(metaclass=_GeneralSettingsMeta):
 
 
 class _StrategySettingsMeta(type):
-    """Competitive strategy & Autopilot execution policies."""
+    """Competitive strategy & Autopilot v3 execution policies (100% parameterizable via .env)."""
     @property
     def AUTOPILOT_MODE(cls) -> str:
         """One of: DRY_RUN, SEMI_AUTO, FULL_AUTO."""
@@ -206,27 +309,55 @@ class _StrategySettingsMeta(type):
         return mode if mode in ("DRY_RUN", "SEMI_AUTO", "FULL_AUTO") else "SEMI_AUTO"
 
     @property
+    def RISK_PROFILE(cls) -> str:
+        """CONSERVATIVE, BALANCED (default), or AGGRESSIVE."""
+        rp = _get_config_var("RISK_PROFILE", "BALANCED").upper()
+        return rp if rp in ("CONSERVATIVE", "BALANCED", "AGGRESSIVE") else "BALANCED"
+
+    @property
+    def AUTONOMOUS_BIDS_IN_SEMI_AUTO(cls) -> bool:
+        """In SEMI_AUTO, autonomously place optimal market bids while notifying user via Email/Telegram."""
+        return _get_config_var("AUTONOMOUS_BIDS_IN_SEMI_AUTO", "true").lower() in ("1", "true", "yes")
+
+    @property
+    def AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO(cls) -> bool:
+        """In SEMI_AUTO, autonomously accept offers on minor flips/patches while gating important sales for human OK."""
+        return _get_config_var("AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO", "true").lower() in ("1", "true", "yes")
+
+    @property
+    def IMPORTANT_SALE_MIN_EUR(cls) -> int:
+        """Sales above this price (or FRANCHISE_CORE / STRUCTURAL_STARTER roles) require human confirmation in SEMI_AUTO."""
+        try:
+            return int(float(_get_config_var("IMPORTANT_SALE_MIN_EUR", "4000000")))
+        except ValueError:
+            return 4_000_000
+
+    @property
     def FRIDAY_EMERGENCY_SOLVENCY(cls) -> bool:
-        """Automatically accepts optimal Computer offers before kickoff if balance < 0 in SEMI_AUTO."""
-        return _get_config_var("FRIDAY_EMERGENCY_SOLVENCY", "true").lower() in ("1", "true", "yes")
+        """Automatically clears negative balance pre-kickoff using non-core collateral in SEMI_AUTO."""
+        return _get_config_var("PRE_KICKOFF_EMERGENCY_SOLVENCY", _get_config_var("FRIDAY_EMERGENCY_SOLVENCY", "true")).lower() in ("1", "true", "yes")
 
     @property
     def CLAUSE_POLICY(cls) -> str:
-        """AGGRESSIVE (24/7 snipe + defensive shield) or DISABLED."""
-        return _get_config_var("CLAUSE_POLICY", "AGGRESSIVE").upper()
+        """SURGICAL_SCARCITY (recommended), AGGRESSIVE, or DISABLED."""
+        pol = _get_config_var("CLAUSE_POLICY", "SURGICAL_SCARCITY").upper()
+        return pol if pol in ("SURGICAL_SCARCITY", "AGGRESSIVE", "DISABLED") else "SURGICAL_SCARCITY"
 
     @property
     def PREVENTIVE_MARKET_LISTING(cls) -> bool:
-        """Lists transferable players daily at 0€ cost to harvest +-5% Computer offers."""
+        """Lists up to `marketMaxUserSales` transferable non-core players daily at +5% VM."""
         return _get_config_var("PREVENTIVE_MARKET_LISTING", "true").lower() in ("1", "true", "yes")
 
     @property
     def CREDIT_LIMIT_RATIO(cls) -> float:
-        """Official Biwenger AZ Finance max debt allowance (25% of squad market value)."""
-        try:
-            return float(_get_config_var("CREDIT_LIMIT_RATIO", "0.25"))
-        except ValueError:
-            return 0.25
+        """Optional override for league debt allowance (defaults to API auto-discovered rule or 0.25)."""
+        raw = _get_config_var("CREDIT_LIMIT_RATIO", "")
+        if raw:
+            try:
+                return float(raw)
+            except ValueError:
+                pass
+        return 0.25
 
     @property
     def MAX_SQUAD_SIZE(cls) -> int:
@@ -235,18 +366,40 @@ class _StrategySettingsMeta(type):
         except ValueError:
             return 22
 
+    @property
+    def INITIAL_LEAGUE_BUDGET_EUR(cls) -> int:
+        """Default initial total budget (Cash + Day-1 Squad Value) for Biwenger leagues (standard = 40M €)."""
+        try:
+            return int(float(_get_config_var("INITIAL_LEAGUE_BUDGET_EUR", "40000000")))
+        except ValueError:
+            return 40_000_000
+
 
 class StrategySettings(metaclass=_StrategySettingsMeta):
     pass
 
 
-class GoogleSheetsConfig:
-    @classmethod
+class _GoogleSheetsConfigMeta(type):
     @property
     def SHEET_ID(cls) -> str:
-        return _get_config_var("GOOGLE_SHEET_ID")
+        return _get_config_var("GOOGLE_SHEET_ID") or _get_config_var("GOOGLE_SHEET_ID_MARKET")
 
-    @classmethod
     @property
     def SERVICE_ACCOUNT_FILE(cls) -> str:
         return _get_config_var("GOOGLE_SERVICE_ACCOUNT_FILE", "./credentials_google.json")
+
+    @property
+    def SERVICE_ACCOUNT_JSON(cls) -> str:
+        return _get_config_var("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    @property
+    def ENABLED(cls) -> bool:
+        mode = _get_config_var("GOOGLE_SHEETS_ENABLED", "auto").lower()
+        if mode in ("0", "false", "no", "off"):
+            return False
+        has_creds = bool(cls.SERVICE_ACCOUNT_JSON or (cls.SERVICE_ACCOUNT_FILE and os.path.exists(cls.SERVICE_ACCOUNT_FILE)))
+        return bool(cls.SHEET_ID and has_creds)
+
+
+class GoogleSheetsConfig(metaclass=_GoogleSheetsConfigMeta):
+    pass

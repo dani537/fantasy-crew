@@ -305,6 +305,20 @@ class ExpectedPointsEngine:
             if is_duda:
                 p_start *= 0.72
 
+            # Baseline healthy starter probability & neutral-matchup xP when fit (for multi-round NPV & replacement cost)
+            if n_apps > 0:
+                p_start_healthy = float(np.clip(
+                    max(p_start if is_avail else 0.0, 0.70 * hs.get("recent_start_rate", 0.5) + 0.30 * np.clip(precio / 6_000_000.0, 0.08, 0.95)),
+                    0.05, 0.98
+                ))
+            else:
+                p_start_healthy = float(np.clip(max(p_start if is_avail else 0.0, (precio - 250_000.0) / 4_500_000.0), 0.05, 0.92))
+            p_sub_healthy = 0.0 if nat_pos == "GK" else hs.get("recent_sub_rate", 0.30) * float(np.clip(precio / 2_500_000.0, 0.25, 1.0))
+            xp_healthy = float(np.clip(
+                p_start_healthy * exp_pts_if_start + (1.0 - p_start_healthy) * p_sub_healthy * exp_pts_if_sub,
+                0.5, 13.0
+            ))
+
             if not is_avail:
                 rows.append({
                     "player_id": pid,
@@ -313,7 +327,10 @@ class ExpectedPointsEngine:
                     "natural_pos": nat_pos,
                     "valid_lines": ",".join(sorted(valid_lines)),
                     "is_available": False,
+                    "estado": estado,
                     "p_start": 0.0,
+                    "p_start_healthy": round(p_start_healthy, 4),
+                    "xp_healthy": round(xp_healthy, 4),
                     "match_multiplier": 1.0,
                     "xp_base": 0.0,
                     "xp_GK": 0.0,
@@ -373,7 +390,10 @@ class ExpectedPointsEngine:
                 "natural_pos": nat_pos,
                 "valid_lines": ",".join(sorted(valid_lines)),
                 "is_available": True,
+                "estado": estado,
                 "p_start": round(p_start, 4),
+                "p_start_healthy": round(p_start_healthy, 4),
+                "xp_healthy": round(xp_healthy, 4),
                 "match_multiplier": round(match_mult, 4),
                 "xp_base": round(raw_xp, 4),
                 "xp_GK": line_xps["GK"],

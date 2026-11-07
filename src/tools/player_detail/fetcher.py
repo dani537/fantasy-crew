@@ -645,7 +645,9 @@ def format_player_detail_md(data: Dict[str, Any]) -> str:
 
     # 5. Situación en Liga y Cláusulas
     if liga:
-        md.append("## 🏆 5. Situación Financiera en tu Liga (*AZ Finance*)")
+        from src.config import resolve_active_user_identity
+        league_title = resolve_active_user_identity().get("league_name", "Tu Liga")
+        md.append(f"## 🏆 5. Situación Financiera en tu Liga (*{league_title}*)")
         md.append(f"- **Mánager Propietario:** `{liga.get('propietario')}`")
         if liga.get('fecha_compra'):
             md.append(f"- **Fecha de Compra:** `{liga.get('fecha_compra')}` por `{liga.get('precio_compra', 0):,.0f} €`")

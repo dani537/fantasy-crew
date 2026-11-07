@@ -463,9 +463,11 @@ def validate_autopilot_plan_v2(
     untouchable_ids: set = None,
     efr_map: dict = None,
     p_start_map: dict = None,
+    max_user_sales: int = 5,
+    credit_limit_ratio: float = 0.25,
 ) -> dict:
     """
-    Validates a `PortfolioOptimizer.generate_daily_plan` output.
+    Validates a `PortfolioOptimizer.generate_daily_plan` output (v3 rules-compliant).
 
     Returns:
         {"approved_plan": plan_copy_with_blocked_items_removed,
@@ -477,64 +479,83 @@ def validate_autopilot_plan_v2(
     p_start_map = p_start_map or {}
     blocked = []
     approved = {k: (list(v) if isinstance(v, list) else v) for k, v in plan.items()}
+    clauses_open = bool(plan.get("clauses_open", not plan.get("is_kickoff_day", False)))
 
-    # 1. Sales: never sell untouchables (unless the asset is collapsing -> Stop-Loss)
+    # 1. Sales: NEVER sell user untouchables (hard veto, zero bypasses)
     kept_sales = []
     for s in plan.get("all_sales", []):
         pid = int(s["player_id"])
-        collapsing = (
-            efr_map.get(pid, 0) <= V2_STOP_LOSS_EFR
-            or (p_start_map.get(pid, 1.0) < V2_STOP_LOSS_STARTER_PROB and efr_map.get(pid, 0) < 0)
-        )
-        if pid in untouchable_ids and not collapsing:
-            blocked.append({**s, "blocked_reason": "Jugador intocable (Instrucciones)"})
+        if pid in untouchable_ids:
+            blocked.append({**s, "blocked_reason": "Jugador intocable (Directiva Usuario)"})
             continue
         kept_sales.append(s)
+    kept_sale_pids = {int(s["player_id"]) for s in kept_sales}
     approved["all_sales"] = kept_sales
+    approved["routine_sales"] = [s for s in plan.get("routine_sales", []) if int(s["player_id"]) in kept_sale_pids]
+    approved["solvency_sales"] = [s for s in plan.get("solvency_sales", []) if int(s["player_id"]) in kept_sale_pids]
 
-    cash = float(plan.get("starting_cash", 0.0)) + sum(float(s.get("sale_price", 0)) for s in kept_sales)
+    cash = float(plan.get("starting_cash", 0.0)) + sum(
+        float(s.get("sale_price", 0)) for s in kept_sales if not s.get("requires_human_approval", False)
+    )
 
-    # 2. Clause snipes (instant settlement): cap per day + kickoff-day solvency
+    # 2. Clause snipes (instant settlement): enforce 48h/in-round freeze + positive cash solvency
     kept_clauses = []
     for c in plan.get("clause_snipes", [])[:V2_MAX_DAILY_CLAUSES]:
+        if not clauses_open:
+            blocked.append({**c, "blocked_reason": "Cláusulas bloqueadas (ventana oficial 48h / jornada activa)"})
+            continue
         amt = float(c["amount"])
-        if plan.get("is_kickoff_day") and cash - amt < 0:
-            blocked.append({**c, "blocked_reason": "Día de jornada: la cláusula dejaría saldo < 0 €"})
+        if cash - amt < 0:
+            blocked.append({**c, "blocked_reason": "Cláusula requiere superávit de caja positivo (>= 0 €)"})
             continue
         kept_clauses.append(c)
-        cash -= amt
+        if not c.get("requires_human_approval", False):
+            cash -= amt
     approved["clause_snipes"] = kept_clauses
 
-    # 3. Bids (settle tomorrow): official max bid & collateral-backed leverage
-    credit_line = 0.25 * float(squad_value)
+    # 3. Bids (settle tomorrow): official max bid & top-K collateral-backed leverage
+    credit_line = float(credit_limit_ratio) * float(squad_value)
+    can_use_credit = bool(plan.get("can_use_credit_leverage", not plan.get("is_kickoff_day", False)))
     max_exposure = cash + min(credit_line, max(0.0, unlocked_collateral) * 0.85)
-    if plan.get("is_kickoff_day"):
+    if not can_use_credit:
         max_exposure = max(0.0, cash)
     kept_bids, committed = [], 0.0
     for b in plan.get("market_bids", [])[:V2_MAX_DAILY_BIDS]:
         amt = float(b["amount"])
-        if committed + amt > max_exposure:
-            blocked.append({**b, "blocked_reason": f"Excede exposición segura ({max_exposure:,.0f} €)"})
+        if amt > cash + credit_line:
+            blocked.append({**b, "blocked_reason": f"Supera puja máxima oficial ({cash + credit_line:,.0f} €)"})
+            continue
+        if committed + amt * max(0.65, float(b.get("win_prob_est", 1.0))) > max_exposure:
+            blocked.append({**b, "blocked_reason": f"Excede exposición respaldada por colateral ({max_exposure:,.0f} €)"})
             continue
         kept_bids.append(b)
-        committed += amt
+        committed += amt * max(0.65, float(b.get("win_prob_est", 1.0)))
     approved["market_bids"] = kept_bids
 
-    # 4. Shields only from positive surplus
+    # 4. Shields only when clauses_open & from positive surplus
     kept_shields = []
     for sh in plan.get("defensive_shields", []):
+        if not clauses_open:
+            blocked.append({**sh, "blocked_reason": "Blindajes bloqueados (ventana oficial 48h / jornada activa)"})
+            continue
         spend = float(sh.get("recommended_cash_spend", 0))
         if cash - spend < 0:
             blocked.append({**sh, "blocked_reason": "Blindaje sin superávit de caja"})
             continue
         kept_shields.append(sh)
-        cash -= spend
+        if not sh.get("requires_human_approval", False):
+            cash -= spend
     approved["defensive_shields"] = kept_shields
 
-    # 5. Never list untouchables preventively
-    approved["preventive_listings"] = [
+    # 5. Preventive listings: exclude untouchables & enforce `marketMaxUserSales` (<= 5)
+    filtered_listings = [
         p for p in plan.get("preventive_listings", []) if int(p["player_id"]) not in untouchable_ids
     ]
+    if len(filtered_listings) > int(max_user_sales):
+        for extra in filtered_listings[int(max_user_sales):]:
+            blocked.append({**extra, "blocked_reason": f"Excede límite marketMaxUserSales ({max_user_sales})"})
+        filtered_listings = filtered_listings[: int(max_user_sales)]
+    approved["preventive_listings"] = filtered_listings
 
-    is_safe = (cash >= 0) if plan.get("is_kickoff_day") else (cash + credit_line >= 0)
+    is_safe = (cash >= -0.5) if plan.get("is_kickoff_day") else (cash + credit_line >= 0)
     return {"approved_plan": approved, "blocked": blocked, "projected_cash": cash, "is_safe": is_safe}

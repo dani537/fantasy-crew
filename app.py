@@ -131,17 +131,19 @@ def _get_sheets_client():
 
 @st.cache_data(ttl=1800)
 def load_all_sheets_db():
-    """Reads all operational sheets from fantasy_tracker in one cached pass."""
+    """Reads all operational sheets from Google Sheets if configured."""
+    from src.config import GoogleSheetsConfig
     gc = _get_sheets_client()
-    if not gc:
+    sheet_id = GoogleSheetsConfig.SHEET_ID
+    if not gc or not sheet_id:
         return {}
-    sheet_id = os.getenv("GOOGLE_SHEET_ID") or "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk"
     try:
         sh = gc.open_by_key(sheet_id)
         data = {}
         target_worksheets = [
             "Saldos_Estimados", "Mi_Plantilla", "Estado_Usuario",
-            "Mercado_Fichajes", "Predicciones_IA", "Primas_Jornadas", "Movimientos"
+            "Mercado_Fichajes", "Predicciones_IA", "Primas_Jornadas", "Movimientos",
+            "Tesis_Activos", "Decisiones_Pendientes"
         ]
         for ws in sh.worksheets():
             if ws.title in target_worksheets:
@@ -177,9 +179,11 @@ def load_user_info():
         patr_num = _parse_curr(r.get("Patrimonio_Total", 0))
         mb_num = _parse_curr(r.get("Max_Puja_Permitida", 0))
         num_jug = int(r.get("Num_Jugadores", 0) or 0)
+        from src.config import resolve_active_user_identity
+        ident_fb = resolve_active_user_identity()
         return {
-            "team_name": str(r.get("Manager", "Dani SR")),
-            "league_name": "Liga Biwenger",
+            "team_name": str(r.get("Manager", ident_fb.get("team_name", "Mi Equipo"))),
+            "league_name": str(ident_fb.get("league_name", "Liga Biwenger")),
             "balance": bal_num,
             "squad_value": sq_num,
             "total_equity": patr_num if patr_num > 0 else (bal_num + sq_num),
@@ -225,7 +229,7 @@ def load_master_players():
                 "PLAYER_POINTS": int(pd.to_numeric(r.get("Puntos", 0), errors="coerce") or 0),
                 "MARKET_OFFER_AMOUNT": _parse_c(r.get("Oferta_Mercado", 0)) if str(r.get("Oferta_Mercado", "—")) not in ("—", "-", "") else None,
                 "BIWPLAYER_CLAUSE": _parse_c(r.get("Clausula", 0)),
-                "BIWPLAYER_TEAM_NAME": "Dani SR",
+                "BIWPLAYER_TEAM_NAME": resolve_active_user_identity().get("team_name", "Mi Equipo"),
                 "ON_MARKET": False,
                 "MARKET_SALE_PRICE": None
             })
@@ -366,14 +370,16 @@ df_transfers_raw = load_transfers_feed()
 round_cache = load_round_standings_cache()
 
 # User Context Defaults
+from src.config import resolve_active_user_identity
+_active_ident = resolve_active_user_identity()
 if user_ctx:
-    my_team_name = str(user_ctx.get("team_name", "Dani SR"))
-    league_name = str(user_ctx.get("league_name", "Liga Biwenger"))
+    my_team_name = str(user_ctx.get("team_name") or _active_ident.get("team_name", "Mi Equipo"))
+    league_name = str(user_ctx.get("league_name") or _active_ident.get("league_name", "Liga Biwenger"))
     balance = float(user_ctx.get("balance", 0.0))
 else:
-    my_team_name = "Dani SR"
-    league_name = "Liga Biwenger"
-    balance = 0.0
+    my_team_name = str(_active_ident.get("team_name", "Mi Equipo"))
+    league_name = str(_active_ident.get("league_name", "Liga Biwenger"))
+    balance = float(_active_ident.get("balance") or 0.0)
 
 # Squad Slicing & Financial Aggregates
 if not df_players.empty and "BIWPLAYER_TEAM_NAME" in df_players.columns:
@@ -2536,6 +2542,16 @@ with tab_agent:
             else:
                 st.caption("Sin pujas recomendadas en este ciclo.")
 
+        if latest_plan_data.get("pending_decisions"):
+            st.markdown("#### 🔔 Decisiones Pendientes de Confirmación Humana (`SEMI_AUTO`)")
+            st.dataframe(pd.DataFrame(latest_plan_data["pending_decisions"]), use_container_width=True, hide_index=True)
+
+        if p_info.get("asset_theses"):
+            st.markdown("#### 🧠 Tesis Microeconómica de Plantilla (`NPV_HOLD` vs `NPV_SELL` & Coste de Reposición)")
+            df_th = pd.DataFrame(p_info["asset_theses"])
+            th_cols = [c for c in ["nombre", "rol", "precio_actual", "coste_reposicion", "escasez_tier", "npv_hold", "npv_sell", "recomendacion_npv"] if c in df_th.columns]
+            st.dataframe(df_th[th_cols], use_container_width=True, hide_index=True)
+
         if latest_plan_data.get("briefing"):
             st.markdown("#### 📋 Briefing Ejecutivo del Director Deportivo (LLM)")
             st.markdown(latest_plan_data["briefing"])
@@ -2567,7 +2583,7 @@ with tab_agent:
                     try:
                         from src.llm_endpoints.router import TieredLLMRouter
                         client = TieredLLMRouter.get_client("daily")
-                        reply_text = client.call(prompt=user_query, system_prompt="Eres el Director Deportivo de Dani SR en Biwenger AZ Finance.")
+                        reply_text = client.call(prompt=user_query, system_prompt=f"Eres el Director Deportivo de {my_team_name} en Biwenger {league_name}.")
                     except Exception as e_llm:
                         reply_text = f"Error comunicando con el agente: {e_agent} / {e_llm}"
 
@@ -2576,14 +2592,15 @@ with tab_agent:
 
 
 # =============================================================================
-# TAB 6: BACKTESTING CAUSAL 91 DÍAS & AUDITORÍA ESTRATÉGICA
+# TAB 6: BACKTESTING CAUSAL HONESTO & SUITE VISUAL ESTRATÉGICA (v3)
 # =============================================================================
 
 with tab_backtest:
-    st.markdown("### 📈 Auditoría y Backtesting Causal de 91 Días (`AZ Finance`)")
-    st.caption("Simulación estricta sin fuga temporal (`2026-08-01` → `2026-10-30`, Jornadas 1 a 10) frente a los 14 mánagers reales.")
+    st.markdown(f"### 📈 Auditoría y Backtesting Causal Honesto (`{league_name}`)")
+    st.caption("Simulación estricta sin fuga temporal y con paridad exacta de reglas oficiales (`<=5` ventas simultáneas, bloqueo `48h` de cláusulas, blindaje `1:1`).")
 
     backtest_dir = "./data/backtest"
+    charts_dir = os.path.join(backtest_dir, "charts")
     abl_file = os.path.join(backtest_dir, "ablation_summary.csv")
     standings_file = os.path.join(backtest_dir, "league_standings_comparison.csv")
     curves_file = os.path.join(backtest_dir, "daily_equity_curves.csv")
@@ -2599,23 +2616,35 @@ with tab_backtest:
         df_cv = pd.read_csv(curves_file) if os.path.exists(curves_file) else pd.DataFrame()
         df_rd = pd.read_csv(rounds_file) if os.path.exists(rounds_file) else pd.DataFrame()
 
-        # Headline comparison cards
-        dani_real = df_abl[df_abl["strategy_id"] == "0_Dani_SR_Real"].iloc[0] if "0_Dani_SR_Real" in df_abl["strategy_id"].values else None
-        bot_mc = df_abl[df_abl["strategy_id"] == "5_Full_Alpha_Machete_MC20"].iloc[0] if "5_Full_Alpha_Machete_MC20" in df_abl["strategy_id"].values else None
-        bot_st = df_abl[df_abl["strategy_id"] == "4_Full_Alpha_Machete_Strict"].iloc[0] if "4_Full_Alpha_Machete_Strict" in df_abl["strategy_id"].values else None
+        # Headline comparison cards (dynamic matching for any manager & v3/v2 naming)
+        real_rows = df_abl[df_abl["strategy_id"].astype(str).str.startswith("0_")]
+        mc_rows = df_abl[df_abl["strategy_id"].astype(str).str.contains("MC")]
+        dani_real = real_rows.iloc[0] if not real_rows.empty else None
+        bot_mc = mc_rows.iloc[-1] if not mc_rows.empty else None
 
         if dani_real is not None and bot_mc is not None:
             c_bt1, c_bt2, c_bt3, c_bt4 = st.columns(4)
             with c_bt1:
                 diff_pts = bot_mc["points_mean"] - dani_real["points_mean"]
-                st.metric("Puntos J1-J10 (Bot MC20)", f"{bot_mc['points_mean']:.1f} pts", delta=f"{diff_pts:+.1f} pts vs Real ({dani_real['points_mean']:.0f})")
+                st.metric("Puntos Liga (Bot v3 MC20)", f"{bot_mc['points_mean']:.1f} pts", delta=f"{diff_pts:+.1f} pts vs Real ({dani_real['points_mean']:.0f})")
             with c_bt2:
                 diff_nw = (bot_mc["net_worth_mean_eur"] - dani_real["net_worth_mean_eur"]) / 1e6
-                st.metric("Patrimonio Final (Bot MC20)", f"{bot_mc['net_worth_mean_eur']/1e6:.2f} M€", delta=f"{diff_nw:+.2f} M€ vs Real ({dani_real['net_worth_mean_eur']/1e6:.2f} M€)")
+                st.metric("Patrimonio Final (Bot v3 MC20)", f"{bot_mc['net_worth_mean_eur']/1e6:.2f} M€", delta=f"{diff_nw:+.2f} M€ vs Real ({dani_real['net_worth_mean_eur']/1e6:.2f} M€)")
             with c_bt3:
                 st.metric("Trading Alpha Puro", f"{bot_mc['trading_alpha_eur']/1e6:+.2f} M€", help="Plusvalías de mercado netas descontando primas ganadas")
             with c_bt4:
-                st.metric("Rango Clasificación", f"#{int(bot_mc['simulated_rank'])} / 15", delta="Top-3 Podio" if bot_mc["simulated_rank"] <= 3 else "Top Competitivo")
+                st.metric("Rango Clasificación", f"#{int(bot_mc['simulated_rank'])} / {len(df_st) - 2 if len(df_st) > 4 else 15}", delta="Podio / Top Competitivo")
+
+        # Display Visual Diagnostic Charts Suite if generated
+        if os.path.isdir(charts_dir):
+            png_files = sorted([f for f in os.listdir(charts_dir) if f.endswith(".png")])
+            if png_files:
+                st.markdown("---")
+                st.markdown("#### 🖼️ Paneles Visuales de Diagnóstico del Backtesting v3")
+                cols_img = st.columns(2)
+                for idx_img, pf in enumerate(png_files):
+                    with cols_img[idx_img % 2]:
+                        st.image(os.path.join(charts_dir, pf), use_container_width=True)
 
         st.markdown("---")
 
@@ -2623,12 +2652,14 @@ with tab_backtest:
         if not df_cv.empty:
             import plotly.express as px
 
-            st.markdown("#### 📊 Curvas de Patrimonio Neto y Puntos Acumulados (Evolución Diaria 91 Días)")
+            st.markdown("#### 📊 Curvas Interactivas de Patrimonio Neto y Puntos Acumulados")
             c_chart1, c_chart2 = st.columns([1, 1])
 
+            top_real_rivals = df_st[df_st["tipo"] == "Mánager Real"]["entidad"].head(2).tolist() if not df_st.empty and "tipo" in df_st.columns else []
+            bot_entities = [e for e in df_cv["entity"].unique() if str(e).startswith(("4_", "5_", "6_"))]
+            focus_entities = list(dict.fromkeys([my_team_name] + top_real_rivals + bot_entities))
+
             with c_chart1:
-                # Filter representative entities: Dani SR, Birra München, RusoPoderoso, Bot MC20, Bot Strict
-                focus_entities = ["Dani SR", "Birra München", "RusoPoderoso", "5_Full_Alpha_Machete_MC20", "4_Full_Alpha_Machete_Strict"]
                 sub_cv = df_cv[df_cv["entity"].isin(focus_entities)].copy()
                 sub_cv["Patrimonio (M€)"] = sub_cv["net_worth"] / 1e6
                 fig_nw = px.line(

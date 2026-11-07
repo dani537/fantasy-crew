@@ -1,20 +1,29 @@
-name: Daily Biwenger Market & League Tracker
+name: Daily Biwenger Market, Predictions & Morning Autopilot (v3)
 
 on:
-  # Disparador externo vía cron-job / API (cero retraso)
+  # 1. Disparador principal sin retraso (Cron-job.org existente)
   repository_dispatch:
     types: [run-market-tracker, daily-market-capture]
-  # Disparador manual con botón desde la interfaz de GitHub
+  # 2. Red de seguridad automática (08:30 UTC = 09:30 CET): sale en <3s si Cron-job.org ya corrió hoy
+  schedule:
+    - cron: '30 8 * * *'
+  # 3. Botón manual desde GitHub Actions
   workflow_dispatch:
-  # Desactivado cron interno de GitHub para evitar ejecuciones duplicadas
-  # schedule:
-  #   - cron: '15 5 * * *'  # 05:15 UTC = 07:15 Madrid
+    inputs:
+      autopilot_mode:
+        description: 'Modo Autopilot al finalizar extracción (SEMI_AUTO, DRY_RUN, FULL_AUTO)'
+        required: false
+        default: 'SEMI_AUTO'
+
+concurrency:
+  group: fantasy-champion-biwenger
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  daily-market-capture:
+  daily-market-and-autopilot:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -25,41 +34,65 @@ jobs:
       - name: 🐍 Setup Python 3.10
         uses: actions/setup-python@v5
         with:
-            python-version: '3.10'
-            cache: 'pip'
+          python-version: '3.10'
+          cache: 'pip'
 
       - name: 📦 Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 🚀 Run Daily Extraction, Tracker & Predictions (Google Sheets Sync)
+      - name: 🚀 Deep Extraction -> ML Predictions -> Morning Autopilot + Email/Telegram
         env:
           PYTHONUNBUFFERED: "1"
+          EVENT_NAME: ${{ github.event_name }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SERVICE_ACCOUNT_FILE: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_FILE }}
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
-          GOOGLE_SHEET_ID_MARKET: ${{ secrets.GOOGLE_SHEET_ID_MARKET || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || vars.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          GOOGLE_SHEET_ID_MARKET: ${{ secrets.GOOGLE_SHEET_ID_MARKET || secrets.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
           BIWENGER_TOKEN: ${{ secrets.BIWENGER_TOKEN }}
           BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
           BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
-          BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID }}
-          BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID }}
+          BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID || vars.BIWENGER_LEAGUE_ID }}
+          BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID || vars.BIWENGER_USER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || secrets.LLM_PROVIDER }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || secrets.LLM_BASE_URL }}
+          SCORE_TYPE: ${{ vars.SCORE_TYPE || secrets.SCORE_TYPE || '5' }}
+          LANGUAGE: ${{ vars.LANGUAGE || 'es' }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS || secrets.GMAIL_ADRESS || vars.GMAIL_ADDRESS || vars.GMAIL_ADRESS }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO || vars.NOTIFY_EMAIL_TO || vars.GMAIL_ADRESS || secrets.GMAIL_ADRESS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
+          AUTOPILOT_MODE: ${{ github.event.inputs.autopilot_mode || vars.AUTOPILOT_MODE || 'SEMI_AUTO' }}
         run: |
-          # 1. Update general league context, incremental movements, rival finances & save session cache
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            python -u -m src.tools.data_extraction.sync_local --memory-only --no-api || true
+            STATUS_TODAY=$(python -m src.tools.scheduler.dynamic_dispatcher --check-morning-done | tail -n 1)
+            if [ "$STATUS_TODAY" = "ALREADY_DONE" ]; then
+              echo "✅ Ciclo matinal ya completado hoy vía disparador primario (Cron-job.org). Saliendo sin duplicar ejecución."
+              exit 0
+            fi
+          fi
+
+          # 1. Contexto vivo de liga, movimientos incrementales y finanzas rivales
           python -u -m src.tools.data_extraction.runner
 
-          # 2. Update all historical tables (Rounds, Lineups, Bids, Daily Manager Snapshots, Market History, Comuniate)
+          # 2. Reconstrucción incremental de tablas históricas (Jornadas, Alineaciones, Pujas, Saldos, Comuniate)
           python -u -m src.tools.data_extraction.historical_backfill --comuniate-history
 
-          # 3. Run master 40-dimensional market tracker (appends to Historico_Continuo using Warehouse + safe API quota)
+          # 3. Captura profunda 43-D de los ~550 jugadores respetando cuota de 200 req/hora UTC
           python -u src/tools/data_extraction/daily_market_tracker.py
 
-          # 4. Train predictive ML model & sync Predicciones_IA
+          # 4. Predicciones ML de precios (Predicciones_IA)
           python -u test/05_market_prediction/run.py --sync-sheets || true
 
-          # 5. Run Fantasy Champion Autonomous Strategy Engine (Autopilot SEMI_AUTO / Friday Solvency)
-          python -u -m src.tools.strategy_engine.autopilot --mode SEMI_AUTO || true
+          # 5. Hidratar memoria estratégica entre días (Tesis_Activos, offer_rolls, Decisiones_Pendientes)
+          python -u -m src.tools.data_extraction.sync_local --memory-only --no-api || true
+
+          # 6. Disparo Automático Post-Extracción: Autopilot v3 (Pujas, Escaparate Top-5, Once MILP y Envío Email HTML + Telegram)
+          python -u -m src.tools.strategy_engine.autopilot --phase MORNING_FULL --notify

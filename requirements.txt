@@ -1,6 +1,7 @@
 # Core App & Web Framework
 streamlit>=1.35.0
 plotly>=5.20.0
+matplotlib>=3.8.0
 
 # Data Manipulation & Analysis
 pandas>=2.0.0

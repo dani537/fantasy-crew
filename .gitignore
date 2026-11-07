@@ -154,8 +154,11 @@ cython_debug/
 # Project specific
 prova*.py
 prova*.ipynb
-data/
+data/*
 !data/history_exact_balances.csv
+!data/warehouse/
+data/warehouse/*
+!data/warehouse/initial_balances_override.json
 *.xlsx
 *.csv
 !data/history_exact_balances.csv

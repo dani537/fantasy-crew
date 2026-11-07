@@ -135,7 +135,8 @@ class AuctionBidModel:
 
         # 2. Rival Listing Negotiation Asymmetry
         if seller_is_rival:
-            if ask > intrinsic_value * 0.98:
+            effective_floor = max(vm, ask)
+            if effective_floor > intrinsic_value * 0.98:
                 return {
                     "should_bid": False,
                     "bid_amount": 0,
@@ -145,11 +146,11 @@ class AuctionBidModel:
                     "win_prob_est": 0.0,
                 }
             if rival_seller_in_debt:
-                # Distressed rival needs cash before Friday: bid near VM (98%..102% VM, never above ask)
-                target_bid = min(ask, max(vm * 0.98, ask * 0.95)) + jitter
+                # Distressed rival needs cash before kickoff: bid near VM (>= VM, never below Biwenger floor)
+                target_bid = max(vm, min(effective_floor, max(vm, ask * 0.95)) + jitter)
             else:
-                target_bid = min(ask, intrinsic_value * 0.95)
-            target_bid = int(round(target_bid))
+                target_bid = max(vm, min(effective_floor, intrinsic_value * 0.95))
+            target_bid = max(int(round(vm)), int(round(target_bid)))
             surplus = intrinsic_value - target_bid
             return {
                 "should_bid": surplus >= 45_000,

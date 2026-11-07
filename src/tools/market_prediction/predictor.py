@@ -650,10 +650,14 @@ class BiwengerMarketPredictorV4:
         import gspread
         from google.oauth2.service_account import Credentials
         import json
+        from src.config import GoogleSheetsConfig
 
-        creds_file = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "credentials_google.json"
-        creds_json_str = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-        sheet_id = spreadsheet_id or os.getenv("GOOGLE_SHEET_ID") or os.getenv("GOOGLE_SHEET_ID_MARKET") or "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk"
+        creds_file = GoogleSheetsConfig.SERVICE_ACCOUNT_FILE
+        creds_json_str = GoogleSheetsConfig.SERVICE_ACCOUNT_JSON
+        sheet_id = spreadsheet_id or GoogleSheetsConfig.SHEET_ID
+        if not sheet_id or not GoogleSheetsConfig.ENABLED:
+            print("ℹ️ Google Sheets no configurado (GOOGLE_SHEET_ID vacío o desactivado). Omitiendo subida de Predicciones_IA.")
+            return False
         scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
         gc = None

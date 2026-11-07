@@ -27,10 +27,12 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
+from src.config import GoogleSheetsConfig
+
 POSITION_MAP = {1: "Portero", 2: "Defensa", 3: "Centrocampista", 4: "Delantero"}
-DEFAULT_SPREADSHEET_ID = "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk"  # fantasy_tracker
-SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID") or os.getenv("GOOGLE_SHEET_ID_MARKET") or DEFAULT_SPREADSHEET_ID
-CREDS_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or "credentials_google.json"
+DEFAULT_SPREADSHEET_ID = ""
+SPREADSHEET_ID = GoogleSheetsConfig.SHEET_ID
+CREDS_FILE = GoogleSheetsConfig.SERVICE_ACCOUNT_FILE
 TAB_HISTORICO = "Historico_Continuo"
 
 COUNTRY_MAP = {
@@ -545,11 +547,12 @@ def run_daily_market_capture(max_deep_enrich: int = None):
     print(f"💾 Guardados backups locales y Warehouse ({len(rows_to_append)} registros)")
 
     # 6. Save to Google Sheets (Safe Append-Only, NEVER clears Historico_Continuo)
-    gc = get_gspread_client()
-    if gc:
+    sheet_id = GoogleSheetsConfig.SHEET_ID
+    gc = get_gspread_client() if (GoogleSheetsConfig.ENABLED and sheet_id) else None
+    if gc and sheet_id:
         try:
-            print(f"☁️ Abriendo libro Google Sheets: {SPREADSHEET_ID}...")
-            sh = gc.open_by_key(SPREADSHEET_ID)
+            print(f"☁️ Abriendo libro Google Sheets: {sheet_id}...")
+            sh = gc.open_by_key(sheet_id)
 
             # Ensure tabs exist
             ws_titles = [w.title for w in sh.worksheets()]

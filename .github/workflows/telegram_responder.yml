@@ -1,0 +1,61 @@
+name: Interactive Telegram Webhook Responder (v3)
+
+on:
+  repository_dispatch:
+    types: [telegram-message]
+  workflow_dispatch:
+
+concurrency:
+  group: fantasy-champion-biwenger
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  respond-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 📦 Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: 💬 Process & Reply Telegram Message (<12s FastDeltaRefresh)
+        env:
+          PYTHONUNBUFFERED: "1"
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || vars.GOOGLE_SHEET_ID || '1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk' }}
+          BIWENGER_TOKEN: ${{ secrets.BIWENGER_TOKEN }}
+          BIWENGER_USERNAME: ${{ secrets.BIWENGER_USERNAME }}
+          BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
+          BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID || vars.BIWENGER_LEAGUE_ID }}
+          BIWENGER_USER_ID: ${{ secrets.BIWENGER_USER_ID || vars.BIWENGER_USER_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || secrets.LLM_PROVIDER }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
+          AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'SEMI_AUTO' }}
+          DIRECT_CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          DIRECT_TEXT: ${{ github.event.client_payload.text }}
+        run: |
+          if [ -n "$GOOGLE_SHEET_ID" ] && [ -n "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            python -u -m src.tools.data_extraction.sync_local --pulse-light --no-api || true
+          fi
+          if [ -n "$DIRECT_CHAT_ID" ] && [ -n "$DIRECT_TEXT" ]; then
+            python -u -m src.tools.notifications.telegram_bot --direct-chat-id "$DIRECT_CHAT_ID" --direct-text "$DIRECT_TEXT"
+          else
+            python -u -m src.tools.notifications.telegram_bot --drain-once
+          fi

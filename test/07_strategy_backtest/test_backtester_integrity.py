@@ -72,26 +72,32 @@ class TestFantasyChampionIntegrity(unittest.TestCase):
 
     def test_exact_official_standings_and_bonus_accounting(self):
         suite = BacktestBenchmarkSuite(db_path=DB_PATH, output_dir=os.path.join(PROJECT_ROOT, "data", "backtest"))
-        df_real, _ = suite.load_real_league_benchmarks()
+        df_real_oct29, _ = suite.load_real_league_benchmarks(as_of_date="2026-10-29")
+        df_real_oct30, _ = suite.load_real_league_benchmarks(as_of_date="2026-10-30")
+        df_real_latest, _ = suite.load_real_league_benchmarks()
 
-        birra = df_real[df_real["manager"] == "Birra München"].iloc[0]
-        ruso = df_real[df_real["manager"] == "RusoPoderoso"].iloc[0]
-        dani = df_real[df_real["manager"] == "Dani SR"].iloc[0]
+        birra = df_real_oct30[df_real_oct30["manager"] == "Birra München"].iloc[0]
+        ruso = df_real_oct30[df_real_oct30["manager"] == "RusoPoderoso"].iloc[0]
+        dani_oct29 = df_real_oct29[df_real_oct29["manager"] == "Dani SR"].iloc[0]
+        dani_oct30 = df_real_oct30[df_real_oct30["manager"] == "Dani SR"].iloc[0]
+        dani_latest = df_real_latest[df_real_latest["manager"] == "Dani SR"].iloc[0]
 
         self.assertEqual(int(birra["points_j1_j10"]), 521)
         self.assertEqual(int(ruso["points_j1_j10"]), 484)
-        self.assertEqual(int(dani["points_j1_j10"]), 387)
-        self.assertEqual(int(dani["bonuses_eur"]), 26_073_000)
-        self.assertEqual(int(dani["cash_eur"]), -4_338_451)
+        self.assertEqual(int(dani_oct30["points_j1_j10"]), 387)
+        self.assertEqual(int(dani_oct30["bonuses_eur"]), 26_073_000)
+        self.assertEqual(int(dani_oct29["cash_eur"]), -4_338_451)
+        self.assertGreaterEqual(int(dani_latest["points_j1_j10"]), 387)
+        self.assertGreaterEqual(int(dani_latest["cash_eur"]), 0)
 
     def test_milp_friday_solvency_on_real_dani_sr_debt_today(self):
         """
-        Tests the MILP solver on Dani SR's REAL 2026-10-30 squad and `-4,338,451 €` debt
+        Tests the MILP solver on Dani SR's REAL 2026-10-29 squad and `-4,338,451 €` debt
         ahead of Jornada 11!
         """
-        self.view.set_date("2026-10-30")
-        mkt_today = self.view.get_market_snapshot("2026-10-30")
-        mgr_today = self.view.get_manager_snapshots("2026-10-30")
+        self.view.set_date("2026-10-29")
+        mkt_today = self.view.get_market_snapshot("2026-10-29")
+        mgr_today = self.view.get_manager_snapshots("2026-10-29")
         dani_row = mgr_today[mgr_today["manager"] == "Dani SR"].iloc[0]
         real_cash = float(dani_row["saldo_disponible_exacto"])
         self.assertLess(real_cash, -4_000_000)

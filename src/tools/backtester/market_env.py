@@ -1,12 +1,16 @@
 """
-AZ Finance 91-Day Historical Market & League Environment (`AZFinanceMarketEnv`)
-===============================================================================
-Reproduces Biwenger league `AZ Finance` (`league_id=1643248`, 15 managers,
-`scoreID=5` "Mitjana AS i SofaScore", `superPicaExtraPoints=False`,
-`lineupMultiPos=True`, `clauseIncrement=1`, 25% credit line, +-5% Computer
-offers, 24h sale lock, 5-day post-purchase clause immunity, postponed-round
-initial lock & recalculation, and exact reverse-handicap matchday bonuses)
-from Day 1 (`2026-08-01`) through `2026-10-30`.
+Honest 94-Day Historical Market & League Simulator (`AZFinanceMarketEnv` v3)
+============================================================================
+Reproduces any Biwenger league (defaulting dynamically to active user/league via
+`resolve_active_user_identity()` and `LeagueRulesEngine`) with **100% official rules parity**:
+- Official `marketMaxUserSales` enforcement (`<= 5` simultaneous players listed on market!)
+- Official `clauseRoundDisabledHours` enforcement (`48h` pre-kickoff freeze + in-round freeze!)
+- Official `clauseActivationDelay` (`5`-day post-purchase clause immunity) & `1:1` shield ratio
+- Official `daysForSale` (`24h` post-purchase sale lock) & `25%` credit line
+- Exact `scoreID=5` points, multiposition out-of-position goal bonuses, and matchday bonuses
+- Supports both `v3` (`PortfolioOptimizer` v3 + `StrategyMemoryLedger` + `ReplacementCost` NPV)
+  and `legacy_v2_audit` mode (testing legacy naive stop-loss / unprioritized 5-slot truncation
+  under real honest rules for transparent before/after comparison).
 """
 
 import sqlite3
@@ -15,12 +19,15 @@ from typing import Dict, List, Any, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
+from src.config import resolve_active_user_identity
 from src.tools.data_extraction.warehouse import compute_official_clause
+from src.tools.strategy_engine.league_rules import LeagueRulesEngine, RoundPhaseContext
 from src.tools.strategy_engine.xp_model import (
     ExpectedPointsEngine,
     GOAL_BONUS_BY_LINE,
     normalize_position,
 )
+from src.tools.strategy_engine.strategy_memory import StrategyMemoryLedger
 from src.tools.strategy_engine.portfolio_optimizer import (
     PortfolioOptimizer,
     OFFICIAL_FORMATIONS,
@@ -41,27 +48,32 @@ class OwnedPlayerState:
 
 class AZFinanceMarketEnv:
     """
-    Deterministic / Seeded Monte-Carlo Market Simulator for AZ Finance.
+    Deterministic / Seeded Monte-Carlo Market Simulator with 100% Official Biwenger Rule Parity.
     """
 
     def __init__(
         self,
         db_path: str = "./data/warehouse/biwenger_history.db",
-        target_manager: str = "Dani SR",
-        target_user_id: int = 9878097,
+        target_manager: Optional[str] = None,
+        target_user_id: Optional[int] = None,
         market_mode: str = "monte_carlo_20slot",
         seed: int = 42,
-        credit_limit_ratio: float = 0.25,
+        credit_limit_ratio: Optional[float] = None,
         max_squad_size: int = 21,
+        rules: Optional[LeagueRulesEngine] = None,
     ):
+        ident = resolve_active_user_identity()
+        self.rules = rules or LeagueRulesEngine.load()
         self.db_path = db_path
-        self.target_manager = target_manager
-        self.target_user_id = int(target_user_id)
+        self.target_manager = str(target_manager or ident.get("team_name") or "Dani SR")
+        self.target_user_id = int(target_user_id or ident.get("team_id") or 0)
         self.market_mode = market_mode  # "strict_observed" or "monte_carlo_20slot"
         self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
-        self.credit_limit_ratio = float(credit_limit_ratio)
-        self.max_squad_size = int(max_squad_size)
+        self.credit_limit_ratio = (
+            float(credit_limit_ratio) if credit_limit_ratio is not None else float(self.rules.credit_limit_ratio)
+        )
+        self.max_squad_size = min(int(max_squad_size), int(self.rules.team_max_size))
 
         self.view = StrictCausalDataView(db_path=db_path)
         self.efr_predictor = CausalEFRPredictor(self.view)
@@ -82,34 +94,19 @@ class AZFinanceMarketEnv:
     def _prepare_environment_ground_truth(self) -> None:
         """
         Precomputes environment-only settlement tables (NEVER exposed to the strategy
-        before settlement timestamps):
-          1. Exact `scoreID=5` player round points, goals, and MVP/Ideal-XI flags for J1..J10.
-          2. Primary kickoff dates (`part == 1`) and official `Primas_Jornadas` payout dates.
-          3. Rival auction winning bids (`manager_pujador != target_manager`) by resolution date.
-          4. Daily observed market listings & 5-day post-purchase clause locks from `Movimientos`.
+        before settlement timestamps).
         """
-        # 1. Primary kickoff dates (part == 1) for J1..J11
-        self.kickoff_date_to_round: Dict[str, int] = {}
-        self.round_to_kickoff_date: Dict[int, str] = {}
-        cal_p1 = self.view._df_calendar[self.view._df_calendar["part_int"] == 1]
-        for jn, grp in cal_p1.groupby("jornada_num_int"):
-            jn_int = int(jn)
-            if 1 <= jn_int <= 11:
-                valid_dts = sorted([s[:10] for s in grp["fecha_hora"].tolist() if len(s) >= 10])
-                if valid_dts:
-                    kd = valid_dts[0]
-                    self.round_to_kickoff_date[jn_int] = kd
-                    self.kickoff_date_to_round[kd] = jn_int
-
-        # 2. Official bonus payout dates & rival round scores from `Primas_Jornadas`
+        # Determine officially settled rounds present in `Primas_Jornadas` (e.g. J1..J10)
         self.payout_date_to_rounds: Dict[str, List[int]] = {}
         self.rival_round_points: Dict[int, Dict[str, int]] = {}
+        settled_j_set: Set[int] = set()
         for _, r in self._df_primas.iterrows():
             j_label = str(r.get("Jornada", ""))
             digits = "".join(ch for ch in j_label if ch.isdigit())
             if not digits:
                 continue
             jn = int(digits)
+            settled_j_set.add(jn)
             p_date = str(r.get("Fecha", ""))[:10]
             mgr = str(r.get("Manager", "")).strip()
             pts = int(safe_num(r.get("Puntos", 0), 0))
@@ -118,29 +115,41 @@ class AZFinanceMarketEnv:
             if p_date and jn not in self.payout_date_to_rounds.get(p_date, []):
                 self.payout_date_to_rounds.setdefault(p_date, []).append(jn)
 
-        # 3. Exact `scoreID=5` Ground-Truth Player Points per Round (J1..J10)
-        # Reconstructed from exact `Historico_Continuo.puntos_totales` match-window deltas
-        # for J4..J10 (verified 15/15 exact match with AZ Finance official scores) and
-        # `Rendimiento_Jornadas` calibrated to `2026-09-02` cumulative `scoreID=5` totals for J1..J3.
+        self.settled_jornada_nums: List[int] = sorted(settled_j_set) if settled_j_set else list(range(1, 11))
+        self.max_settled_jornada: int = max(self.settled_jornada_nums)
+
+        # Primary kickoff dates (`part == 1`) for J1..J12
+        self.kickoff_date_to_round: Dict[str, int] = {}
+        self.round_to_kickoff_date: Dict[int, str] = {}
+        cal_p1 = self.view._df_calendar[self.view._df_calendar["part_int"] == 1]
+        for jn, grp in cal_p1.groupby("jornada_num_int"):
+            jn_int = int(jn)
+            if 1 <= jn_int <= self.max_settled_jornada + 2:
+                valid_dts = sorted([s[:10] for s in grp["fecha_hora"].tolist() if len(s) >= 10])
+                if valid_dts:
+                    kd = valid_dts[0]
+                    self.round_to_kickoff_date[jn_int] = kd
+                    self.kickoff_date_to_round[kd] = jn_int
+
+        # Exact `scoreID=5` Ground-Truth Player Points per Round (J1..J11)
         pts_piv_dates = [
             "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-09",
             "2026-09-11", "2026-09-15", "2026-09-18", "2026-09-22",
             "2026-10-09", "2026-10-14", "2026-10-16", "2026-10-20",
-            "2026-10-21", "2026-10-23", "2026-10-28",
+            "2026-10-21", "2026-10-23", "2026-10-28", "2026-10-30", "2026-11-02",
         ]
         sub_hc = self.view._df_market[self.view._df_market["fecha"].isin(pts_piv_dates)].copy()
         sub_hc["pts_tot"] = pd.to_numeric(sub_hc["puntos_totales"], errors="coerce").fillna(0).astype(int)
         piv = sub_hc.pivot_table(index="player_id", columns="fecha", values="pts_tot", aggfunc="last").fillna(0).astype(int)
 
-        self.ground_truth_round_pts: Dict[int, Dict[int, int]] = {jn: {} for jn in range(1, 11)}
-        self.ground_truth_goals: Dict[int, Dict[int, int]] = {jn: {} for jn in range(1, 11)}
-        self.ground_truth_awards: Dict[int, Dict[int, Tuple[int, int, int]]] = {jn: {} for jn in range(1, 11)}
+        self.ground_truth_round_pts: Dict[int, Dict[int, int]] = {jn: {} for jn in range(1, 12)}
+        self.ground_truth_goals: Dict[int, Dict[int, int]] = {jn: {} for jn in range(1, 12)}
+        self.ground_truth_awards: Dict[int, Dict[int, Tuple[int, int, int]]] = {jn: {} for jn in range(1, 12)}
 
-        # Populate goals & MVP/Ideal-XI flags from Rendimiento_Jornadas
         rep_all = self.view._df_reports
         for _, rr in rep_all.iterrows():
             jn = int(rr["jornada_num_int"])
-            if not (1 <= jn <= 10):
+            if not (1 <= jn <= 11):
                 continue
             pid = int(safe_num(rr.get("player_id", 0), 0))
             if pid <= 0:
@@ -152,7 +161,6 @@ class AZFinanceMarketEnv:
             once_i = 1 if str(rr.get("en_once_ideal", "")).upper() in ("SÍ", "SI", "1", "TRUE") else 0
             self.ground_truth_awards[jn][pid] = (mvp_m, mvp_j, once_i)
 
-        # J4..J10 exact `scoreID=5` deltas from `Historico_Continuo`
         delta_windows = {
             4: [("2026-09-04", "2026-09-09")],
             5: [("2026-09-11", "2026-09-15")],
@@ -161,6 +169,7 @@ class AZFinanceMarketEnv:
             8: [("2026-10-09", "2026-10-14")],
             9: [("2026-10-16", "2026-10-20")],
             10: [("2026-10-23", "2026-10-28")],
+            11: [("2026-10-30", "2026-11-02")],
         }
         for jn, wins in delta_windows.items():
             s = pd.Series(0, index=piv.index, dtype=int)
@@ -169,7 +178,6 @@ class AZFinanceMarketEnv:
                     s = s + (piv[d1] - piv[d0])
             self.ground_truth_round_pts[jn] = s.to_dict()
 
-        # J1..J3: start from Rendimiento_Jornadas and reconcile integer residual with exact `2026-09-02` `scoreID=5` total
         rj_123: Dict[int, Dict[int, int]] = {1: {}, 2: {}, 3: {}}
         played_123: Dict[int, List[int]] = {}
         for _, rr in rep_all[rep_all["jornada_num_int"].isin([1, 2, 3])].iterrows():
@@ -200,10 +208,6 @@ class AZFinanceMarketEnv:
             for jn in (1, 2, 3):
                 self.ground_truth_round_pts[jn][pid] = int(j_vals[jn])
 
-        # Overwrite the (mis-scored) `Rendimiento_Jornadas.puntos_biwenger` column inside the causal
-        # view with the verified AZ Finance `scoreID=5` points, so the xP model learns from the real
-        # league scoring. Rows only become visible after `fecha_partido < decision_cutoff_ts`, so
-        # this introduces no lookahead (it is the true score of an already-played match).
         rep_df = self.view._df_reports
         rep_pids = pd.to_numeric(rep_df["player_id"], errors="coerce").fillna(0).astype(int)
         corrected = [
@@ -215,7 +219,6 @@ class AZFinanceMarketEnv:
             int(c) if c is not None else int(o) for c, o in zip(corrected, orig_pts.values)
         ]
 
-        # Player static natural position lookup
         latest_mkt = self.view._df_market.drop_duplicates(subset=["player_id"], keep="last")
         self.player_meta: Dict[int, Dict[str, str]] = {}
         for _, r in latest_mkt.iterrows():
@@ -226,7 +229,6 @@ class AZFinanceMarketEnv:
                 "natural_pos": normalize_position(r.get("posicion", "")),
             }
 
-        # 4. Rival Auction Bids indexed by (resolution_date, player_id) -> max rival bid (excluding target_manager!)
         self.max_rival_bid_by_res_date: Dict[Tuple[str, int], int] = {}
         for _, br in self.view._df_bids.iterrows():
             mgr = str(br.get("manager_pujador", "")).strip()
@@ -240,7 +242,6 @@ class AZFinanceMarketEnv:
                 if amt > self.max_rival_bid_by_res_date.get(key, 0):
                     self.max_rival_bid_by_res_date[key] = amt
 
-        # 5. Observed daily market listings & observed Computer offers
         self._df_mkt_hist["fecha_d"] = self._df_mkt_hist["fecha"].astype(str).str.slice(0, 10)
         self._df_mkt_hist["pid_int"] = pd.to_numeric(self._df_mkt_hist["player_id"], errors="coerce").fillna(0).astype(int)
 
@@ -249,7 +250,6 @@ class AZFinanceMarketEnv:
         for d, grp in ev.groupby("fecha_d"):
             self.en_venta_by_date[str(d)] = grp.copy()
 
-        # Subasta Resuelta on `t+1` was listed on the market during day `t`!
         self.resolved_auctions_by_res_date: Dict[str, pd.DataFrame] = {}
         sr = self._df_mkt_hist[self._df_mkt_hist["tipo_registro"] == "Subasta Resuelta"]
         for d, grp in sr.groupby("fecha_d"):
@@ -264,7 +264,6 @@ class AZFinanceMarketEnv:
             if pid > 0 and amt > 0:
                 self.observed_offers_by_date[(d, pid)] = amt
 
-        # 6. Historical Movimientos for 5-day rival clause locks & incoming rival clause steals
         self._df_movs["mov_day"] = self._df_movs["fecha"].astype(str).str.slice(0, 10)
         self._df_movs["pid_int"] = pd.to_numeric(self._df_movs["player_id"], errors="coerce").fillna(0).astype(int)
         self._df_movs["precio_int"] = pd.to_numeric(self._df_movs["precio"], errors="coerce").fillna(0).astype(int)
@@ -288,7 +287,7 @@ class AZFinanceMarketEnv:
                     })
 
     def reset(self) -> None:
-        """Resets portfolio to `Dani SR`'s exact `2026-08-01` initial draw and `23,900,000 €` cash."""
+        """Resets portfolio to `target_manager`'s exact `2026-08-01` initial draw and cash."""
         self.rng = np.random.default_rng(self.seed)
         self.view.set_date("2026-08-01")
         self.efr_predictor = CausalEFRPredictor(self.view)
@@ -304,28 +303,29 @@ class AZFinanceMarketEnv:
 
         mkt_d1 = self.view.get_market_snapshot("2026-08-01").set_index("player_id").to_dict("index")
         self.squad: Dict[int, OwnedPlayerState] = {}
+        init_sq_val = 0
         for pid in init_pids:
             p_info = mkt_d1.get(pid, self.player_meta.get(pid, {}))
             vm = int(safe_num(p_info.get("precio", 150_000), 150_000))
+            init_sq_val += vm
             self.squad[pid] = OwnedPlayerState(
                 player_id=pid,
                 nombre=str(p_info.get("nombre", f"ID {pid}")),
                 posicion=str(p_info.get("posicion", "Centrocampista")),
-                acquired_date="2026-07-25",  # Initial draw unlocked on 2026-08-01
+                acquired_date="2026-07-25",
                 purchase_price=vm,
                 extra_shield=0,
             )
+        self.initial_net_worth: int = int(round(self.cash + init_sq_val))
 
         self.pending_bids: List[Dict[str, Any]] = []
         self.listed_pids: Set[int] = set()
-        self.active_offers: Dict[int, Tuple[int, str]] = {}  # pid -> (offer_eur, expiry_date)
+        self.active_offers: Dict[int, Tuple[int, str]] = {}
         self.recent_sold_dates: Dict[int, str] = {}
 
-        # Round lock & scoring ledger
         self.locked_round_lineups: Dict[int, Dict[str, Any]] = {}
         self.settled_rounds: Dict[int, Dict[str, Any]] = {}
 
-        # Telemetry & audit logs
         self.daily_curve: List[Dict[str, Any]] = []
         self.trade_log: List[Dict[str, Any]] = []
         self.bid_attempts: int = 0
@@ -337,7 +337,7 @@ class AZFinanceMarketEnv:
 
     def _get_player_clause(self, st: OwnedPlayerState, current_vm: float) -> int:
         base = max(float(st.purchase_price), float(current_vm))
-        return int(compute_official_clause(base, float(st.extra_shield)))
+        return int(self.rules.compute_official_clause(base, float(st.extra_shield)))
 
     def _build_squad_df(self, mkt_idx: Dict[int, Dict[str, Any]]) -> pd.DataFrame:
         rows = []
@@ -356,23 +356,15 @@ class AZFinanceMarketEnv:
                 "clausula_actual": self._get_player_clause(st, vm),
                 "acquired_date": st.acquired_date,
                 "purchase_price": st.purchase_price,
+                "precio_compra": st.purchase_price,
             })
         return pd.DataFrame(rows)
 
     def _build_daily_market_listings(self, date_str: str, next_date_str: Optional[str], mkt_today: pd.DataFrame) -> pd.DataFrame:
-        """
-        Constructs today's transfer market listings without leaking future prices:
-          - If `date_str` has full `En Venta Mercado` rows (`2026-10-25..30`), use them directly.
-          - Else take auctions that resolved on `next_date_str` morning (`Subasta Resuelta`),
-            evaluating ask price strictly at `date_str`'s own market price (`precio` on `date_str`!).
-          - In `monte_carlo_20slot` mode, fill remaining `Mercado` slots up to 20 free agents
-            sampled uniformly via `self.rng` from `propietario_liga == 'Libre'` on `date_str`,
-            so the bot always faces a realistic 20-player board and cannot infer which free agents
-            rivals will contest!
-        """
         mkt_idx = mkt_today.set_index("player_id").to_dict("index")
         listings: List[Dict[str, Any]] = []
         seen_pids: Set[int] = set()
+        k_free_slots = max(5, int(self.rules.market_free_slots))
 
         if date_str in self.en_venta_by_date:
             ev = self.en_venta_by_date[date_str]
@@ -395,8 +387,6 @@ class AZFinanceMarketEnv:
                 seen_pids.add(pid)
             return pd.DataFrame(listings)
 
-        # Historical days (`2026-08-01..2026-10-24`): include auctions resolving tomorrow morning
-        # (using ONLY today's `vm_today` as asking price for `Mercado` free agents -> zero future price leak!)
         n_mercado_slots = 0
         if next_date_str and next_date_str in self.resolved_auctions_by_res_date:
             sr = self.resolved_auctions_by_res_date[next_date_str]
@@ -421,13 +411,13 @@ class AZFinanceMarketEnv:
                 if seller == "Mercado":
                     n_mercado_slots += 1
 
-        if self.market_mode == "monte_carlo_20slot" and n_mercado_slots < 20:
+        if self.market_mode == "monte_carlo_20slot" and n_mercado_slots < k_free_slots:
             free_pool = mkt_today[
                 (mkt_today["propietario_liga"].astype(str).isin(["Libre", "Mercado", ""]))
                 & (~mkt_today["player_id"].isin(seen_pids | set(self.squad.keys())))
                 & (mkt_today["precio"] > 0)
             ]
-            need = min(20 - n_mercado_slots, len(free_pool))
+            need = min(k_free_slots - n_mercado_slots, len(free_pool))
             if need > 0:
                 sampled_pids = self.rng.choice(free_pool["player_id"].values, size=need, replace=False)
                 for spid in sampled_pids:
@@ -446,15 +436,6 @@ class AZFinanceMarketEnv:
         return pd.DataFrame(listings)
 
     def _score_locked_round(self, jornada_num: int) -> Dict[str, Any]:
-        """
-        Scores our locked XI for `jornada_num` under official AZ Finance rules:
-          - If `not is_solvent` (`cash < 0` at primary kickoff): 0 points & 0 € bonus.
-          - Else sum exact `scoreID=5` base points + out-of-position multiposition goal bonus
-            minus 4 pts per empty slot (< 11 players).
-          - Compute exact ex-post optimal possible XI points across `owned_at_kickoff` for
-            Coach Efficiency % tracking.
-          - Rank against the 14 real rivals in `Primas_Jornadas` and compute exact bonus.
-        """
         lock = self.locked_round_lineups.get(jornada_num)
         if not lock:
             return {"points": 0, "optimal_points": 0, "rank": 15, "bonus_eur": 0, "is_solvent": True}
@@ -463,7 +444,6 @@ class AZFinanceMarketEnv:
         gls_map = self.ground_truth_goals.get(jornada_num, {})
         awd_map = self.ground_truth_awards.get(jornada_num, {})
 
-        # Compute ex-post optimal possible XI points from `owned_at_kickoff`
         owned_pids: List[int] = list(lock["owned_at_kickoff"])
         opt_pts = self._compute_expost_optimal_xi_points(owned_pids, pts_map, gls_map)
 
@@ -501,17 +481,20 @@ class AZFinanceMarketEnv:
         total_pts -= 4 * n_empty
         opt_pts = max(opt_pts, total_pts)
 
-        # Rank against the 14 real rivals
         rivals = self.rival_round_points.get(jornada_num, {})
         higher_rivals = sum(1 for r_pts in rivals.values() if r_pts > total_pts)
-        rank = 1 + higher_rivals  # 1..15
+        rank = 1 + higher_rivals
 
-        if total_pts <= 0:
+        if total_pts <= 0 or jornada_num > self.max_settled_jornada:
             total_bonus = 0
         else:
-            prima_pts = total_pts * 50_000
+            prima_pts = total_pts * int(self.rules.bonus_per_point_eur)
             prima_pos = int(round(prima_pts * 0.06 * (rank - 3))) if (4 <= rank <= 14) else 0
-            prima_awards = mvp_m_cnt * 100_000 + mvp_j_cnt * 500_000 + ideal_cnt * 250_000
+            prima_awards = (
+                mvp_m_cnt * int(self.rules.bonus_game_mvp_eur)
+                + mvp_j_cnt * int(self.rules.bonus_round_mvp_eur)
+                + ideal_cnt * int(self.rules.bonus_ideal_lineup_eur)
+            )
             total_bonus = int(prima_pts + prima_pos + prima_awards)
 
         return {
@@ -531,7 +514,6 @@ class AZFinanceMarketEnv:
     ) -> int:
         if not owned_pids:
             return 0
-        # Fast greedy/assignment check across the 7 official formations
         p_scores_by_line: Dict[int, Dict[str, int]] = {}
         for pid in owned_pids:
             nat_pos = self.player_meta.get(pid, {}).get("natural_pos", "MF") or "MF"
@@ -547,7 +529,6 @@ class AZFinanceMarketEnv:
         for _, n_df, n_mf, n_fw in OFFICIAL_FORMATIONS:
             used: Set[int] = set()
             tot = 0
-            # Pick GK, then FW/MF/DF greedily
             for ln, req in [("GK", 1), ("DF", n_df), ("MF", n_mf), ("FW", n_fw)]:
                 cands = [
                     (p_scores_by_line[pid][ln], pid)
@@ -565,6 +546,97 @@ class AZFinanceMarketEnv:
                 best_total = tot
         return max(0, best_total)
 
+    def _apply_legacy_v2_decisions(
+        self,
+        opt: PortfolioOptimizer,
+        date_str: str,
+        squad_df: pd.DataFrame,
+        mkt_today: pd.DataFrame,
+        listings_df: pd.DataFrame,
+        xp_table: pd.DataFrame,
+        efr_map: Dict[int, float],
+        offer_price_map: Dict[int, float],
+        sell_locked_ids: Set[int],
+        clause_locked_ids: Set[int],
+        is_kickoff_day: bool,
+        days_to_kickoff: int,
+        clauses_open: bool,
+        shock_map: Dict[int, float],
+        indebted_rivals: Set[str],
+        league_med_max_bid: float,
+        max_rival_power: float,
+    ) -> Dict[str, Any]:
+        """
+        Simulates the legacy `v2` behaviors under HONEST official rules (`<=5` listing slots + `48h` clause lock):
+          - Naive toxic stop-loss (sells ANY injured/falling player >= 1.2M without replacement-cost NPV!)
+          - Aggressive indiscriminate clause policy (ignores free-market scarcity)
+          - Unranked arbitrary 5-slot listing truncation (lists first 5 unlocked players by ID instead of Top-5 priority!)
+          - Zero multi-day offer-roll patience.
+        """
+        old_policy = opt.clause_sniper.policy
+        opt.clause_sniper.policy = "AGGRESSIVE" if opt.clause_sniper.policy != "DISABLED" else "DISABLED"
+
+        # Run plan without memory ledger
+        plan = opt.generate_daily_plan(
+            current_date=date_str,
+            my_manager_name=self.target_manager,
+            current_cash=self.cash,
+            squad_df=squad_df,
+            df_market_all=mkt_today,
+            market_listings_df=listings_df,
+            xp_table=xp_table,
+            efr_map=efr_map,
+            active_offers_map=offer_price_map,
+            sell_locked_ids=sell_locked_ids,
+            clause_locked_ids=clause_locked_ids,
+            is_kickoff_day=is_kickoff_day,
+            days_to_kickoff=days_to_kickoff,
+            clauses_open=clauses_open,
+            recent_match_shock_map=shock_map,
+            indebted_rival_managers=indebted_rivals,
+            league_median_max_bid=league_med_max_bid,
+            max_rival_purchasing_power=max_rival_power,
+            memory_ledger=None,
+        )
+
+        # Override sales & listings with legacy v2 naive toxic stop-loss + arbitrary first-5 truncation!
+        xp_idx = xp_table.set_index("player_id").to_dict("index") if not xp_table.empty else {}
+        sold_already = {int(s["player_id"]) for s in plan["all_sales"]}
+        extra_naive_sales = []
+        for _, r in squad_df.iterrows():
+            pid = int(r["player_id"])
+            if pid in sold_already or pid in sell_locked_ids or pid not in offer_price_map:
+                continue
+            price = safe_num(r.get("precio", 0), 0.0)
+            efr_v = float(efr_map.get(pid, 0.0))
+            is_av = bool(xp_idx.get(pid, {}).get("is_available", True))
+            if (not is_av and price >= 1_200_000 and efr_v <= -20_000) or (efr_v <= -120_000):
+                extra_naive_sales.append({
+                    "player_id": pid,
+                    "nombre": str(r.get("nombre", "")),
+                    "sale_price": int(round(offer_price_map[pid])),
+                    "reason": "LEGACY_V2_NAIVE_STOP_LOSS",
+                })
+                sold_already.add(pid)
+        plan["all_sales"] = plan["all_sales"] + extra_naive_sales
+
+        # Legacy v2 listed ALL players -> Biwenger server accepts ONLY the first 5 (`marketMaxUserSales=5`)!
+        naive_listings = []
+        for _, r in squad_df.sort_values("player_id").iterrows():
+            pid = int(r["player_id"])
+            if pid in sold_already or pid in sell_locked_ids:
+                continue
+            naive_listings.append({
+                "player_id": pid,
+                "nombre": str(r.get("nombre", "")),
+                "asking_price": int(round(safe_num(r.get("precio", 150_000), 150_000.0) * 1.05, -4)),
+            })
+            if len(naive_listings) >= int(self.rules.market_max_user_sales):
+                break
+        plan["preventive_listings"] = naive_listings
+        opt.clause_sniper.policy = old_policy
+        return plan
+
     def run_simulation(
         self,
         optimizer: Optional[PortfolioOptimizer] = None,
@@ -572,24 +644,34 @@ class AZFinanceMarketEnv:
         enable_leverage: bool = True,
         enable_clauses: bool = True,
         enable_preventive_listing: bool = True,
+        clause_policy: str = "SURGICAL_SCARCITY",
+        legacy_v2_mode: bool = False,
         start_date: str = "2026-08-01",
-        end_date: str = "2026-10-30",
+        end_date: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Executes the full day-by-day 91-day simulation from `start_date` to `end_date`.
+        Executes the full day-by-day simulation under 100% honest official Biwenger rules
+        (`<= 5` market listing slots, `48h` clause lock + active-round freeze, `1:1` shields).
         """
         self.reset()
+        max_avail_date = self.view.all_dates[-1] if self.view.all_dates else "2026-11-02"
+        eff_end_date = end_date or max_avail_date
+
+        mem_ledger = StrategyMemoryLedger(in_memory_only=True)
         opt = optimizer or PortfolioOptimizer(
             xp_engine=self.xp_engine,
             credit_limit_ratio=self.credit_limit_ratio if enable_leverage else 0.0,
             max_squad_size=self.max_squad_size,
             preventive_listing=enable_preventive_listing,
+            rules=self.rules,
         )
         opt.credit_limit_ratio = self.credit_limit_ratio if enable_leverage else 0.0
         opt.preventive_listing = enable_preventive_listing
-        opt.clause_sniper.policy = "AGGRESSIVE" if enable_clauses else "DISABLED"
+        opt.clause_sniper.policy = (clause_policy if enable_clauses else "DISABLED")
 
-        sim_dates = [d for d in self.view.all_dates if start_date <= d <= end_date]
+        sim_dates = [d for d in self.view.all_dates if start_date <= d <= eff_end_date]
+        max_sales_slots = int(self.rules.market_max_user_sales)
+        clause_delay_days = int(self.rules.clause_activation_delay_days)
 
         for idx_d, date_str in enumerate(sim_dates):
             next_date_str = sim_dates[idx_d + 1] if (idx_d + 1) < len(sim_dates) else None
@@ -597,10 +679,17 @@ class AZFinanceMarketEnv:
             mkt_today = self.view.get_market_snapshot(date_str)
             mkt_idx = mkt_today.set_index("player_id").to_dict("index")
 
+            # Resolve exact calendar phase at 12:00 daytime decision hour (`48h` clause freeze & active round!)
+            phase_ctx: RoundPhaseContext = self.rules.compute_round_phase(
+                now_ts=pd.Timestamp(f"{date_str} 12:00:00"),
+                df_calendar=self.view._df_calendar,
+            )
+            is_kickoff_day = (date_str in self.kickoff_date_to_round)
+            clauses_open_today = bool(phase_ctx.clauses_open) and (not is_kickoff_day)
+
             # ==================================================================
-            # PHASE A: Morning 06:00 Settlement (Bonuses, Auctions, Offers, Rival Steals)
+            # PHASE A: Morning 06:00 Settlement
             # ==================================================================
-            # A1. Official Matchday Bonus Payouts (`Primas_Jornadas` dates)
             for jn_pay in self.payout_date_to_rounds.get(date_str, []):
                 if jn_pay not in self.settled_rounds and jn_pay in self.locked_round_lineups:
                     res_j = self._score_locked_round(jn_pay)
@@ -609,7 +698,6 @@ class AZFinanceMarketEnv:
                         self.cash += float(res_j["bonus_eur"])
                         self.bonuses_earned_eur += int(res_j["bonus_eur"])
 
-            # A2. Resolve Pending Bids placed yesterday ($t-1$)
             if self.pending_bids:
                 for b in self.pending_bids:
                     self.bid_attempts += 1
@@ -630,7 +718,6 @@ class AZFinanceMarketEnv:
                         continue
 
                     rival_win_bid = self.max_rival_bid_by_res_date.get((date_str, pid), 0)
-                    won = False
                     if rival_win_bid > 0:
                         won = (b_amt > rival_win_bid)
                     else:
@@ -664,34 +751,34 @@ class AZFinanceMarketEnv:
                         })
                 self.pending_bids = []
 
-            # A3. Incoming Rival Clause Attacks (if a real rival claused a player we own & can afford our clause!)
-            for atk in self.rival_clause_attacks_by_day.get(date_str, []):
-                pid = int(atk["player_id"])
-                if pid in self.squad:
-                    st = self.squad[pid]
-                    days_held = (pd.Timestamp(date_str) - pd.Timestamp(st.acquired_date)).days
-                    if days_held >= 5:
-                        vm_now = float(mkt_idx.get(pid, {}).get("precio", st.purchase_price))
-                        our_clause = self._get_player_clause(st, vm_now)
-                        if int(atk["paid_clause"]) >= our_clause:
-                            self.cash += float(our_clause)
-                            self.clause_steals_suffered += 1
-                            self.recent_sold_dates[pid] = date_str
-                            self.trade_log.append({
-                                "date": date_str,
-                                "type": "CLAUSE_STOLEN_BY_RIVAL",
-                                "player_id": pid,
-                                "nombre": st.nombre,
-                                "price": our_clause,
-                                "market_price": int(vm_now),
-                                "pnl": our_clause - st.purchase_price,
-                            })
-                            del self.squad[pid]
-                            self.active_offers.pop(pid, None)
-                            self.listed_pids.discard(pid)
+            # Incoming rival clause steals (only possible when clauses are open & >5d lock!)
+            if clauses_open_today:
+                for atk in self.rival_clause_attacks_by_day.get(date_str, []):
+                    pid = int(atk["player_id"])
+                    if pid in self.squad:
+                        st = self.squad[pid]
+                        days_held = (pd.Timestamp(date_str) - pd.Timestamp(st.acquired_date)).days
+                        if days_held >= clause_delay_days:
+                            vm_now = float(mkt_idx.get(pid, {}).get("precio", st.purchase_price))
+                            our_clause = self._get_player_clause(st, vm_now)
+                            if int(atk["paid_clause"]) >= our_clause:
+                                self.cash += float(our_clause)
+                                self.clause_steals_suffered += 1
+                                self.recent_sold_dates[pid] = date_str
+                                self.trade_log.append({
+                                    "date": date_str,
+                                    "type": "CLAUSE_STOLEN_BY_RIVAL",
+                                    "player_id": pid,
+                                    "nombre": st.nombre,
+                                    "price": our_clause,
+                                    "market_price": int(vm_now),
+                                    "pnl": our_clause - st.purchase_price,
+                                })
+                                del self.squad[pid]
+                                self.active_offers.pop(pid, None)
+                                self.listed_pids.discard(pid)
 
-            # A4. Refresh Computer (`Mercado`) Offers on Listed Players
-            # Purge expired offers or offers for players no longer owned
+            # Refresh Computer (`Mercado`) offers ONLY on our `<= 5` listed players!
             valid_offers: Dict[int, Tuple[int, str]] = {}
             for pid, (o_amt, exp_d) in self.active_offers.items():
                 if pid in self.squad and exp_d >= date_str:
@@ -699,7 +786,7 @@ class AZFinanceMarketEnv:
             self.active_offers = valid_offers
 
             exp_tomorrow = (pd.Timestamp(date_str) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            for pid in list(self.listed_pids):
+            for pid in sorted(self.listed_pids)[:max_sales_slots]:
                 if pid not in self.squad:
                     continue
                 if (date_str, pid) in self.observed_offers_by_date:
@@ -708,7 +795,6 @@ class AZFinanceMarketEnv:
                     vm_now = float(mkt_idx.get(pid, {}).get("precio", self.squad[pid].purchase_price))
                     mult = float(self.rng.uniform(0.95, 1.05))
                     off_eur = max(150_000, int(round((vm_now * mult) / 10_000.0) * 10_000))
-                # Keep the best valid active offer if Biwenger 48h offer window overlaps
                 prev_amt = self.active_offers.get(pid, (0, ""))[0]
                 if off_eur >= prev_amt:
                     self.active_offers[pid] = (off_eur, exp_tomorrow)
@@ -720,8 +806,7 @@ class AZFinanceMarketEnv:
                 (jn, kd) for jn, kd in self.round_to_kickoff_date.items() if kd >= date_str
             ]
             upcoming_rounds.sort(key=lambda x: x[1])
-            target_jn, next_kd = upcoming_rounds[0] if upcoming_rounds else (11, date_str)
-            is_kickoff_day = (date_str in self.kickoff_date_to_round)
+            target_jn, next_kd = upcoming_rounds[0] if upcoming_rounds else (12, date_str)
             active_kickoff_jn = self.kickoff_date_to_round.get(date_str, target_jn)
             days_to_kickoff = max(0, (pd.Timestamp(next_kd) - pd.Timestamp(date_str)).days)
 
@@ -737,11 +822,15 @@ class AZFinanceMarketEnv:
                 df_comuniate_round=comuniate_df,
             )
             efr_map, shock_map = self.efr_predictor.predict_efr_72h_and_shocks()
-
             squad_df = self._build_squad_df(mkt_idx)
+            scarcity_free_5m = int(
+                ((mkt_today["precio"] >= 5_000_000) & (mkt_today["propietario_liga"].astype(str).isin(["Libre", "Mercado", ""]))).sum()
+            )
+            scarcity_free_10m = int(
+                ((mkt_today["precio"] >= 10_000_000) & (mkt_today["propietario_liga"].astype(str).isin(["Libre", "Mercado", ""]))).sum()
+            )
 
             if passive_lineup_only:
-                # Variant 1: Passive Buy-and-Hold + Optimal MILP Starting XI (0 trades)
                 milp_xi = opt.solve_joint_lineup_and_solvency_milp(
                     squad_df=squad_df,
                     xp_table=xp_table,
@@ -754,7 +843,6 @@ class AZFinanceMarketEnv:
                     "slots": milp_xi["lineup_slots"],
                 }
             else:
-                # Fit causal auction model on past resolved auctions + today's manager power
                 past_bids = self.view.get_past_bids(date_str)
                 mgrs_today = self.view.get_manager_snapshots(date_str)
                 opt.auction_model.fit_causal(past_bids, mgrs_today)
@@ -766,25 +854,25 @@ class AZFinanceMarketEnv:
                 if not rivals_today.empty:
                     saldos = pd.to_numeric(rivals_today["saldo_disponible_exacto"], errors="coerce").fillna(0.0)
                     indebted_rivals = set(rivals_today.loc[saldos < 0, "manager"].astype(str).tolist())
-                    mp = pd.to_numeric(rivals_today["max_puja_disponible"], errors="coerce").dropna()
-                    if len(mp) > 0:
-                        league_med_max_bid = float(mp.median())
-                        max_rival_power = float(mp.max())
+                    mp_col = "max_puja_disponible" if "max_puja_disponible" in rivals_today.columns else "puja_maxima_permitida"
+                    if mp_col in rivals_today.columns:
+                        mp_s = pd.to_numeric(rivals_today[mp_col], errors="coerce").dropna()
+                        if len(mp_s) > 0:
+                            league_med_max_bid = float(mp_s.median())
+                            max_rival_power = float(mp_s.max())
 
-                # 24h post-purchase sale lock
                 sell_locked_ids = {
                     pid for pid, st in self.squad.items()
-                    if (pd.Timestamp(date_str) - pd.Timestamp(st.acquired_date)).days < 1
+                    if (pd.Timestamp(date_str) - pd.Timestamp(st.acquired_date)).days < int(self.rules.days_for_sale)
                 }
 
-                # 5-day post-purchase clause lock across league + recently sold cooldown
                 clause_locked_ids: Set[int] = set()
-                for lookback_i in range(5):
+                for lookback_i in range(clause_delay_days):
                     d_lb = (pd.Timestamp(date_str) - pd.Timedelta(days=lookback_i)).strftime("%Y-%m-%d")
                     for rpid in self.rival_acquisitions_by_day.get(d_lb, []):
                         clause_locked_ids.add(rpid)
                 for spid, sdate in self.recent_sold_dates.items():
-                    if (pd.Timestamp(date_str) - pd.Timestamp(sdate)).days < 7:
+                    if (pd.Timestamp(date_str) - pd.Timestamp(sdate)).days < (clause_delay_days + 2):
                         clause_locked_ids.add(spid)
 
                 listings_df = self._build_daily_market_listings(date_str, next_date_str, mkt_today)
@@ -793,33 +881,56 @@ class AZFinanceMarketEnv:
                     for pid, (amt, _) in self.active_offers.items()
                 }
 
-                plan = opt.generate_daily_plan(
-                    current_date=date_str,
-                    my_manager_name=self.target_manager,
-                    current_cash=self.cash,
-                    squad_df=squad_df,
-                    df_market_all=mkt_today,
-                    market_listings_df=listings_df,
-                    xp_table=xp_table,
-                    efr_map=efr_map,
-                    active_offers_map=offer_price_map,
-                    sell_locked_ids=sell_locked_ids,
-                    clause_locked_ids=clause_locked_ids,
-                    is_kickoff_day=is_kickoff_day,
-                    days_to_kickoff=days_to_kickoff,
-                    recent_match_shock_map=shock_map,
-                    indebted_rival_managers=indebted_rivals,
-                    league_median_max_bid=league_med_max_bid,
-                    max_rival_purchasing_power=max_rival_power,
-                )
+                if legacy_v2_mode:
+                    plan = self._apply_legacy_v2_decisions(
+                        opt=opt,
+                        date_str=date_str,
+                        squad_df=squad_df,
+                        mkt_today=mkt_today,
+                        listings_df=listings_df,
+                        xp_table=xp_table,
+                        efr_map=efr_map,
+                        offer_price_map=offer_price_map,
+                        sell_locked_ids=sell_locked_ids,
+                        clause_locked_ids=clause_locked_ids,
+                        is_kickoff_day=is_kickoff_day,
+                        days_to_kickoff=days_to_kickoff,
+                        clauses_open=clauses_open_today,
+                        shock_map=shock_map,
+                        indebted_rivals=indebted_rivals,
+                        league_med_max_bid=league_med_max_bid,
+                        max_rival_power=max_rival_power,
+                    )
+                else:
+                    plan = opt.generate_daily_plan(
+                        current_date=date_str,
+                        my_manager_name=self.target_manager,
+                        current_cash=self.cash,
+                        squad_df=squad_df,
+                        df_market_all=mkt_today,
+                        market_listings_df=listings_df,
+                        xp_table=xp_table,
+                        efr_map=efr_map,
+                        active_offers_map=offer_price_map,
+                        sell_locked_ids=sell_locked_ids,
+                        clause_locked_ids=clause_locked_ids,
+                        is_kickoff_day=is_kickoff_day,
+                        days_to_kickoff=days_to_kickoff,
+                        clauses_open=clauses_open_today,
+                        recent_match_shock_map=shock_map,
+                        indebted_rival_managers=indebted_rivals,
+                        league_median_max_bid=league_med_max_bid,
+                        max_rival_purchasing_power=max_rival_power,
+                        df_calendar=cal_causal,
+                        memory_ledger=mem_ledger,
+                    )
 
-                # B1. Execute Immediate Sales (Accepting firm Computer offers)
+                # B1. Execute Immediate Sales (Accepting firm offers)
                 for s_act in plan["all_sales"]:
                     pid = int(s_act["player_id"])
                     if pid not in self.squad or pid in sell_locked_ids:
                         continue
                     if pid in self.active_offers:
-                        # Conservative: a stale offer can never be cashed above +5% of TODAY's value
                         vm_cap = int(round(float(mkt_idx.get(pid, {}).get("precio", 0)) * 1.05 / 10_000.0) * 10_000)
                         proceeds = int(min(self.active_offers[pid][0], vm_cap)) if vm_cap > 0 else int(self.active_offers[pid][0])
                     else:
@@ -841,71 +952,68 @@ class AZFinanceMarketEnv:
                     self.active_offers.pop(pid, None)
                     self.listed_pids.discard(pid)
 
-                # B2. Execute Instant Offensive Clause Snipes ("A Machete")
+                # B2. Execute Instant Offensive Clause Snipes (STRICTLY ENFORCING 48h & Active-Round Freeze!)
                 claused_today = False
-                for c_act in plan["clause_snipes"]:
-                    pid = int(c_act["player_id"])
-                    c_amt = int(c_act["amount"])
-                    if pid in self.squad or pid in clause_locked_ids or len(self.squad) >= self.max_squad_size:
-                        continue
-                    curr_sq_val = sum(
-                        float(mkt_idx.get(p, {}).get("precio", st.purchase_price))
-                        for p, st in self.squad.items()
-                    )
-                    max_cred = self.cash + (self.credit_limit_ratio if enable_leverage else 0.0) * curr_sq_val
-                    if c_amt > max_cred:
-                        continue
-                    if is_kickoff_day and (self.cash - c_amt) < 0:
-                        continue
+                if clauses_open_today and enable_clauses:
+                    for c_act in plan["clause_snipes"]:
+                        pid = int(c_act["player_id"])
+                        c_amt = int(c_act["amount"])
+                        if pid in self.squad or pid in clause_locked_ids or len(self.squad) >= self.max_squad_size:
+                            continue
+                        if (self.cash - c_amt) < 0:
+                            # Positive surplus discipline
+                            continue
 
-                    self.cash -= float(c_amt)
-                    self.clause_snipes_executed += 1
-                    claused_today = True
-                    p_info = mkt_idx.get(pid, self.player_meta.get(pid, {}))
-                    self.squad[pid] = OwnedPlayerState(
-                        player_id=pid,
-                        nombre=str(p_info.get("nombre", c_act.get("nombre", f"ID {pid}"))),
-                        posicion=str(p_info.get("posicion", "Centrocampista")),
-                        acquired_date=date_str,
-                        purchase_price=c_amt,
-                        extra_shield=0,
-                    )
-                    self.trade_log.append({
-                        "date": date_str,
-                        "type": "CLAUSE_SNIPE_BUY",
-                        "player_id": pid,
-                        "nombre": self.squad[pid].nombre,
-                        "price": c_amt,
-                        "market_price": int(mkt_idx.get(pid, {}).get("precio", c_amt)),
-                        "victim": c_act.get("seller", ""),
-                        "regime": c_act.get("regime", ""),
-                    })
-
-                # B3. Execute Defensive Clause Shields
-                for sh_act in plan["defensive_shields"]:
-                    pid = int(sh_act["player_id"])
-                    spend = int(sh_act["recommended_cash_spend"])
-                    if pid in self.squad and spend > 0 and (self.cash - spend) >= 0:
-                        self.cash -= float(spend)
-                        self.squad[pid].extra_shield += spend
-                        self.shields_spent_eur += spend
+                        self.cash -= float(c_amt)
+                        self.clause_snipes_executed += 1
+                        claused_today = True
+                        p_info = mkt_idx.get(pid, self.player_meta.get(pid, {}))
+                        self.squad[pid] = OwnedPlayerState(
+                            player_id=pid,
+                            nombre=str(p_info.get("nombre", c_act.get("nombre", f"ID {pid}"))),
+                            posicion=str(p_info.get("posicion", "Centrocampista")),
+                            acquired_date=date_str,
+                            purchase_price=c_amt,
+                            extra_shield=0,
+                        )
                         self.trade_log.append({
                             "date": date_str,
-                            "type": "DEFENSIVE_SHIELD",
+                            "type": "CLAUSE_SNIPE_BUY",
                             "player_id": pid,
                             "nombre": self.squad[pid].nombre,
-                            "price": spend,
-                            "market_price": int(mkt_idx.get(pid, {}).get("precio", 0)),
+                            "price": c_amt,
+                            "market_price": int(mkt_idx.get(pid, {}).get("precio", c_amt)),
+                            "victim": c_act.get("seller", ""),
+                            "regime": c_act.get("regime", ""),
                         })
+
+                # B3. Execute Defensive Clause Shields (1:1 ratio, ONLY when `clauses_open_today`)
+                if clauses_open_today and enable_clauses:
+                    inc_ratio = float(self.rules.clause_increment_ratio)
+                    for sh_act in plan["defensive_shields"]:
+                        pid = int(sh_act["player_id"])
+                        spend = int(sh_act["recommended_cash_spend"])
+                        if pid in self.squad and spend > 0 and (self.cash - spend) >= 0:
+                            self.cash -= float(spend)
+                            self.squad[pid].extra_shield += int(round(spend * inc_ratio))
+                            self.shields_spent_eur += spend
+                            self.trade_log.append({
+                                "date": date_str,
+                                "type": "DEFENSIVE_SHIELD",
+                                "player_id": pid,
+                                "nombre": self.squad[pid].nombre,
+                                "price": spend,
+                                "market_price": int(mkt_idx.get(pid, {}).get("precio", 0)),
+                            })
 
                 # B4. Queue Sealed Market Bids for Tomorrow 06:00 Clearing
                 self.pending_bids = list(plan["market_bids"])
 
-                # B5. Update Preventive Market Listings (0€ cost to receive tomorrow's +-5% offers)
-                self.listed_pids = {int(x["player_id"]) for x in plan["preventive_listings"]}
+                # B5. Update Preventive Market Listings (STRICTLY CAPPED AT `marketMaxUserSales` = 5!)
+                capped_listings = list(plan["preventive_listings"])[:max_sales_slots]
+                self.listed_pids = {int(x["player_id"]) for x in capped_listings}
 
-                # Re-solve XI if we instant-sniped a player on kickoff day so he enters tonight's XI!
-                if claused_today and is_kickoff_day:
+                if claused_today:
                     upd_sq_df = self._build_squad_df(mkt_idx)
                     upd_milp = opt.solve_joint_lineup_and_solvency_milp(
                         squad_df=upd_sq_df,
@@ -922,11 +1030,11 @@ class AZFinanceMarketEnv:
                     lineup_plan = plan["lineup"]
 
             # ==================================================================
-            # PHASE C: Evening Primary Kickoff Lock (`19:00..21:00`) & Daily Valuation
+            # PHASE C: Evening Primary Kickoff Lock & Daily Telemetry
             # ==================================================================
             if is_kickoff_day:
                 jn_lock = self.kickoff_date_to_round[date_str]
-                if 1 <= jn_lock <= 10:
+                if 1 <= jn_lock <= 11:
                     self.locked_round_lineups[jn_lock] = {
                         "jornada_num": jn_lock,
                         "kickoff_date": date_str,
@@ -941,35 +1049,58 @@ class AZFinanceMarketEnv:
                 float(mkt_idx.get(p, {}).get("precio", st.purchase_price))
                 for p, st in self.squad.items()
             )
-            cum_pts = sum(r["points"] for r in self.settled_rounds.values())
+            cum_pts = sum(
+                r["points"] for j_k, r in self.settled_rounds.items() if j_k in self.settled_jornada_nums
+            )
             self.daily_curve.append({
                 "fecha": date_str,
                 "cash": round(self.cash),
                 "squad_value": round(eod_squad_val),
                 "net_worth": round(self.cash + eod_squad_val),
+                "credit_limit_eur": round((self.credit_limit_ratio if enable_leverage else 0.0) * eod_squad_val),
                 "num_players": len(self.squad),
+                "listed_count": len(self.listed_pids),
+                "clauses_open": clauses_open_today,
+                "free_ge_5m": scarcity_free_5m,
+                "free_ge_10m": scarcity_free_10m,
                 "settled_points": int(cum_pts),
                 "is_kickoff_day": is_kickoff_day,
             })
 
-        # Ensure all J1..J10 rounds locked during simulation are scored
-        for jn in range(1, 11):
+        # Ensure all officially settled rounds (`J1..J10`) + partial J11 (tracked separately) are scored
+        for jn in range(1, 12):
             if jn not in self.settled_rounds and jn in self.locked_round_lineups:
                 self.settled_rounds[jn] = self._score_locked_round(jn)
 
-        total_pts_j1_j10 = sum(self.settled_rounds[jn]["points"] for jn in range(1, 11) if jn in self.settled_rounds)
-        total_opt_j1_j10 = sum(self.settled_rounds[jn]["optimal_points"] for jn in range(1, 11) if jn in self.settled_rounds)
-        insolvent_rounds = sum(1 for r in self.settled_rounds.values() if not r["is_solvent"])
-        lineup_eff_pct = round((total_pts_j1_j10 / total_opt_j1_j10 * 100.0), 2) if total_opt_j1_j10 > 0 else 100.0
+        # Official closed-round totals (`J1..J10` matching `Primas_Jornadas` 15-manager leaderboard!)
+        total_pts_official = sum(
+            self.settled_rounds[jn]["points"] for jn in self.settled_jornada_nums if jn in self.settled_rounds
+        )
+        total_opt_official = sum(
+            self.settled_rounds[jn]["optimal_points"] for jn in self.settled_jornada_nums if jn in self.settled_rounds
+        )
+        j11_live_pts = self.settled_rounds.get(11, {}).get("points", 0)
+        insolvent_rounds = sum(
+            1 for jn, r in self.settled_rounds.items() if jn <= 11 and not r["is_solvent"]
+        )
+        lineup_eff_pct = round((total_pts_official / total_opt_official * 100.0), 2) if total_opt_official > 0 else 100.0
+
+        # Out-of-time regime split points: J1..J5 (Abundance Aug-Sep 15) vs J6..J10 (+J11) (Scarcity Sep 16-Nov 02)
+        pts_h1_abundance = sum(self.settled_rounds.get(jn, {}).get("points", 0) for jn in range(1, 6))
+        pts_h2_scarcity = sum(self.settled_rounds.get(jn, {}).get("points", 0) for jn in range(6, 11))
 
         final_day = self.daily_curve[-1] if self.daily_curve else {"cash": 0, "squad_value": 0, "net_worth": 0}
-        # Pure trading alpha = Final Net Worth + Shields Spent - Initial Net Worth (36,410,000 €) - Matchday Bonuses
-        initial_net_worth = 36_410_000
-        trading_alpha_eur = int(final_day["net_worth"] + self.shields_spent_eur - initial_net_worth - self.bonuses_earned_eur)
+        trading_alpha_eur = int(
+            final_day["net_worth"] + self.shields_spent_eur - self.initial_net_worth - self.bonuses_earned_eur
+        )
 
         return {
-            "total_points_j1_j10": int(total_pts_j1_j10),
-            "optimal_points_j1_j10": int(total_opt_j1_j10),
+            "total_points_j1_j10": int(total_pts_official),
+            "j11_partial_points": int(j11_live_pts),
+            "total_points_incl_j11": int(total_pts_official + j11_live_pts),
+            "points_h1_j1_j5": int(pts_h1_abundance),
+            "points_h2_j6_j10": int(pts_h2_scarcity),
+            "optimal_points_j1_j10": int(total_opt_official),
             "lineup_efficiency_pct": lineup_eff_pct,
             "insolvent_Zero_rounds": insolvent_rounds,
             "final_cash": int(final_day["cash"]),

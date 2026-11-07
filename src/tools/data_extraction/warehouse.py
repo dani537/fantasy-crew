@@ -18,62 +18,50 @@ from google.oauth2.service_account import Credentials as GoogleCredentials
 
 from src.config import GoogleSheetsConfig
 
-DEFAULT_SPREADSHEET_ID = "1V3lDapPrpGgLGVl-rvNi3Ishy70dAo22UEn24toa4kk"
+DEFAULT_SPREADSHEET_ID = ""
 WAREHOUSE_DIR = "./data/warehouse"
 WAREHOUSE_DB_PATH = os.path.join(WAREHOUSE_DIR, "biwenger_history.db")
 
-# Canonical Day-1 (2026-08-01) exact baseline balances & squad values (Total = 40.00M € each)
-EXACT_INITIAL_BALANCES: List[Dict[str, Any]] = [
-    {"user_id": 9879571, "Manager": "Joan GM", "Saldo Inicial": 23890000, "Valor Plantilla Inicial (01/08)": 16110000},
-    {"user_id": 14002970, "Manager": "Ponceneta FC", "Saldo Inicial": 23900000, "Valor Plantilla Inicial (01/08)": 16100000},
-    {"user_id": 12630338, "Manager": "Birra München", "Saldo Inicial": 23900000, "Valor Plantilla Inicial (01/08)": 16100000},
-    {"user_id": 11457293, "Manager": "La Vinotinto", "Saldo Inicial": 23860000, "Valor Plantilla Inicial (01/08)": 16140000},
-    {"user_id": 9879359, "Manager": "RusoPoderoso", "Saldo Inicial": 24050000, "Valor Plantilla Inicial (01/08)": 15950000},
-    {"user_id": 14053609, "Manager": "SCR United", "Saldo Inicial": 23840000, "Valor Plantilla Inicial (01/08)": 16160000},
-    {"user_id": 12629981, "Manager": "JubiladosFC", "Saldo Inicial": 23880000, "Valor Plantilla Inicial (01/08)": 16120000},
-    {"user_id": 12638598, "Manager": "Solvency FCST_v80", "Saldo Inicial": 23890000, "Valor Plantilla Inicial (01/08)": 16110000},
-    {"user_id": 12630135, "Manager": "C.F. Montcada", "Saldo Inicial": 23890000, "Valor Plantilla Inicial (01/08)": 16110000},
-    {"user_id": 9879871, "Manager": "Tesoreros del gol", "Saldo Inicial": 24060000, "Valor Plantilla Inicial (01/08)": 15940000},
-    {"user_id": 12637492, "Manager": "Palancas FC", "Saldo Inicial": 23920000, "Valor Plantilla Inicial (01/08)": 16080000},
-    {"user_id": 11476314, "Manager": "Piedras FC", "Saldo Inicial": 23900000, "Valor Plantilla Inicial (01/08)": 16100000},
-    {"user_id": 9881550, "Manager": "Palmeroks", "Saldo Inicial": 23940000, "Valor Plantilla Inicial (01/08)": 16060000},
-    {"user_id": 9878097, "Manager": "Dani SR", "Saldo Inicial": 23900000, "Valor Plantilla Inicial (01/08)": 16100000},
-    {"user_id": 9960368, "Manager": "Tri Tranquils", "Saldo Inicial": 23870000, "Valor Plantilla Inicial (01/08)": 16130000},
-]
+# Optional local initial-balances override file (zero hardcoded user IDs in code; new leagues auto-reconstruct dynamically)
+INITIAL_BALANCES_OVERRIDE_PATH = os.path.join(WAREHOUSE_DIR, "initial_balances_override.json")
 
-# Official AZ Finance Clause Ranges (from /api/v2/league/1643248?fields=*,settings)
+
+def _load_initial_balances_override() -> List[Dict[str, Any]]:
+    if os.path.exists(INITIAL_BALANCES_OVERRIDE_PATH):
+        try:
+            with open(INITIAL_BALANCES_OVERRIDE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+EXACT_INITIAL_BALANCES: List[Dict[str, Any]] = _load_initial_balances_override()
+
 LEAGUE_CLAUSE_RANGES = [
-    (2_000_000, 225, "%"),
-    (3_000_000, 5_000_000, "abs"),
-    (5_000_000, 200, "%"),
-    (6_500_000, 10_000_000, "abs"),
-    (9_000_000, 175, "%"),
-    (12_000_000, 16_000_000, "abs"),
-    (15_000_000, 150, "%"),
-    (20_000_000, 24_000_000, "abs"),
-    (25_000_000, 135, "%"),
-    (30_000_000, 35_000_000, "abs"),
-    (float("inf"), 125, "%"),
+    (2_000_000.0, 225.0, "%"),
+    (3_000_000.0, 5_000_000.0, "abs"),
+    (5_000_000.0, 200.0, "%"),
+    (6_500_000.0, 10_000_000.0, "abs"),
+    (9_000_000.0, 175.0, "%"),
+    (12_000_000.0, 16_000_000.0, "abs"),
+    (15_000_000.0, 150.0, "%"),
+    (20_000_000.0, 24_000_000.0, "abs"),
+    (25_000_000.0, 135.0, "%"),
+    (30_000_000.0, 35_000_000.0, "abs"),
+    (float("inf"), 125.0, "%"),
 ]
 
 
 def compute_official_clause(base_value: float, extra_increment: float = 0.0) -> int:
     """
-    Computes the exact release clause according to AZ Finance's official `clauseRanges` rules:
+    Computes the exact release clause dynamically using the active league's `clauseRanges` rules:
     base_value = max(purchase_price or 0, current_market_price).
     """
-    base = float(base_value or 0.0)
-    if base <= 0:
-        return 0
-    clause_val = base * 2.0
-    for threshold, rule_val, mode in LEAGUE_CLAUSE_RANGES:
-        if base <= float(threshold):
-            if mode == "%":
-                clause_val = base * (float(rule_val) / 100.0)
-            else:
-                clause_val = float(rule_val)
-            break
-    return int(round(clause_val + float(extra_increment or 0.0)))
+    from src.tools.strategy_engine.league_rules import LeagueRulesEngine
+    return LeagueRulesEngine.load().compute_official_clause(base_value, extra_increment)
 
 
 def sanitize_sheet_cell(val: Any) -> Any:
@@ -174,10 +162,15 @@ class BiwengerWarehouse:
 
     @property
     def spreadsheet(self) -> Optional[gspread.Spreadsheet]:
+        if not self.sheet_id or not GoogleSheetsConfig.ENABLED:
+            return None
         if self._spreadsheet is None:
             self._gc = get_authorized_gspread_client(self.creds_path)
             if self._gc and self.sheet_id:
-                self._spreadsheet = self._gc.open_by_key(self.sheet_id)
+                try:
+                    self._spreadsheet = self._gc.open_by_key(self.sheet_id)
+                except Exception:
+                    return None
         return self._spreadsheet
 
     def get_connection(self) -> sqlite3.Connection:
@@ -342,3 +335,6 @@ class BiwengerWarehouse:
                 time.sleep(wait_s)
 
         return False
+
+    # Alias for backward/cross-module compatibility
+    sync_table_to_sheets = sync_dataframe_to_sheet

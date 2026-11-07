@@ -92,13 +92,13 @@ class StrictCausalDataView:
                 self._round_earliest_date[int(jn)] = min(valid_dts)
 
         self.current_date: str = self.all_dates[0] if self.all_dates else "2026-08-01"
-        self.decision_cutoff_ts: str = f"{self.current_date} 18:00:00"
+        self.decision_cutoff_ts: str = f"{self.current_date} 12:00:00"
 
     def set_date(self, date_str: str) -> None:
         d = str(date_str)[:10]
         self.current_date = d
-        # Decisions execute in morning/afternoon before evening 19:00-21:00 CEST kickoffs
-        self.decision_cutoff_ts = f"{d} 18:00:00"
+        # Daytime decision cutoff at 12:00:00 (strictly prior to afternoon/evening kickoffs in both UTC and Europe/Madrid)
+        self.decision_cutoff_ts = f"{d} 12:00:00"
 
     def _assert_no_leakage(self, requested_date: Optional[str]) -> str:
         target = str(requested_date)[:10] if requested_date is not None else self.current_date
@@ -142,6 +142,11 @@ class StrictCausalDataView:
         mask = (self._df_reports["fecha_partido"] != "") & (self._df_reports["fecha_partido"] < cutoff)
         return self._df_reports[mask].copy()
 
+    @property
+    def df_calendar(self) -> pd.DataFrame:
+        """Causally masked season schedule (post-match scores hidden for future matches)."""
+        return self.get_calendar_causal()
+
     def get_calendar_causal(self) -> pd.DataFrame:
         """
         Returns full season schedule (`Partidos_Calendario`) with post-match scores
@@ -151,6 +156,8 @@ class StrictCausalDataView:
         future_mask = cal["fecha_hora"] >= self.decision_cutoff_ts
         for col in POST_MATCH_CALENDAR_COLS:
             if col in cal.columns:
+                if cal[col].dtype != object:
+                    cal[col] = cal[col].astype(object)
                 cal.loc[future_mask, col] = ""
         if "estado_partido" in cal.columns:
             cal.loc[future_mask, "estado_partido"] = "pending"
