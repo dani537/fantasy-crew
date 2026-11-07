@@ -67,7 +67,7 @@ class AutopilotRunner:
         use_live_delta: bool = True,
     ):
         raw_mode = (mode or StrategySettings.AUTOPILOT_MODE).upper()
-        self.mode = raw_mode if raw_mode in ("DRY_RUN", "SEMI_AUTO", "FULL_AUTO") else "SEMI_AUTO"
+        self.mode = raw_mode if raw_mode in ("DRY_RUN", "SEMI_AUTO", "FULL_AUTO") else "FULL_AUTO"
         self.dry_run = (self.mode == "DRY_RUN" or GeneralSettings.DRY_RUN) if dry_run is None else bool(dry_run)
         self.db_path = db_path
         self.session_auth = session_auth
@@ -563,13 +563,20 @@ class AutopilotRunner:
         tier = "high_stakes" if (ctx["is_kickoff_day"] or self.trigger_phase != "MORNING_FULL") else "daily"
         client = TieredLLMRouter.get_client(tier=tier)
 
+        is_semi = (self.mode == "SEMI_AUTO")
         sales_str = ", ".join(
-            f"{s['nombre']} ({s['sale_price']:,}€ · {s['reason']}{' [Requiere OK]' if s.get('requires_human_approval') else ''})"
+            f"{s['nombre']} ({s['sale_price']:,}€ · {s['reason']}"
+            f"{' [Requiere OK]' if (is_semi and s.get('requires_human_approval')) else ''})"
             for s in plan.get("all_sales", [])
         ) or "Ninguna"
         clauses_str = ", ".join(
-            f"{c['nombre']} ({c['amount']:,}€ a {c['seller']}, +{c['delta_xp_xi']} xP [En cola OK humano])"
+            f"{c['nombre']} ({c['amount']:,}€ a {c['seller']}, +{c['delta_xp_xi']} xP "
+            f"{'[En cola OK humano]' if is_semi else '[Ejecutada autónomamente]'})"
             for c in plan.get("clause_snipes", [])
+        ) or "Ninguno"
+        shields_str = ", ".join(
+            f"{sh['nombre']} (+{sh['recommended_cash_spend']:,}€)"
+            for sh in plan.get("defensive_shields", [])
         ) or "Ninguno"
         bids_str = ", ".join(
             f"{b['nombre']} ({b['amount']:,}€ a {b['seller']}, +{b['delta_xp_xi']} xP)"
@@ -580,6 +587,11 @@ class AutopilotRunner:
         ) or "Ninguno"
         lineup_str = f"Formación {plan['lineup']['formation']} (xP esperados: {plan['lineup']['expected_points']:.1f} pts)"
         mem_brief = self.memory.build_context_brief_for_llm()
+        sec3_title = (
+            "3. Decisiones Reservadas para Tu Confirmación (Cláusulas / Ventas Importantes)"
+            if is_semi
+            else "3. Operaciones de Alto Impacto (Cláusulas, Blindajes y Ventas Estructurales — 100% Autónomas)"
+        )
 
         prompt = f"""
 Actúa como Director Deportivo Cuantitativo para '{ctx['team_name']}' en la liga Biwenger '{ctx['league_name']}'.
@@ -587,10 +599,10 @@ Genera un briefing ejecutivo conciso en texto limpio (máximo 4 bloques cortos c
 
 - Modo: {self.mode} (Dry Run: {self.dry_run}) | Fase Calendario J{ctx['target_jornada_num']}: {phase_ctx.phase_name}
 - Inicio J{ctx['target_jornada_num']}: {phase_ctx.next_kickoff_ts} ({phase_ctx.hours_to_kickoff:.1f}h) | Cláusulas abiertas ({self.rules.clause_disabled_hours}h): {phase_ctx.clauses_open} | Parón FIFA: {phase_ctx.is_international_break}
-- Caja Actual: {ctx['current_cash']:,} € -> Proyectada hoy tras ventas menores: {plan['post_sales_cash']:,} € (Nota Biwenger: las pujas son a sobre cerrado y solo descuentan caja mañana a las 06:00 si se ganan, respaldadas por nuestro Colateral Líquido Top-{self.rules.market_max_user_sales}: {plan.get('top_k_liquid_collateral', 0):,} €)
+- Caja Actual: {ctx['current_cash']:,} € -> Proyectada hoy tras ventas: {plan['post_sales_cash']:,} € (Nota Biwenger: las pujas son a sobre cerrado y solo descuentan caja mañana a las 06:00 si se ganan, respaldadas por nuestro Colateral Líquido Top-{self.rules.market_max_user_sales}: {plan.get('top_k_liquid_collateral', 0):,} €)
 - Pujas Autónomas Lanzadas: {bids_str}
-- Ventas Ejecutadas Hoy (NPV / Arbitraje): {sales_str}
-- Cláusulas Quirúrgicas Evaluadas: {clauses_str}
+- Ventas Ejecutadas Hoy (NPV / Arbitraje / Solvencia): {sales_str}
+- Cláusulas Quirúrgicas Evaluadas: {clauses_str} | Blindajes Defensivos: {shields_str}
 - Escaparate Preventivo Top-{len(plan.get('preventive_listings', []))} (+5% VM, máx oficial {self.rules.market_max_user_sales}): {listings_str} (Nota: listar flips/parches en el escaparate cuesta 0€ y es intencional para recibir ofertas diarias ±5% de la Máquina como colateral y opción de venta gratis; NO implica venderlos salvo oferta pico o necesidad de solvencia)
 - Once Titular Óptimo MILP: {lineup_str}
 - Decisiones Esperando Confirmación Humana (`/aprobar`): {len(pending)}
@@ -600,7 +612,7 @@ Genera un briefing ejecutivo conciso en texto limpio (máximo 4 bloques cortos c
 Estructura:
 1. Diagnóstico Financiero, Fase de Jornada y Escasez
 2. Operaciones Autónomas Ejecutadas (Pujas, Escaparate Top-5 y Once MILP)
-3. Decisiones Reservadas para Tu Confirmación (Cláusulas / Ventas Importantes)
+{sec3_title}
 4. Continuidad Estratégica de Medio Plazo
 """
         try:

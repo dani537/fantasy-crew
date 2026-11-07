@@ -54,9 +54,14 @@ def run_health_check() -> bool:
     print("-" * 72)
     print("🤖 GOBERNANZA AUTOPILOT & CANALES:")
     print(f"   • Modo Autopilot                  : {StrategySettings.AUTOPILOT_MODE} (DryRun={GeneralSettings.DRY_RUN})")
-    print(f"   • Pujas autónomas en SEMI_AUTO    : {'✅ Sí (notificando)' if StrategySettings.AUTONOMOUS_BIDS_IN_SEMI_AUTO else '❌ No'}")
-    print(f"   • Ventas menores autónomas        : {'✅ Sí (< ' + format(StrategySettings.IMPORTANT_SALE_MIN_EUR, ',') + ' €)' if StrategySettings.AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO else '❌ No'}")
-    print(f"   • Cláusulas y Ventas Importantes  : 🛡️ SIEMPRE confirmación humana (/aprobar en Telegram)")
+    if StrategySettings.AUTOPILOT_MODE == "FULL_AUTO":
+        print("   • Autonomía de Ejecución          : ⚡ 100% AUTÓNOMO bajo Guardrails v3 (Once, Pujas, Ventas, Solvencia, Cláusulas y Blindajes)")
+    elif StrategySettings.AUTOPILOT_MODE == "SEMI_AUTO":
+        print(f"   • Pujas autónomas en SEMI_AUTO    : {'✅ Sí (notificando)' if StrategySettings.AUTONOMOUS_BIDS_IN_SEMI_AUTO else '❌ No'}")
+        print(f"   • Ventas menores autónomas        : {'✅ Sí (< ' + format(StrategySettings.IMPORTANT_SALE_MIN_EUR, ',') + ' €)' if StrategySettings.AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO else '❌ No'}")
+        print("   • Cláusulas y Ventas Importantes  : 🛡️ SIEMPRE confirmación humana (/aprobar en Telegram / Sheets)")
+    else:
+        print("   • Autonomía de Ejecución          : 🧪 DRY_RUN (solo simulación, 0 mutaciones en Biwenger)")
     print(f"   • Proveedor IA (LLM)              : {GeneralSettings.LLM_PROVIDER} ({GeneralSettings.LLM_MODEL_DAILY}) -> {'✅ Configurado' if Credentials.get_llm_api_key() else '⚠️ Sin API Key (usará briefing sintético)'}")
     print(f"   • Notificaciones Email HTML       : {'✅ Activo (' + Credentials.NOTIFY_EMAIL_TO + ')' if (Credentials.GMAIL_ADDRESS and Credentials.GMAIL_PASSWORD) else '⚪ Opcional no configurado'}")
     print(f"   • Bot Telegram Bidireccional      : {'✅ Activo (chat_id=' + Credentials.TELEGRAM_ALLOWED_CHAT_ID + ')' if (Credentials.TELEGRAM_BOT_TOKEN and Credentials.TELEGRAM_ALLOWED_CHAT_ID) else ('🟡 Token presente, falta TELEGRAM_ALLOWED_CHAT_ID' if Credentials.TELEGRAM_BOT_TOKEN else '⚪ Opcional no configurado')}")

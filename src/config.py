@@ -304,9 +304,9 @@ class _StrategySettingsMeta(type):
     """Competitive strategy & Autopilot v3 execution policies (100% parameterizable via .env)."""
     @property
     def AUTOPILOT_MODE(cls) -> str:
-        """One of: DRY_RUN, SEMI_AUTO, FULL_AUTO."""
-        mode = _get_config_var("AUTOPILOT_MODE", "SEMI_AUTO").upper()
-        return mode if mode in ("DRY_RUN", "SEMI_AUTO", "FULL_AUTO") else "SEMI_AUTO"
+        """One of: DRY_RUN, SEMI_AUTO, FULL_AUTO (default: FULL_AUTO)."""
+        mode = _get_config_var("AUTOPILOT_MODE", "FULL_AUTO").upper()
+        return mode if mode in ("DRY_RUN", "SEMI_AUTO", "FULL_AUTO") else "FULL_AUTO"
 
     @property
     def RISK_PROFILE(cls) -> str:

@@ -1,15 +1,14 @@
 name: Dynamic Matchday Tactical Pulse & Decision Executor (v3)
 
 on:
-  schedule:
-    # Pulso ligero cada 30 min (<3s en reposo, 0 llamadas a Biwenger fuera de ventanas críticas):
-    #   1) Procesa aprobaciones SEMI_AUTO marcadas como APROBAR en Google Sheets (Decisiones_Pendientes)
-    #   2) Drena mensajes de Telegram (si está configurado)
-    #   3) Dispara Autopilot automáticamente en las 3 ventanas críticas reales del calendario LaLiga:
-    #      - T_kickoff - 48h (PRE_CLAUSE_LOCK: antes del cierre de cláusulas)
-    #      - T_kickoff - 2.5h (PRE_KICKOFF_SOLVENCY: garantía saldo >= 0€ para no puntuar 0)
-    #      - T_kickoff - 30m (FINAL_LINEUP_GUARD: guardia anti-lesión del Once Titular MILP)
-    - cron: '*/30 * * * *'
+  # Disparador externo exacto desde Cron-job.org (`{"event_type": "tactical-pulse"}`):
+  #   - Sale en <3s y 0 llamadas a Biwenger cuando no hay ventana activa.
+  #   - Se activa únicamente una vez por ventana real del calendario LaLiga (`Partidos_Calendario`):
+  #       1) T_kickoff - 48h  -> PRE_CLAUSE_LOCK (última ventana antes del cierre de cláusulas)
+  #       2) T_kickoff - 2.5h -> PRE_KICKOFF_SOLVENCY (garantía saldo >= 0€ para no puntuar 0)
+  #       3) T_kickoff - 45m  -> FINAL_LINEUP_GUARD (guardia anti-lesión/sanción de última hora del XI MILP)
+  repository_dispatch:
+    types: [tactical-pulse, run-tactical-pulse]
   workflow_dispatch:
     inputs:
       approve_decision_id:
@@ -75,7 +74,7 @@ jobs:
           NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO || vars.NOTIFY_EMAIL_TO || vars.GMAIL_ADRESS || secrets.GMAIL_ADRESS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
-          AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'SEMI_AUTO' }}
+          AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'FULL_AUTO' }}
           FORCE_PHASE: ${{ github.event.inputs.force_phase }}
           APPROVE_ID: ${{ github.event.inputs.approve_decision_id }}
           REJECT_ID: ${{ github.event.inputs.reject_decision_id }}

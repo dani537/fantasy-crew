@@ -359,7 +359,16 @@ class LeagueRulesEngine:
         if cal_prim.empty:
             cal_prim = cal[cal["_jn"] > 0].copy()
 
-        cal_prim["_dt"] = pd.to_datetime(cal_prim["fecha_hora"].astype(str).str[:19], errors="coerce")
+        # `Partidos_Calendario` stores official Biwenger API match timestamps in UTC
+        # (identifiable by `match_id` / `round_id`), whereas synthetic test tables pass naive Madrid time.
+        if "match_id" in cal_prim.columns or "round_id" in cal_prim.columns:
+            cal_prim["_dt"] = (
+                pd.to_datetime(cal_prim["fecha_hora"].astype(str).str[:19], errors="coerce", utc=True)
+                .dt.tz_convert("Europe/Madrid")
+                .dt.tz_localize(None)
+            )
+        else:
+            cal_prim["_dt"] = pd.to_datetime(cal_prim["fecha_hora"].astype(str).str[:19], errors="coerce")
         cal_prim = cal_prim.dropna(subset=["_dt"])
 
         round_windows: List[Tuple[int, pd.Timestamp, pd.Timestamp]] = []
@@ -413,10 +422,10 @@ class LeagueRulesEngine:
             bool(self.clause_enabled)
             and (active_jn is None)
             and (not is_placeholder)
-            and (0.20 <= hrs_to_cl <= 2.25)
+            and (0.15 <= hrs_to_cl <= 2.25)
         )
-        in_pre_solvency = (not is_placeholder) and (1.10 <= hrs_to_ko <= 3.25)
-        in_final_lineup = (not is_placeholder) and (0.12 <= hrs_to_ko <= 1.05)
+        in_pre_solvency = (not is_placeholder) and (1.05 <= hrs_to_ko <= 3.25)
+        in_final_lineup = (not is_placeholder) and (0.10 <= hrs_to_ko <= 1.00)
 
         if active_jn is not None:
             phase = "IN_ROUND_ACTIVE"

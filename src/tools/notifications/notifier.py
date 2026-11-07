@@ -132,7 +132,7 @@ class NotificationHub:
         team_name = cycle_summary.get("team_name") or ident.get("team_name", "Mi Equipo")
         league_name = cycle_summary.get("league_name") or ident.get("league_name", "Liga Biwenger")
         date_s = cycle_summary.get("date", datetime.date.today().isoformat())
-        mode = cycle_summary.get("mode", "SEMI_AUTO")
+        mode = cycle_summary.get("mode", "FULL_AUTO")
         j_num = cycle_summary.get("target_jornada_num", "?")
         phase_info = cycle_summary.get("phase_context") or {}
         phase_name = phase_info.get("phase_name", trigger_label)
@@ -237,7 +237,12 @@ class NotificationHub:
 
         execs = summary.get("executions") or []
         bids = plan.get("market_bids") or []
-        routine_sales = [s for s in (plan.get("all_sales") or []) if not s.get("requires_human_approval")]
+        is_full_auto = (str(summary.get("mode", "")).upper() == "FULL_AUTO")
+        auto_sales = (
+            (plan.get("all_sales") or [])
+            if is_full_auto
+            else [s for s in (plan.get("all_sales") or []) if not s.get("requires_human_approval")]
+        )
         listings = plan.get("preventive_listings") or []
 
         out.append(f"\n🤖 <b>Operaciones Autónomas ({esc(str(summary.get('mode')))}):</b>")
@@ -250,9 +255,15 @@ class NotificationHub:
         else:
             out.append("  • Pujas: Ninguna supera umbral calidad/precio hoy.")
 
-        if routine_sales:
-            for s in routine_sales:
-                out.append(f"  💸 Venta menor/solvencia: <b>{esc(s['nombre'])}</b> → <code>{int(s['sale_price']):,} €</code> ({esc(s['reason'])})")
+        if auto_sales:
+            for s in auto_sales:
+                out.append(f"  💸 Venta ejecutada: <b>{esc(s['nombre'])}</b> → <code>{int(s['sale_price']):,} €</code> ({esc(s['reason'])})")
+
+        if is_full_auto:
+            for c in (plan.get("clause_snipes") or []):
+                out.append(f"  ⚡ Cláusula ejecutada: <b>{esc(c['nombre'])}</b> → <code>{int(c['amount']):,} €</code> a {esc(str(c.get('seller', '')))}")
+            for sh in (plan.get("defensive_shields") or []):
+                out.append(f"  🛡️ Blindaje ejecutado: <b>{esc(sh['nombre'])}</b> (+<code>{int(sh['recommended_cash_spend']):,} €</code>)")
 
         if listings:
             names_l = ", ".join(f"{esc(p['nombre'])}" for p in listings)
@@ -311,6 +322,30 @@ class NotificationHub:
             </div>
             """
 
+        is_full_auto = (str(summary.get("mode", "")).upper() == "FULL_AUTO")
+        exec_ops_items: List[str] = []
+        for s in (plan.get("all_sales") or []):
+            if is_full_auto or not s.get("requires_human_approval"):
+                exec_ops_items.append(
+                    f"<li>💸 <b>Venta ejecutada:</b> {esc(s['nombre'])} por <b>{int(s['sale_price']):,} €</b> ({esc(s['reason'])})</li>"
+                )
+        if is_full_auto:
+            for c in (plan.get("clause_snipes") or []):
+                exec_ops_items.append(
+                    f"<li>⚡ <b>Cláusula ejecutada:</b> {esc(c['nombre'])} por <b>{int(c['amount']):,} €</b> a {esc(str(c.get('seller', '')))} (+{c['delta_xp_xi']:.2f} xP)</li>"
+                )
+            for sh in (plan.get("defensive_shields") or []):
+                exec_ops_items.append(
+                    f"<li>🛡️ <b>Blindaje ejecutado:</b> {esc(sh['nombre'])} (+<b>{int(sh['recommended_cash_spend']):,} €</b>)</li>"
+                )
+        exec_ops_html = ""
+        if exec_ops_items:
+            exec_ops_html = (
+                "<div style='background:#eff6ff;border-left:4px solid #2563eb;padding:12px 16px;margin:14px 0;border-radius:6px;font-size:13px;'>"
+                "<b style='color:#1e40af;'>⚡ Ventas, Cláusulas y Blindajes Ejecutados Autónomamente:</b>"
+                f"<ul style='margin:6px 0 0 0;padding-left:18px;'>{''.join(exec_ops_items)}</ul></div>"
+            )
+
         bids_rows = "".join(
             f"<tr><td style='padding:6px;border-bottom:1px solid #e5e7eb;'><b>{esc(b['nombre'])}</b> ({b['position']})</td>"
             f"<td style='padding:6px;border-bottom:1px solid #e5e7eb;'>{int(b['market_price']):,} €</td>"
@@ -363,6 +398,7 @@ class NotificationHub:
           </div>
 
           {pending_html}
+          {exec_ops_html}
 
           <h3 style="color:#065f46;border-bottom:2px solid #d1fae5;padding-bottom:6px;">⚽ Once Titular Óptimo MILP ({esc(str(lu.get('formation', '4-4-2')))} · {lu.get('expected_points', 0):.1f} xP)</h3>
           <div style="margin-bottom:16px;">{xi_rows}</div>

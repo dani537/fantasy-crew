@@ -47,7 +47,7 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
-          AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'SEMI_AUTO' }}
+          AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'FULL_AUTO' }}
           DIRECT_CHAT_ID: ${{ github.event.client_payload.chat_id }}
           DIRECT_TEXT: ${{ github.event.client_payload.text }}
         run: |

@@ -1,19 +1,17 @@
 name: Daily Biwenger Market, Predictions & Morning Autopilot (v3)
 
 on:
-  # 1. Disparador principal sin retraso (Cron-job.org existente)
+  # 1. Disparador externo exacto sin retraso desde Cron-job.org (POST /dispatches)
+  #    Sin `schedule:` interno de GitHub para evitar retrasos aleatorios de cola.
   repository_dispatch:
     types: [run-market-tracker, daily-market-capture]
-  # 2. Red de seguridad automática (08:30 UTC = 09:30 CET): sale en <3s si Cron-job.org ya corrió hoy
-  schedule:
-    - cron: '30 8 * * *'
-  # 3. Botón manual desde GitHub Actions
+  # 2. Botón manual desde GitHub Actions
   workflow_dispatch:
     inputs:
       autopilot_mode:
-        description: 'Modo Autopilot al finalizar extracción (SEMI_AUTO, DRY_RUN, FULL_AUTO)'
+        description: 'Modo Autopilot al finalizar extracción (FULL_AUTO, SEMI_AUTO, DRY_RUN)'
         required: false
-        default: 'SEMI_AUTO'
+        default: 'FULL_AUTO'
 
 concurrency:
   group: fantasy-champion-biwenger
@@ -68,13 +66,13 @@ jobs:
           NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO || vars.NOTIFY_EMAIL_TO || vars.GMAIL_ADRESS || secrets.GMAIL_ADRESS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
-          AUTOPILOT_MODE: ${{ github.event.inputs.autopilot_mode || vars.AUTOPILOT_MODE || 'SEMI_AUTO' }}
+          AUTOPILOT_MODE: ${{ github.event.inputs.autopilot_mode || vars.AUTOPILOT_MODE || 'FULL_AUTO' }}
         run: |
-          if [ "$EVENT_NAME" = "schedule" ]; then
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
             python -u -m src.tools.data_extraction.sync_local --memory-only --no-api || true
             STATUS_TODAY=$(python -m src.tools.scheduler.dynamic_dispatcher --check-morning-done | tail -n 1)
             if [ "$STATUS_TODAY" = "ALREADY_DONE" ]; then
-              echo "✅ Ciclo matinal ya completado hoy vía disparador primario (Cron-job.org). Saliendo sin duplicar ejecución."
+              echo "✅ Ciclo matinal ya completado hoy. Saliendo sin duplicar ejecución."
               exit 0
             fi
           fi
