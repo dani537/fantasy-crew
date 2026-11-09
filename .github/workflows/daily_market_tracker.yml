@@ -43,6 +43,7 @@ jobs:
       - name: 🚀 Deep Extraction -> ML Predictions -> Morning Autopilot + Email/Telegram
         env:
           PYTHONUNBUFFERED: "1"
+          PYTHONPATH: "."
           EVENT_NAME: ${{ github.event_name }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GOOGLE_SERVICE_ACCOUNT_FILE: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_FILE }}
@@ -84,7 +85,7 @@ jobs:
           python -u -m src.tools.data_extraction.historical_backfill --comuniate-history
 
           # 3. Captura profunda 43-D de los ~550 jugadores respetando cuota de 200 req/hora UTC
-          python -u src/tools/data_extraction/daily_market_tracker.py
+          python -u -m src.tools.data_extraction.daily_market_tracker
 
           # 4. Predicciones ML de precios (Predicciones_IA)
           python -u test/05_market_prediction/run.py --sync-sheets || true
