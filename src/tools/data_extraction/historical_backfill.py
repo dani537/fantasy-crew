@@ -1118,15 +1118,15 @@ def extract_rounds_matches_reports_and_lineups(
             .reset_index(drop=True)
         )
         for row_rep in df_player_reports.to_dict(orient="records"):
-            pid = int(row_rep["player_id"])
+            pid = _safe_int(row_rep["player_id"])
             m_day = str(row_rep["fecha_partido"])[:10]
             if m_day:
                 player_dated_reports.setdefault(pid, []).append({
                     "date": m_day,
-                    "pts": int(row_rep["puntos_biwenger"] or 0),
-                    "goals": int(row_rep["goles"] or 0),
-                    "assists": int(row_rep["asistencias"] or 0),
-                    "mins": int(row_rep["minutos_jugados"] or 0),
+                    "pts": _safe_int(row_rep["puntos_biwenger"], 0),
+                    "goals": _safe_int(row_rep["goles"], 0),
+                    "assists": _safe_int(row_rep["asistencias"], 0),
+                    "mins": _safe_int(row_rep["minutos_jugados"], 0),
                     "picas": row_rep["picas_as"],
                     "sofascore": row_rep["nota_sofascore"],
                 })
@@ -1191,12 +1191,18 @@ def extract_rounds_matches_reports_and_lineups(
     if not df_matches.empty:
         df_unique_matches = df_matches.sort_values("part").drop_duplicates(subset=["match_id"], keep="last")
         for _, m in df_unique_matches.iterrows():
-            if m["estado_partido"] != "finished" or m["goles_local"] == "" or m["goles_visitante"] == "":
+            if (
+                m["estado_partido"] != "finished"
+                or pd.isna(m["goles_local"])
+                or pd.isna(m["goles_visitante"])
+                or str(m["goles_local"]).strip() == ""
+                or str(m["goles_visitante"]).strip() == ""
+            ):
                 continue
-            lid = int(m["local_id"])
-            vid = int(m["visitante_id"])
-            gl = int(m["goles_local"])
-            gv = int(m["goles_visitante"])
+            lid = _safe_int(m["local_id"])
+            vid = _safe_int(m["visitante_id"])
+            gl = _safe_int(m["goles_local"])
+            gv = _safe_int(m["goles_visitante"])
 
             if lid in team_stats_map:
                 ts = team_stats_map[lid]
@@ -1213,11 +1219,11 @@ def extract_rounds_matches_reports_and_lineups(
                     ts["puntos_laliga"] += 1
                 else:
                     ts["pp"] += 1
-                if m["posesion_local"] != "":
+                if pd.notna(m["posesion_local"]) and str(m["posesion_local"]).strip() != "":
                     ts["posesion_list"].append(float(m["posesion_local"]))
-                if m["tiros_local"] != "":
+                if pd.notna(m["tiros_local"]) and str(m["tiros_local"]).strip() != "":
                     ts["tiros_list"].append(float(m["tiros_local"]))
-                if m["tiros_puerta_local"] != "":
+                if pd.notna(m["tiros_puerta_local"]) and str(m["tiros_puerta_local"]).strip() != "":
                     ts["tiros_puerta_list"].append(float(m["tiros_puerta_local"]))
 
             if vid in team_stats_map:
@@ -1235,17 +1241,17 @@ def extract_rounds_matches_reports_and_lineups(
                     ts["puntos_laliga"] += 1
                 else:
                     ts["pp"] += 1
-                if m["posesion_visitante"] != "":
+                if pd.notna(m["posesion_visitante"]) and str(m["posesion_visitante"]).strip() != "":
                     ts["posesion_list"].append(float(m["posesion_visitante"]))
-                if m["tiros_visitante"] != "":
+                if pd.notna(m["tiros_visitante"]) and str(m["tiros_visitante"]).strip() != "":
                     ts["tiros_list"].append(float(m["tiros_visitante"]))
-                if m["tiros_puerta_visitante"] != "":
+                if pd.notna(m["tiros_puerta_visitante"]) and str(m["tiros_puerta_visitante"]).strip() != "":
                     ts["tiros_puerta_list"].append(float(m["tiros_puerta_visitante"]))
 
         df_pending = df_unique_matches[df_unique_matches["estado_partido"] == "pending"].sort_values("fecha_hora")
         for _, m in df_pending.iterrows():
-            lid = int(m["local_id"])
-            vid = int(m["visitante_id"])
+            lid = _safe_int(m["local_id"])
+            vid = _safe_int(m["visitante_id"])
             if lid in team_stats_map and not team_stats_map[lid]["proximo_rival"]:
                 team_stats_map[lid]["proximo_rival"] = m["visitante"]
                 team_stats_map[lid]["proxima_condicion"] = "LOCAL"
@@ -1535,7 +1541,7 @@ def build_daily_market_listings_history(
         df_winners = df_bids[df_bids["gano_subasta"] == "SÍ"]
         for _, r in df_winners.iterrows():
             d_str = str(r["fecha"])[:10]
-            pid = int(r["player_id"])
+            pid = _safe_int(r["player_id"])
             rows.append({
                 "id_registro": f"AUCTION_{d_str}_{pid}",
                 "fecha": d_str,
@@ -1545,25 +1551,25 @@ def build_daily_market_listings_history(
                 "posicion": r["posicion"],
                 "equipo": r["equipo"],
                 "vendedor_o_origen": "Mercado",
-                "precio_mercado_dia": int(r["precio_mercado_dia"]),
-                "precio_salida_o_oferta": int(r["precio_mercado_dia"]),
-                "importe_adjudicado": int(r["importe_ganador"]),
+                "precio_mercado_dia": _safe_int(r["precio_mercado_dia"]),
+                "precio_salida_o_oferta": _safe_int(r["precio_mercado_dia"]),
+                "importe_adjudicado": _safe_int(r["importe_ganador"]),
                 "comprador_o_destinatario": r["manager_pujador"],
-                "num_pujadores": int(r["num_pujadores_subasta"]),
+                "num_pujadores": _safe_int(r["num_pujadores_subasta"]),
                 "fecha_expiracion": str(r["fecha"]),
             })
 
     if df_market_sales is not None and not df_market_sales.empty:
         for _, s in df_market_sales.iterrows():
-            pid = int(s.get("player_id", 0) or 0)
+            pid = _safe_int(s.get("player_id"), 0)
             if not pid:
                 continue
             p_base = raw_players.get(str(pid), {})
             p_name = p_base.get("name", f"Jugador {pid}")
             p_pos = POSITION_MAP.get(p_base.get("position"), str(p_base.get("position", "")))
-            p_team = teams_map.get(int(p_base.get("teamID", 0) or 0), "Sin Equipo")
-            mkt_p = int(p_base.get("price", 0) or 0)
-            sale_p = int(s.get("price", mkt_p) or mkt_p)
+            p_team = teams_map.get(_safe_int(p_base.get("teamID"), 0), "Sin Equipo")
+            mkt_p = _safe_int(p_base.get("price"), 0)
+            sale_p = _safe_int(s.get("price", mkt_p), mkt_p)
             seller = str(s.get("user_name") or "Mercado")
             until_str = str(s.get("until") or "")
 
@@ -1586,15 +1592,15 @@ def build_daily_market_listings_history(
 
     if df_market_offers is not None and not df_market_offers.empty:
         for _, o in df_market_offers.iterrows():
-            pid = int(o.get("requested_player_id", 0) or 0)
+            pid = _safe_int(o.get("requested_player_id"), 0)
             if not pid:
                 continue
             p_base = raw_players.get(str(pid), {})
             p_name = p_base.get("name", f"Jugador {pid}")
             p_pos = POSITION_MAP.get(p_base.get("position"), str(p_base.get("position", "")))
-            p_team = teams_map.get(int(p_base.get("teamID", 0) or 0), "Sin Equipo")
-            mkt_p = int(p_base.get("price", 0) or 0)
-            off_amt = int(o.get("amount", 0) or 0)
+            p_team = teams_map.get(_safe_int(p_base.get("teamID"), 0), "Sin Equipo")
+            mkt_p = _safe_int(p_base.get("price"), 0)
+            off_amt = _safe_int(o.get("amount"), 0)
             from_name = str(o.get("from_name") or "Mercado")
             until_str = str(o.get("until") or "")
 

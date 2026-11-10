@@ -86,7 +86,10 @@ def sanitize_sheet_cell(val: Any) -> Any:
         return int(val)
     if isinstance(val, (pd.Timestamp,)):
         return val.strftime("%Y-%m-%d %H:%M:%S")
-    return str(val)
+    s_val = str(val)
+    if s_val.endswith(".0") and s_val[:-2].lstrip("-").isdigit():
+        return int(s_val[:-2])
+    return s_val
 
 
 def get_authorized_gspread_client(creds_path: Optional[str] = None) -> Optional[gspread.Client]:
@@ -143,11 +146,11 @@ class BiwengerWarehouse:
 
     def __init__(
         self,
-        db_path: str = WAREHOUSE_DB_PATH,
+        db_path: Optional[str] = None,
         sheet_id: Optional[str] = None,
         creds_path: Optional[str] = None
     ):
-        self.db_path = db_path
+        self.db_path = db_path or os.path.join(WAREHOUSE_DIR, "biwenger_history.db")
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.sheet_id = (
             sheet_id
@@ -254,7 +257,19 @@ class BiwengerWarehouse:
         if effective_sort:
             valid_sort = [c for c in effective_sort if c in df_combined.columns]
             if valid_sort:
-                df_combined = df_combined.sort_values(by=valid_sort).reset_index(drop=True)
+                try:
+                    df_combined = df_combined.sort_values(by=valid_sort).reset_index(drop=True)
+                except TypeError:
+                    sort_key_cols = []
+                    for sc in valid_sort:
+                        k_col = f"__sort_{sc}"
+                        num_s = pd.to_numeric(df_combined[sc], errors="coerce")
+                        if num_s.notna().any():
+                            df_combined[k_col] = num_s.fillna(-1e18)
+                        else:
+                            df_combined[k_col] = df_combined[sc].astype(str)
+                        sort_key_cols.append(k_col)
+                    df_combined = df_combined.sort_values(by=sort_key_cols).drop(columns=sort_key_cols).reset_index(drop=True)
 
         # Save to SQLite with indexes
         with self.get_connection() as conn:
