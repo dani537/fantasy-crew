@@ -35,9 +35,17 @@ class ClauseSniper:
         self,
         policy: str = "COMPETITIVE_VORP",
         rules: Optional[LeagueRulesEngine] = None,
+        league_ratio_cap: float = 2.20,
+        clause_min_avg_pts: float = 4.8,
+        clause_min_delta_xp: float = 0.75,
+        clause_budget_reserve_pct: float = 0.80,
     ):
         self.policy = (policy or "COMPETITIVE_VORP").upper()
         self.rules = rules or LeagueRulesEngine.load()
+        self.league_ratio_cap = float(league_ratio_cap)
+        self.clause_min_avg_pts = float(clause_min_avg_pts)
+        self.clause_min_delta_xp = float(clause_min_delta_xp)
+        self.clause_budget_reserve_pct = float(clause_budget_reserve_pct)
 
     def scan_offensive_targets(
         self,
@@ -150,7 +158,10 @@ class ClauseSniper:
             if self.policy == "COMPETITIVE_VORP":
                 # In AZ Finance / standard Biwenger rules, minimum clauses are 1.70x to 2.25x.
                 # Allow official league ratios when cash is abundant and player delivers high VORP.
-                league_ratio_cap = 2.20 if float(idle_cash_eur) >= 5_000_000.0 else 1.95
+                cap = getattr(self, "league_ratio_cap", 2.20)
+                league_ratio_cap = cap if float(idle_cash_eur) >= 5_000_000.0 else min(cap, 1.95)
+                min_avg = getattr(self, "clause_min_avg_pts", 4.8)
+                min_dx = getattr(self, "clause_min_delta_xp", 0.75)
                 is_micro_breakout = (
                     clause <= 5_200_000
                     and clause_ratio <= 2.25
@@ -161,8 +172,8 @@ class ClauseSniper:
                 )
                 is_star_steal = (
                     p_start >= 0.70
-                    and (xp_best >= 4.2 or avg_pts_raw >= 4.8)
-                    and delta_xp >= 0.75
+                    and (xp_best >= 4.2 or avg_pts_raw >= min_avg)
+                    and delta_xp >= min_dx
                     and clause_ratio <= league_ratio_cap
                     and (subida >= -20_000)
                     and net_alpha_eur >= max(350_000.0, clause * 0.06)

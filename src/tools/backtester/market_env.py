@@ -32,6 +32,7 @@ from src.tools.strategy_engine.portfolio_optimizer import (
     PortfolioOptimizer,
     OFFICIAL_FORMATIONS,
 )
+from src.tools.strategy_engine.archetypes import StrategyArchetype
 from src.tools.backtester.causal_clock import StrictCausalDataView, CausalEFRPredictor
 from src.utils.numeric import safe_num
 
@@ -61,6 +62,7 @@ class AZFinanceMarketEnv:
         credit_limit_ratio: Optional[float] = None,
         max_squad_size: int = 21,
         rules: Optional[LeagueRulesEngine] = None,
+        equalize_starting_wealth: bool = True,
     ):
         ident = resolve_active_user_identity()
         self.rules = rules or LeagueRulesEngine.load()
@@ -74,6 +76,7 @@ class AZFinanceMarketEnv:
             float(credit_limit_ratio) if credit_limit_ratio is not None else float(self.rules.credit_limit_ratio)
         )
         self.max_squad_size = min(int(max_squad_size), int(self.rules.team_max_size))
+        self.equalize_starting_wealth = bool(equalize_starting_wealth)
 
         self.view = StrictCausalDataView(db_path=db_path)
         self.efr_predictor = CausalEFRPredictor(self.view)
@@ -298,7 +301,6 @@ class AZFinanceMarketEnv:
             raise RuntimeError(f"Manager '{self.target_manager}' not found on 2026-08-01 in Historico_Equipos_Diario")
 
         row0 = my_row.iloc[0]
-        self.cash: float = safe_num(row0["saldo_disponible_exacto"], 23_900_000.0)
         init_pids = [int(x) for x in str(row0["plantilla_ids"]).split(",") if x.strip().isdigit()]
 
         mkt_d1 = self.view.get_market_snapshot("2026-08-01").set_index("player_id").to_dict("index")
@@ -316,7 +318,13 @@ class AZFinanceMarketEnv:
                 purchase_price=vm,
                 extra_shield=0,
             )
-        self.initial_net_worth: int = int(round(self.cash + init_sq_val))
+
+        if self.equalize_starting_wealth:
+            self.cash = float(max(0, 40_000_000 - init_sq_val))
+            self.initial_net_worth = 40_000_000
+        else:
+            self.cash = safe_num(row0["saldo_disponible_exacto"], 23_900_000.0)
+            self.initial_net_worth = int(round(self.cash + init_sq_val))
 
         self.pending_bids: List[Dict[str, Any]] = []
         self.listed_pids: Set[int] = set()
@@ -648,6 +656,7 @@ class AZFinanceMarketEnv:
         legacy_v2_mode: bool = False,
         start_date: str = "2026-08-01",
         end_date: Optional[str] = None,
+        archetype: Optional[StrategyArchetype] = None,
     ) -> Dict[str, Any]:
         """
         Executes the full day-by-day simulation under 100% honest official Biwenger rules
@@ -658,16 +667,34 @@ class AZFinanceMarketEnv:
         eff_end_date = end_date or max_avail_date
 
         mem_ledger = StrategyMemoryLedger(in_memory_only=True)
-        opt = optimizer or PortfolioOptimizer(
-            xp_engine=self.xp_engine,
-            credit_limit_ratio=self.credit_limit_ratio if enable_leverage else 0.0,
-            max_squad_size=self.max_squad_size,
-            preventive_listing=enable_preventive_listing,
-            rules=self.rules,
-        )
+        if optimizer is not None:
+            opt = optimizer
+        elif archetype is not None:
+            opt = PortfolioOptimizer(
+                xp_engine=self.xp_engine,
+                credit_limit_ratio=self.credit_limit_ratio if enable_leverage else 0.0,
+                max_squad_size=archetype.target_roster_size,
+                preventive_listing=enable_preventive_listing,
+                rules=self.rules,
+                archetype=archetype,
+                protect_pillars_absolute=archetype.protect_pillars_absolute,
+            )
+        else:
+            opt = PortfolioOptimizer(
+                xp_engine=self.xp_engine,
+                credit_limit_ratio=self.credit_limit_ratio if enable_leverage else 0.0,
+                max_squad_size=self.max_squad_size,
+                preventive_listing=enable_preventive_listing,
+                rules=self.rules,
+            )
         opt.credit_limit_ratio = self.credit_limit_ratio if enable_leverage else 0.0
         opt.preventive_listing = enable_preventive_listing
-        opt.clause_sniper.policy = (clause_policy if enable_clauses else "DISABLED")
+        if not enable_clauses:
+            opt.clause_sniper.policy = "DISABLED"
+        elif archetype is not None:
+            opt.clause_sniper.policy = "COMPETITIVE_VORP"
+        else:
+            opt.clause_sniper.policy = clause_policy
 
         sim_dates = [d for d in self.view.all_dates if start_date <= d <= eff_end_date]
         max_sales_slots = int(self.rules.market_max_user_sales)

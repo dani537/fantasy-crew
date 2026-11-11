@@ -375,6 +375,40 @@ class _StrategySettingsMeta(type):
             return 22
 
     @property
+    def ACTIVE_ARCHETYPE(cls) -> str:
+        """Active quantitative strategy archetype (e.g. ADAPTIVE_LIFECYCLE, GALACTICOS_CORE, etc.)."""
+        return _get_config_var("ACTIVE_ARCHETYPE", "ADAPTIVE_LIFECYCLE")
+
+    @property
+    def PROTECT_PILLARS_ABSOLUTE(cls) -> bool:
+        """Strict prohibition against routine Computer liquidations of franchise stars."""
+        return _get_config_var("PROTECT_PILLARS_ABSOLUTE", "true").lower() in ("1", "true", "yes")
+
+    @property
+    def CLAUSE_RATIO_CAP(cls) -> float:
+        """Maximum buyout multiplier willing to pay for victim player."""
+        try:
+            return float(_get_config_var("CLAUSE_RATIO_CAP", "2.20"))
+        except ValueError:
+            return 2.20
+
+    @property
+    def CLAUSE_MIN_AVG_PTS(cls) -> float:
+        """Minimum points average of target player in offensive clause snipes."""
+        try:
+            return float(_get_config_var("CLAUSE_MIN_AVG_PTS", "4.8"))
+        except ValueError:
+            return 4.8
+
+    @property
+    def CLAUSE_MIN_DELTA_XP(cls) -> float:
+        """Minimum xP gain over current XI starting floor."""
+        try:
+            return float(_get_config_var("CLAUSE_MIN_DELTA_XP", "0.75"))
+        except ValueError:
+            return 0.75
+
+    @property
     def INITIAL_LEAGUE_BUDGET_EUR(cls) -> int:
         """Default initial total budget (Cash + Day-1 Squad Value) for Biwenger leagues (standard = 40M €)."""
         try:

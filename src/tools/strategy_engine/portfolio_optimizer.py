@@ -27,6 +27,9 @@ from src.tools.strategy_engine.replacement_cost import (
     evaluate_hold_vs_sell_npv,
 )
 from src.tools.strategy_engine.strategy_memory import StrategyMemoryLedger
+from src.tools.strategy_engine.lifecycle_manager import LeagueLifecycleEngine, SeasonPhase
+from src.tools.strategy_engine.injury_tactician import InjuryTacticalDecisionEngine, InjuryAction
+from src.tools.strategy_engine.archetypes import StrategyArchetype, STRATEGY_ARCHETYPES
 from src.utils.numeric import safe_num
 
 
@@ -55,24 +58,52 @@ class PortfolioOptimizer:
         preventive_listing: bool = True,
         rules: Optional[LeagueRulesEngine] = None,
         important_sale_min_eur: Optional[int] = None,
+        archetype: Optional[StrategyArchetype] = None,
+        protect_pillars_absolute: bool = True,
     ):
         self.rules = rules or LeagueRulesEngine.load()
         self.xp_engine = xp_engine or ExpectedPointsEngine()
         self.auction_model = auction_model or AuctionBidModel()
-        self.clause_sniper = clause_sniper or ClauseSniper(
-            policy=StrategySettings.CLAUSE_POLICY,
-            rules=self.rules,
-        )
+        self.archetype = archetype
+        self.protect_pillars_absolute = bool(protect_pillars_absolute)
+
+        # Initialize clause sniper with archetype parameters if provided
+        if clause_sniper is not None:
+            self.clause_sniper = clause_sniper
+        else:
+            c_pol = StrategySettings.CLAUSE_POLICY
+            r_cap = 2.20
+            min_avg = 4.8
+            min_dx = 0.75
+            res_pct = 0.80
+            if archetype is not None:
+                c_pol = "COMPETITIVE_VORP"
+                r_cap = archetype.clause_ratio_cap
+                min_avg = archetype.clause_min_avg_pts
+                min_dx = archetype.clause_min_delta_xp
+                res_pct = archetype.clause_cash_reserve_pct
+            self.clause_sniper = ClauseSniper(
+                policy=c_pol,
+                rules=self.rules,
+                league_ratio_cap=r_cap,
+                clause_min_avg_pts=min_avg,
+                clause_min_delta_xp=min_dx,
+                clause_budget_reserve_pct=res_pct,
+            )
+
         self.credit_limit_ratio = (
             float(credit_limit_ratio)
             if credit_limit_ratio is not None
             else float(self.rules.credit_limit_ratio)
         )
-        self.max_squad_size = (
-            int(max_squad_size)
-            if max_squad_size is not None
-            else min(int(self.rules.team_max_size), int(StrategySettings.MAX_SQUAD_SIZE))
-        )
+        if archetype is not None and max_squad_size is None:
+            self.max_squad_size = int(archetype.target_roster_size)
+        else:
+            self.max_squad_size = (
+                int(max_squad_size)
+                if max_squad_size is not None
+                else min(int(self.rules.team_max_size), int(StrategySettings.MAX_SQUAD_SIZE))
+            )
         self.preventive_listing = bool(preventive_listing)
         self.important_sale_min_eur = (
             int(important_sale_min_eur)
@@ -532,6 +563,19 @@ class PortfolioOptimizer:
             clause_locked_ids=clause_locked_ids,
         )
 
+        # Macro Lifecycle Intelligence
+        sc_summary = scarcity_engine.get_league_scarcity_summary()
+        current_jn = int(phase_ctx.target_jornada_num if phase_ctx else 1)
+        is_fifa = bool(phase_ctx.is_international_break if phase_ctx else False)
+        macro_ctx = LeagueLifecycleEngine.evaluate_macro_context(
+            free_players_ge_5m=sc_summary.get("free_ge_5m", 15),
+            free_players_ge_10m=sc_summary.get("free_ge_10m", 3),
+            current_jornada=current_jn,
+            total_jornadas=38,
+            days_to_next_match=eff_days_to_kickoff,
+            is_international_break=is_fifa,
+        )
+
         # Baseline MILP XI before sales to identify current XI starters & bench backup xP per line
         base_milp = self.solve_joint_lineup_and_solvency_milp(
             squad_df=sq,
@@ -719,16 +763,49 @@ class PortfolioOptimizer:
                     or (working_cash < 2_500_000.0 and board_best_here > xp_best + 0.85)
                 )
 
+                # Tactical Injury Intelligence:
+                inj_decision = InjuryTacticalDecisionEngine.decide(
+                    player_id=pid,
+                    nombre=str(r.get("nombre", "")),
+                    estado=str(r.get("estado", xp_info.get("estado", "ok"))),
+                    absence_days_est=int(npv_res.get("absence_days_est", 0)),
+                    missed_rounds_calendar=int(npv_res.get("missed_rounds_est", 0)),
+                    is_fifa_break=bool(macro_ctx.get("is_fifa_break", False)),
+                    asset_role=role,
+                    efr_72h=efr_72h,
+                    market_price=price,
+                    best_market_alternative_xp=float(npv_res.get("reinvest_xp_est", 3.0)),
+                    player_healthy_xp=float(xp_healthy),
+                )
+
+                # Pillar Lock: strict protection of franchise pillars against routine Computer liquidations
+                is_pillar = bool(
+                    self.protect_pillars_absolute
+                    and (role == "FRANCHISE_CORE" or (xp_healthy >= 5.8 and price >= 11_000_000.0))
+                )
+
+                # FIFA Break Hold Momentum: hold rising assets during international break (0 match points at risk)
+                if macro_ctx.get("fifa_break_hold_momentum", False) and efr_72h >= 20_000.0 and not is_forced:
+                    continue
+
+                if is_pillar and not is_forced:
+                    if inj_decision["action"] != InjuryAction.SELL_CASH_OUT:
+                        continue
+
                 # Rule 1A: Microeconomic NPV Disposal (`NPV_SELL > NPV_HOLD` across real calendar & replacement cost)
-                # - Unavailable (injured/suspended) or actively depreciating assets: evaluated directly by NPV!
-                # - Healthy, stable/appreciating assets: only proactively liquidated when we actually need a slot/cash for a live upgrade (never dumped into empty boards!)
+                # Unavailable/injured players follow InjuryTacticalDecisionEngine recommendation!
                 min_hold_days = 8 if was_claused_premium else 2
                 can_proactively_rotate = (not is_avail) or is_depreciating or needs_slot_or_liquidity
-                is_npv_disposal = (
-                    bool(npv_res.get("recommend_sell", False))
-                    and can_proactively_rotate
-                    and ((not is_avail and int(npv_res.get("missed_rounds_est", 0)) >= 2) or held_days >= min_hold_days)
-                )
+
+                if not is_avail:
+                    is_npv_disposal = (inj_decision["action"] == InjuryAction.SELL_CASH_OUT)
+                else:
+                    is_npv_disposal = (
+                        bool(npv_res.get("recommend_sell", False))
+                        and can_proactively_rotate
+                        and held_days >= min_hold_days
+                    )
+
                 if is_npv_disposal and not is_forced:
                     # Multi-Day Offer-Roll Patience: reject lowball Computer offers (<-1.8%) when >=2 days to kickoff!
                     if (
@@ -747,6 +824,7 @@ class PortfolioOptimizer:
                     and offer_pct >= 0.032
                     and (offer_amt - price) >= max(25_000.0, efr_72h * 0.78)
                     and xp_best < 4.9
+                    and not is_pillar
                 )
 
                 if is_forced or is_npv_disposal or is_peak_harvest:
@@ -930,7 +1008,10 @@ class PortfolioOptimizer:
                 })
 
         # 3B. Evaluate Surgical Scarcity Clause Snipes (ONLY when `eff_clauses_open` & positive cash!)
-        clause_budget = max(0.0, working_cash - 300_000.0) if eff_clauses_open else 0.0
+        clause_frac = float(macro_ctx.get("clause_budget_fraction", 0.0))
+        if self.archetype is not None:
+            clause_frac = min(clause_frac, max(0.0, 1.0 - float(self.archetype.clause_cash_reserve_pct)))
+        clause_budget = max(0.0, (working_cash - 300_000.0) * clause_frac) if eff_clauses_open else 0.0
         clause_targets = self.clause_sniper.scan_offensive_targets(
             df_market_today=df_market_all,
             xp_table=xp_table,
@@ -988,6 +1069,10 @@ class PortfolioOptimizer:
 
         combined_acqs = sorted(clause_actions + bid_candidates, key=_acq_tier_key, reverse=True)
 
+        max_bids_allowed = min(
+            self.archetype.max_simultaneous_bids if self.archetype else 5,
+            int(macro_ctx.get("max_simultaneous_bids", 5)),
+        )
         selected_bids: List[Dict[str, Any]] = []
         selected_clauses: List[Dict[str, Any]] = []
         rem_budget = float(safe_acquisition_budget)
@@ -1015,7 +1100,7 @@ class PortfolioOptimizer:
                 # Day immediately before kickoff (`eff_days_to_kickoff <= 1`): use 1.0 worst-case fill so Friday solvency is 100% guaranteed!
                 reserve_weight = 1.0 if (not can_use_credit or eff_days_to_kickoff <= 1) else max(0.68, float(acq["win_prob_est"]))
                 eff_cost = amt * reserve_weight
-                if amt <= max_official_credit_bid and eff_cost <= rem_budget and len(selected_bids) < 5:
+                if amt <= max_official_credit_bid and eff_cost <= rem_budget and len(selected_bids) < max_bids_allowed:
                     selected_bids.append(acq)
                     rem_budget -= eff_cost
                     if reserve_weight >= 0.75:
