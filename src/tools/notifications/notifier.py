@@ -367,6 +367,42 @@ class NotificationHub:
 
         brief_html = esc(str(summary.get("briefing") or "")).replace("\n", "<br/>")
 
+        # 📋 Resumen Ejecutivo de Decisiones Tomadas (Cierre claro del ciclo)
+        bids_summary_str = ", ".join(f"<b>{esc(b['nombre'])}</b> ({int(b['amount']):,} €)" for b in (plan.get("market_bids") or [])) or "Ninguna puja hoy"
+        sales_summary_str = ", ".join(f"<b>{esc(s['nombre'])}</b> ({int(s['sale_price']):,} €)" for s in (plan.get("all_sales") or [])) or "Ninguna venta forzada"
+        listings_summary_str = ", ".join(f"<b>{esc(p['nombre'])}</b>" for p in (plan.get("preventive_listings") or [])) or "Ninguno"
+        solvency_badge = "<span style='color:#16a34a;font-weight:700;'>✅ 100% Solvente</span>" if summary.get("is_solvent", True) else "<span style='color:#dc2626;font-weight:700;'>⚠️ Requiere Liquidez</span>"
+
+        decisions_summary_html = f"""
+        <div style="margin-top:20px;background:#f0fdf4;border:2px solid #86efac;border-radius:8px;padding:16px;">
+          <h3 style="margin:0 0 10px 0;color:#166534;font-size:15px;">
+            📋 Resumen Ejecutivo de Decisiones Tomadas en esta Ejecución
+          </h3>
+          <table style="width:100%;border-collapse:collapse;font-size:13px;line-height:1.6;">
+            <tr>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;width:28%;font-weight:600;color:#14532d;">⚽ Alineación Sincronizada:</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;">Formación <b>{esc(str(lu.get('formation', '4-4-2')))}</b> ({lu.get('expected_points', 0):.1f} xP proyectados) · {len(lu.get('slots') or [])} titulares fijados en Biwenger.</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;font-weight:600;color:#14532d;">💰 Tesorería y Caja:</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;"><b>{int(summary.get('starting_cash', 0)):,} €</b> disponibles · {solvency_badge}.</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;font-weight:600;color:#14532d;">🎯 Ofertas y Pujas Mercado:</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;">{bids_summary_str}.</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;font-weight:600;color:#14532d;">🏷️ Escaparate (+5% s/VM):</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;">{listings_summary_str} (colateral activo y pescando ofertas pico).</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 8px;font-weight:600;color:#14532d;">⚡ Movimientos de Plantilla:</td>
+              <td style="padding:6px 8px;color:#1f2937;">{sales_summary_str}.</td>
+            </tr>
+          </table>
+        </div>
+        """
+
         return f"""
         <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#111827;max-width:740px;margin:0 auto;padding:16px;">
           <div style="background:linear-gradient(135deg,#064e3b,#047857);color:white;padding:18px 22px;border-radius:10px;">
@@ -420,5 +456,7 @@ class NotificationHub:
           <div style="font-size:13.5px;line-height:1.55;background:#ffffff;border:1px solid #e5e7eb;padding:14px;border-radius:8px;">
             {brief_html}
           </div>
+
+          {decisions_summary_html}
         </body></html>
         """
