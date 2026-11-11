@@ -361,83 +361,95 @@ class AutopilotRunner:
         if not is_lineup_only_phase and not is_clause_window_phase:
             if self.mode == "FULL_AUTO" or (self.mode == "SEMI_AUTO" and is_solvency_emergency) or self.dry_run:
                 for s in approved_plan.get("solvency_sales", []):
-                    pid = int(s["player_id"])
-                    oid = int(offer_id_map.get(pid, pid if self.dry_run else 0))
-                    if oid > 0:
-                        res = market_actions.accept_offer(oid)
-                        execution_results.append({"type": "SOLVENCY_SALE", "target": s["nombre"], "res": res})
+                    try:
+                        pid = int(s["player_id"])
+                        oid = int(offer_id_map.get(pid, pid if self.dry_run else 0))
+                        if oid > 0:
+                            res = market_actions.accept_offer(oid)
+                            execution_results.append({"type": "SOLVENCY_SALE", "target": s["nombre"], "res": res})
+                    except Exception as e:
+                        execution_results.append({"type": "SOLVENCY_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
 
         # 5B. Routine Sales vs Important Sales (Human-Gated in SEMI_AUTO!)
         if not is_lineup_only_phase and not is_solvency_only_phase and not is_clause_window_phase:
             for s in approved_plan.get("routine_sales", []):
-                pid = int(s["player_id"])
-                oid = int(offer_id_map.get(pid, pid if self.dry_run else 0))
-                needs_human = bool(s.get("requires_human_approval", False))
+                try:
+                    pid = int(s["player_id"])
+                    oid = int(offer_id_map.get(pid, pid if self.dry_run else 0))
+                    needs_human = bool(s.get("requires_human_approval", False))
 
-                if self.mode == "SEMI_AUTO" and needs_human:
-                    dec_id = self.memory.queue_pending_decision(
-                        action_type="IMPORTANT_SALE",
-                        player_id=pid,
-                        nombre=s["nombre"],
-                        amount_eur=int(s["sale_price"]),
-                        market_price_eur=int(s.get("market_price", s["sale_price"])),
-                        offer_id=oid,
-                        rationale=(
-                            f"Rol={s.get('asset_role')} | {s['reason']} | "
-                            f"NPV_Sell={int(s.get('npv_sell_eur', 0))/1e6:.2f}M > NPV_Hold={int(s.get('npv_hold_eur', 0))/1e6:.2f}M"
-                        ),
-                        payload=s,
-                    )
-                    queued_decisions.append(dec_id)
-                elif self.mode == "FULL_AUTO" or (self.mode == "SEMI_AUTO" and StrategySettings.AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO) or self.dry_run:
-                    if oid > 0:
-                        res = market_actions.accept_offer(oid)
-                        execution_results.append({"type": "ROUTINE_SALE", "target": s["nombre"], "res": res})
+                    if self.mode == "SEMI_AUTO" and needs_human:
+                        dec_id = self.memory.queue_pending_decision(
+                            action_type="IMPORTANT_SALE",
+                            player_id=pid,
+                            nombre=s["nombre"],
+                            amount_eur=int(s["sale_price"]),
+                            market_price_eur=int(s.get("market_price", s["sale_price"])),
+                            offer_id=oid,
+                            rationale=(
+                                f"Rol={s.get('asset_role')} | {s['reason']} | "
+                                f"NPV_Sell={int(s.get('npv_sell_eur', 0))/1e6:.2f}M > NPV_Hold={int(s.get('npv_hold_eur', 0))/1e6:.2f}M"
+                            ),
+                            payload=s,
+                        )
+                        queued_decisions.append(dec_id)
+                    elif self.mode == "FULL_AUTO" or (self.mode == "SEMI_AUTO" and StrategySettings.AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO) or self.dry_run:
+                        if oid > 0:
+                            res = market_actions.accept_offer(oid)
+                            execution_results.append({"type": "ROUTINE_SALE", "target": s["nombre"], "res": res})
+                except Exception as e:
+                    execution_results.append({"type": "ROUTINE_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
 
         # 5C. Release Clauses & Defensive Shields (ALWAYS Human-Gated in SEMI_AUTO!)
         if self.trigger_phase in ("MORNING_FULL", "PRE_CLAUSE_LOCK"):
             for c in approved_plan.get("clause_snipes", []):
-                pid = int(c["player_id"])
-                owner_uid = int(mgr_id_map.get(str(c.get("seller", "")), 0))
-                if self.mode == "SEMI_AUTO":
-                    dec_id = self.memory.queue_pending_decision(
-                        action_type="CLAUSE_SNIPE",
-                        player_id=pid,
-                        nombre=c["nombre"],
-                        amount_eur=int(c["amount"]),
-                        market_price_eur=int(c["market_price"]),
-                        counterparty=str(c.get("seller", "")),
-                        owner_user_id=owner_uid,
-                        rationale=(
-                            f"Cláusula a {c.get('seller')} (+{c['delta_xp_xi']:.2f} xP, {c.get('scarcity_tier', 'SCARCE')}, "
-                            f"Alpha neto +{int(c['expected_surplus']):,} €)"
-                        ),
-                        expires_hours=max(1, int(max(1.0, phase_ctx.hours_to_clause_lock))),
-                        payload=c,
-                    )
-                    queued_decisions.append(dec_id)
-                elif self.mode == "FULL_AUTO" or self.dry_run:
-                    res = market_actions.pay_clause(player_id=pid, amount=int(c["amount"]), owner_user_id=owner_uid)
-                    execution_results.append({"type": "CLAUSE_SNIPE", "target": c["nombre"], "res": res})
+                try:
+                    pid = int(c["player_id"])
+                    owner_uid = int(mgr_id_map.get(str(c.get("seller", "")), 0))
+                    if self.mode == "SEMI_AUTO":
+                        dec_id = self.memory.queue_pending_decision(
+                            action_type="CLAUSE_SNIPE",
+                            player_id=pid,
+                            nombre=c["nombre"],
+                            amount_eur=int(c["amount"]),
+                            market_price_eur=int(c["market_price"]),
+                            counterparty=str(c.get("seller", "")),
+                            owner_user_id=owner_uid,
+                            rationale=(
+                                f"Cláusula a {c.get('seller')} (+{c['delta_xp_xi']:.2f} xP, {c.get('scarcity_tier', 'SCARCE')}, "
+                                f"Alpha neto +{int(c['expected_surplus']):,} €)"
+                            ),
+                            expires_hours=max(1, int(max(1.0, phase_ctx.hours_to_clause_lock))),
+                            payload=c,
+                        )
+                        queued_decisions.append(dec_id)
+                    elif self.mode == "FULL_AUTO" or self.dry_run:
+                        res = market_actions.pay_clause(player_id=pid, amount=int(c["amount"]), owner_user_id=owner_uid)
+                        execution_results.append({"type": "CLAUSE_SNIPE", "target": c["nombre"], "res": res})
+                except Exception as e:
+                    execution_results.append({"type": "CLAUSE_SNIPE", "target": c.get("nombre", str(c)), "res": {"status": "ERROR", "detail": str(e)}})
 
             for sh in approved_plan.get("defensive_shields", []):
-                pid = int(sh["player_id"])
-                spend = int(sh["recommended_cash_spend"])
-                if self.mode == "SEMI_AUTO":
-                    dec_id = self.memory.queue_pending_decision(
-                        action_type="DEFENSIVE_SHIELD",
-                        player_id=pid,
-                        nombre=sh["nombre"],
-                        amount_eur=spend,
-                        market_price_eur=int(sh["market_price"]),
-                        rationale=sh["reason"],
-                        expires_hours=max(1, int(max(1.0, phase_ctx.hours_to_clause_lock))),
-                        payload=sh,
-                    )
-                    queued_decisions.append(dec_id)
-                elif self.mode == "FULL_AUTO" or self.dry_run:
-                    res = market_actions.raise_clause(player_id=pid, increment_eur=spend)
-                    execution_results.append({"type": "DEFENSIVE_SHIELD", "target": sh["nombre"], "res": res})
+                try:
+                    pid = int(sh["player_id"])
+                    spend = int(sh["recommended_cash_spend"])
+                    if self.mode == "SEMI_AUTO":
+                        dec_id = self.memory.queue_pending_decision(
+                            action_type="DEFENSIVE_SHIELD",
+                            player_id=pid,
+                            nombre=sh["nombre"],
+                            amount_eur=spend,
+                            market_price_eur=int(sh["market_price"]),
+                            rationale=sh["reason"],
+                            expires_hours=max(1, int(max(1.0, phase_ctx.hours_to_clause_lock))),
+                            payload=sh,
+                        )
+                        queued_decisions.append(dec_id)
+                    elif self.mode == "FULL_AUTO" or self.dry_run:
+                        res = market_actions.raise_clause(player_id=pid, increment_eur=spend)
+                        execution_results.append({"type": "DEFENSIVE_SHIELD", "target": sh["nombre"], "res": res})
+                except Exception as e:
+                    execution_results.append({"type": "DEFENSIVE_SHIELD", "target": sh.get("nombre", str(sh)), "res": {"status": "ERROR", "detail": str(e)}})
 
         # 5D. Autonomous Market Bids (Executed in SEMI_AUTO when AUTONOMOUS_BIDS_IN_SEMI_AUTO=True!)
         if self.trigger_phase == "MORNING_FULL":
@@ -448,35 +460,44 @@ class AutopilotRunner:
             )
             if can_bid:
                 for b in approved_plan.get("market_bids", []):
-                    seller_name = str(b.get("seller", "Mercado"))
-                    seller_uid = mgr_id_map.get(seller_name) if seller_name not in ("Mercado", "Libre", "") else None
-                    res = market_actions.place_bid(
-                        player_id=int(b["player_id"]),
-                        amount=int(b["amount"]),
-                        seller_user_id=seller_uid,
-                    )
-                    execution_results.append({"type": "MARKET_BID", "target": b["nombre"], "res": res})
+                    try:
+                        seller_name = str(b.get("seller", "Mercado"))
+                        seller_uid = mgr_id_map.get(seller_name) if seller_name not in ("Mercado", "Libre", "") else None
+                        res = market_actions.place_bid(
+                            player_id=int(b["player_id"]),
+                            amount=int(b["amount"]),
+                            seller_user_id=seller_uid,
+                        )
+                        execution_results.append({"type": "MARKET_BID", "target": b["nombre"], "res": res})
+                    except Exception as e:
+                        execution_results.append({"type": "MARKET_BID", "target": b.get("nombre", str(b)), "res": {"status": "ERROR", "detail": str(e)}})
 
         # 5E. Optimal MILP Starting XI Sync (Daily morning + Pre-kickoff Solvency + Final 30m Anti-Injury Guard!)
         lineup_info = approved_plan.get("lineup", {})
         if lineup_info and lineup_info.get("player_ids") and self.trigger_phase != "PRE_CLAUSE_LOCK":
             if self.mode in ("SEMI_AUTO", "FULL_AUTO") or self.dry_run:
-                res = market_actions.set_lineup(
-                    formation=lineup_info["formation"],
-                    ordered_player_ids=lineup_info["player_ids"],
-                )
-                execution_results.append({"type": "LINEUP_SYNC", "formation": lineup_info["formation"], "res": res})
+                try:
+                    res = market_actions.set_lineup(
+                        formation=lineup_info["formation"],
+                        ordered_player_ids=lineup_info["player_ids"],
+                    )
+                    execution_results.append({"type": "LINEUP_SYNC", "formation": lineup_info["formation"], "res": res})
+                except Exception as e:
+                    execution_results.append({"type": "LINEUP_SYNC", "formation": lineup_info.get("formation", "UNKNOWN"), "res": {"status": "ERROR", "detail": str(e)}})
 
         # 5F. Top-K (`<= 5`) Preventive Market Listings Sync (Unlist stale -> List top-K)
         if self.trigger_phase == "MORNING_FULL" and StrategySettings.PREVENTIVE_MARKET_LISTING:
             if self.mode in ("SEMI_AUTO", "FULL_AUTO") or self.dry_run:
-                sync_res = market_actions.sync_market_listings(
-                    desired_listings=approved_plan.get("preventive_listings", []),
-                    currently_listed_pids=ctx["currently_listed_pids"],
-                    max_slots=self.rules.market_max_user_sales,
-                )
-                for sr in sync_res:
-                    execution_results.append({"type": "MARKET_LISTING_SYNC", "res": sr})
+                try:
+                    sync_res = market_actions.sync_market_listings(
+                        desired_listings=approved_plan.get("preventive_listings", []),
+                        currently_listed_pids=ctx["currently_listed_pids"],
+                        max_slots=self.rules.market_max_user_sales,
+                    )
+                    for sr in sync_res:
+                        execution_results.append({"type": "MARKET_LISTING_SYNC", "res": sr})
+                except Exception as e:
+                    execution_results.append({"type": "MARKET_LISTING_SYNC", "res": {"status": "ERROR", "detail": str(e)}})
 
         # 6. Persist Cross-Session Strategic Journal Note
         scarcity_s = approved_plan.get("scarcity_summary") or {}
@@ -561,7 +582,6 @@ class AutopilotRunner:
         """Calls TieredLLMRouter to synthesize a personalized, memory-aware executive briefing."""
         phase_ctx: RoundPhaseContext = ctx["phase_ctx"]
         tier = "high_stakes" if (ctx["is_kickoff_day"] or self.trigger_phase != "MORNING_FULL") else "daily"
-        client = TieredLLMRouter.get_client(tier=tier)
 
         is_semi = (self.mode == "SEMI_AUTO")
         sales_str = ", ".join(
@@ -616,6 +636,7 @@ Estructura:
 4. Continuidad Estratégica de Medio Plazo
 """
         try:
+            client = TieredLLMRouter.get_client(tier=tier)
             resp = client.call(prompt=prompt, system_prompt="Eres un Director Deportivo analítico, prudente con activos escasos y letal en arbitraje.")
             return str(resp).strip()
         except Exception as e:
@@ -629,7 +650,9 @@ Estructura:
 
 
 def main():
+    import sys
     import argparse
+    import traceback
     parser = argparse.ArgumentParser(description="Run Fantasy Champion v3 Autopilot")
     parser.add_argument("--mode", default=None, choices=["DRY_RUN", "SEMI_AUTO", "FULL_AUTO"])
     parser.add_argument("--phase", default="MORNING_FULL", choices=list(VALID_TRIGGER_PHASES))
@@ -640,31 +663,45 @@ def main():
 
     eff_mode = args.mode or StrategySettings.AUTOPILOT_MODE
     print(f"🚀 Iniciando Autopilot v3 | Modo: {eff_mode} | Fase: {args.phase} | Fecha: {args.date or 'LIVE'}...")
-    runner = AutopilotRunner(
-        mode=eff_mode,
-        today_date=args.date,
-        trigger_phase=args.phase,
-        use_live_delta=(args.date is None),
-    )
-    res = runner.execute_cycle(
-        generate_briefing=(not args.no_briefing),
-        send_notifications=args.notify,
-    )
+    try:
+        runner = AutopilotRunner(
+            mode=eff_mode,
+            today_date=args.date,
+            trigger_phase=args.phase,
+            use_live_delta=(args.date is None),
+        )
+        res = runner.execute_cycle(
+            generate_briefing=(not args.no_briefing),
+            send_notifications=args.notify,
+        )
 
-    print("\n=== RESUMEN EJECUTIVO AUTOPILOT v3 ===")
-    print(f"Equipo: {res['team_name']} ({res['league_name']}) | Fecha: {res['date']} | Fase: {res['phase_context']['phase_name']}")
-    print(f"Modo: {res['mode']} (DryRun={res['dry_run']}) | Solvente: {res['is_solvent']} | Cláusulas Abiertas: {res['plan']['clauses_open']}")
-    print(f"Saldo Inicial: {res['starting_cash']:,} € -> Saldo Proyectado: {res['projected_cash']:,} €")
-    print(f"Once Titular MILP J{res['target_jornada_num']}: {res['plan']['lineup']['formation']} ({res['plan']['lineup']['expected_points']:.1f} xP)")
-    print(
-        f"Ventas: {len(res['plan']['all_sales'])} | Pujas: {len(res['plan']['market_bids'])} | "
-        f"Escaparate: {len(res['plan']['preventive_listings'])}/{runner.rules.market_max_user_sales} | "
-        f"Pendientes OK Humano: {len(res['pending_decisions'])}"
-    )
-    if res.get("notifications"):
-        print(f"Notificaciones: {res['notifications']}")
-    if res.get("briefing"):
-        print("\n" + res["briefing"])
+        print("\n=== RESUMEN EJECUTIVO AUTOPILOT v3 ===")
+        print(f"Equipo: {res['team_name']} ({res['league_name']}) | Fecha: {res['date']} | Fase: {res['phase_context']['phase_name']}")
+        print(f"Modo: {res['mode']} (DryRun={res['dry_run']}) | Solvente: {res['is_solvent']} | Cláusulas Abiertas: {res['plan']['clauses_open']}")
+        print(f"Saldo Inicial: {res['starting_cash']:,} € -> Saldo Proyectado: {res['projected_cash']:,} €")
+        print(f"Once Titular MILP J{res['target_jornada_num']}: {res['plan']['lineup']['formation']} ({res['plan']['lineup']['expected_points']:.1f} xP)")
+        print(
+            f"Ventas: {len(res['plan']['all_sales'])} | Pujas: {len(res['plan']['market_bids'])} | "
+            f"Escaparate: {len(res['plan']['preventive_listings'])}/{runner.rules.market_max_user_sales} | "
+            f"Pendientes OK Humano: {len(res['pending_decisions'])}"
+        )
+        if res.get("notifications"):
+            print(f"Notificaciones: {res['notifications']}")
+        if res.get("briefing"):
+            print("\n" + res["briefing"])
+    except Exception as e:
+        print(f"\n❌ ERROR CRÍTICO EN AUTOPILOT v3: {e}")
+        traceback.print_exc()
+        if args.notify:
+            try:
+                NotificationHub().send_email(
+                    subject="⚠️ [FALLO AUTOPILOT v3] Error en ciclo matinal",
+                    html_body=f"<h3>Error en ciclo matinal Autopilot</h3><p><b>{e}</b></p><pre>{traceback.format_exc()}</pre>",
+                    text_body=f"Error en ciclo matinal Autopilot: {e}\n\n{traceback.format_exc()}",
+                )
+            except Exception:
+                pass
+        sys.exit(1)
 
 
 if __name__ == "__main__":

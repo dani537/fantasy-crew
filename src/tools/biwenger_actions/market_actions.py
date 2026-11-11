@@ -215,7 +215,10 @@ class BiwengerMarketActions:
 
     def set_lineup(self, formation: str, ordered_player_ids: List[int]) -> Dict[str, Any]:
         payload = {"formation": formation, "player_ids": [int(p) for p in ordered_player_ids]}
-        if self.dry_run:
-            return self._audit("set_lineup", payload, "DRY_RUN")
-        ok = LineupActions(self.session, self.league_id, self.user_id).set_lineup(formation, payload["player_ids"])
-        return self._audit("set_lineup", payload, "OK" if ok else "FAILED")
+        if self.dry_run or self.session is None:
+            return self._audit("set_lineup", payload, "DRY_RUN" if self.dry_run else "SKIPPED_NO_SESSION")
+        try:
+            ok = LineupActions(self.session, self.league_id, self.user_id).set_lineup(formation, payload["player_ids"])
+            return self._audit("set_lineup", payload, "OK" if ok else "FAILED")
+        except Exception as e:
+            return self._audit("set_lineup", payload, "ERROR", str(e))

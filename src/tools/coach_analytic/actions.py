@@ -6,13 +6,14 @@ class LineupActions:
     Handles all operations regarding lineups and formations.
     Requires an authenticated requests.Session from BiwengerAuth.
     """
-    def __init__(self, session: requests.Session, league_id: int = None, user_id: int = None):
+    def __init__(self, session: requests.Session = None, league_id: int = None, user_id: int = None):
         self.session = session
         self.base_url = "https://biwenger.as.com/api/v2"
-        if league_id is not None:
-            self.session.headers.update({"X-League": str(league_id)})
-        if user_id is not None:
-            self.session.headers.update({"X-User": str(user_id)})
+        if self.session is not None:
+            if league_id is not None:
+                self.session.headers.update({"X-League": str(league_id)})
+            if user_id is not None:
+                self.session.headers.update({"X-User": str(user_id)})
 
     def set_lineup(self, formation: str, player_ids: List[int], league_id: int = None, user_id: int = None) -> bool:
         """
@@ -22,6 +23,10 @@ class LineupActions:
         :param player_ids: List of player IDs to line up. Normally exactly 11 players.
                            Order MUST be: GK, then DFs, then MFs, then FWs matching the formation.
         """
+        if self.session is None:
+            print("⚠️ LineupActions: No authenticated session provided. Skipping lineup update.")
+            return False
+
         if league_id is not None:
             self.session.headers.update({"X-League": str(league_id)})
         if user_id is not None:
@@ -34,11 +39,14 @@ class LineupActions:
             }
         }
         url = f"{self.base_url}/user?fields=*,lineup(date)"
-        response = self.session.put(url, json=payload)
-        
-        if response.status_code == 200:
-            print(f"✅ Lineup updated successfully using formation {formation}")
-            return True
-        else:
-            print(f"❌ Failed to update lineup. Status: {response.status_code}, Response: {response.text}")
+        try:
+            response = self.session.put(url, json=payload, timeout=20)
+            if response.status_code == 200:
+                print(f"✅ Lineup updated successfully using formation {formation}")
+                return True
+            else:
+                print(f"❌ Failed to update lineup. Status: {response.status_code}, Response: {response.text[:300]}")
+                return False
+        except requests.RequestException as e:
+            print(f"❌ Network exception while updating lineup: {e}")
             return False
