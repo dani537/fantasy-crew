@@ -168,6 +168,21 @@ class TelegramDirectorBot:
         if cmd == "/vender":
             return html.escape(self.memory.add_user_directive("force_sell", arg, source="TELEGRAM"))
 
+        if cmd in ("/clausulas", "/clausula"):
+            return self._cmd_clausulas()
+
+        if cmd in ("/clausular", "/snipe"):
+            return self._cmd_clausular(arg)
+
+        if cmd in ("/pujas", "/ofertas"):
+            return self._cmd_pujas()
+
+        if cmd in ("/cancelar_puja", "/cancelar"):
+            return self._cmd_cancelar_puja(arg)
+
+        if cmd in ("/recalcular", "/lanzar", "/entrenador"):
+            return self._cmd_recalcular()
+
         if cmd == "/vetar":
             return html.escape(self.memory.add_user_directive("blacklist_buy", arg, source="TELEGRAM"))
 
@@ -176,6 +191,18 @@ class TelegramDirectorBot:
 
         if cmd == "/nota":
             return html.escape(self.memory.add_user_directive("note", arg, source="TELEGRAM"))
+
+        lower = msg.lower()
+        # Squad shock triggers: "me han fichado", "me han clausulado", "han pagado la clausula", "me han robado", "me han quitado"
+        shock_keywords = ("fichado", "clausulado", "clausulazo", "robado", "quitado", "vendido")
+        if any(k in lower for k in shock_keywords) and any(v in lower for v in ("me ", "nos ", "ei", "hey", "acaban", "ojo", "mira")):
+            return self._handle_squad_shock_recovery(msg)
+
+        if any(k in lower for k in ("recalcula", "recalcular", "ejecuta el entrenador", "ejecutar entrenador", "pon el once", "alinea")):
+            return self._cmd_recalcular()
+
+        if any(k in lower for k in ("que clausulas", "qué cláusulas", "como van las clausulas", "cómo van las cláusulas", "a quien podemos clausular", "a quién podemos clausular")):
+            return self._cmd_clausulas()
 
         return self._handle_natural_conversation(msg)
 
@@ -308,6 +335,15 @@ class TelegramDirectorBot:
         amt = int(target["amount_eur"])
 
         if act_type == "CLAUSE_SNIPE":
+            avail_max_bid = delta.get("available_max_bid")
+            if avail_max_bid is not None and amt > avail_max_bid and not is_dry:
+                out_bids = delta.get("outgoing_bids") or []
+                committed = delta.get("committed_bids_eur", 0)
+                return (
+                    f"⚠️ <b>Puja máxima insuficiente en Biwenger ({avail_max_bid:,} € < {amt:,} €).</b>\n"
+                    f"Tienes {len(out_bids)} pujas activas reservando <code>{committed:,} €</code>.\n"
+                    f"Cancela una puja con <code>/cancelar_puja &lt;ID&gt;</code> (usa <code>/pujas</code>) para liberar margen."
+                )
             owner_uid = int(target.get("owner_user_id") or 0)
             if owner_uid <= 0:
                 owner_uid = int((delta.get("manager_id_by_name") or {}).get(str(target.get("counterparty", "")), 0))
@@ -335,6 +371,330 @@ class TelegramDirectorBot:
                 f"<b>{html.escape(target['nombre'])}</b> por <code>{amt:,} €</code>."
             )
         return f"❌ Error al ejecutar en Biwenger (<code>{html.escape(str(res.get('status')))}</code>): {html.escape(str(res.get('detail', ''))[:200])}"
+
+    def _cmd_clausulas(self) -> str:
+        delta = self.delta_refresher.fetch(max_cache_age_seconds=60)
+        bal = float(delta.get("balance") or 0.0)
+        rules = LeagueRulesEngine.load()
+        try:
+            df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)
+            latest = df_m["fecha"].max()
+            today = df_m[df_m["fecha"] == latest].copy()
+            my_mgr = delta.get("team_name") or "Dani SR"
+            rivals = today[~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None]) & today["propietario_liga"].notna()].copy()
+        except Exception as e:
+            return f"⚠️ Error consultando base de datos de jugadores: {html.escape(str(e))}"
+
+        from src.utils.numeric import safe_num
+        candidates = []
+        for _, r in rivals.iterrows():
+            pid = int(r["player_id"])
+            price = safe_num(r.get("precio", 0))
+            subida = safe_num(r.get("subida_24h", 0))
+            raw_clause = safe_num(r.get("clausula_actual", 0))
+            clause = raw_clause if raw_clause > 0 else float(rules.compute_official_clause(price))
+            if clause <= 0 or clause > bal or price <= 0:
+                continue
+
+            ratio = clause / price
+            avg_pts = safe_num(str(r.get("media_puntos", "0")).replace(",", "."))
+            pos = str(r.get("posicion", "MF"))
+            # VORP Criteria
+            is_breakout = (clause <= 5_200_000 and subida >= 60_000 and ratio <= 2.25 and avg_pts >= 3.5)
+            is_elite = (avg_pts >= 4.8 and ratio <= 2.20 and subida >= -20_000)
+            if is_breakout or is_elite:
+                delta_xp = max(0.5, avg_pts * 0.85 - 2.5)
+                candidates.append({
+                    "nombre": str(r["nombre"]),
+                    "equipo": str(r.get("equipo", "")),
+                    "posicion": pos,
+                    "owner": str(r.get("propietario_liga", "")),
+                    "precio": price,
+                    "subida": subida,
+                    "clausula": int(clause),
+                    "ratio": round(ratio, 2),
+                    "avg_pts": avg_pts,
+                    "delta_xp": round(delta_xp, 2),
+                })
+
+        candidates.sort(key=lambda x: (x["delta_xp"], x["subida"]), reverse=True)
+        if not candidates:
+            return (
+                f"🎯 <b>Escaneo de Cláusulas (COMPETITIVE_VORP):</b>\n"
+                f"💰 Saldo disponible: <b>{int(bal):,} €</b>\n\n"
+                f"No hay jugadores titulares rivales con media ≥4.8 pts que quepan en tu saldo actual sin sobreprecio excesivo."
+            )
+
+        lines = [
+            f"🎯 <b>Top Cláusulas Recomendadas (COMPETITIVE_VORP):</b>",
+            f"💰 Tu saldo disponible: <b>{int(bal):,} €</b>\n",
+        ]
+        for i, c in enumerate(candidates[:6], 1):
+            sub_s = f"+{int(c['subida']):,} €/día" if c['subida'] >= 0 else f"{int(c['subida']):,} €/día"
+            lines.append(
+                f"{i}. <b>{html.escape(c['nombre'])}</b> ({html.escape(c['equipo'])} · <i>{html.escape(c['owner'])}</i>)\n"
+                f"   • Pos: <b>{c['posicion']}</b> | Cláusula: <code>{c['clausula']:,} €</code> (Ratio: {c['ratio']}x)\n"
+                f"   • Media: <b>{c['avg_pts']:.2f} pts</b> | Tendencia: <b>{sub_s}</b> | Mejora: <b>+{c['delta_xp']} xP</b>\n"
+                f"   👉 <code>/clausular {html.escape(c['nombre'])}</code>\n"
+            )
+        return "\n".join(lines)
+
+    def _cmd_clausular(self, player_name: str) -> str:
+        q = (player_name or "").strip()
+        if not q:
+            return "⚠️ Uso: <code>/clausular &lt;Nombre Jugador&gt;</code> (ej. <code>/clausular Requena</code>)"
+
+        delta = self.delta_refresher.fetch(max_cache_age_seconds=30)
+        bal = float(delta.get("balance") or 0.0)
+        rules = LeagueRulesEngine.load()
+        my_mgr = delta.get("team_name") or "Dani SR"
+
+        try:
+            df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)
+            latest = df_m["fecha"].max()
+            today = df_m[df_m["fecha"] == latest].copy()
+            rivals = today[~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None]) & today["propietario_liga"].notna()].copy()
+        except Exception as e:
+            return f"⚠️ Error consultando jugadores rivales: {html.escape(str(e))}"
+
+        import unicodedata
+        def _norm(s: str) -> str:
+            return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn")
+
+        q_norm = _norm(q)
+        matched = []
+        for _, r in rivals.iterrows():
+            nm = str(r["nombre"])
+            if q_norm in _norm(nm):
+                matched.append(r)
+
+        if not matched:
+            return f"⚠️ No encontré ningún jugador rival que coincida con '<b>{html.escape(q)}</b>'."
+
+        target = matched[0]
+        from src.utils.numeric import safe_num
+        pid = int(target["player_id"])
+        name = str(target["nombre"])
+        owner_name = str(target["propietario_liga"])
+        price = safe_num(target.get("precio", 0))
+        raw_clause = safe_num(target.get("clausula_actual", 0))
+        clause = int(raw_clause if raw_clause > 0 else float(rules.compute_official_clause(price)))
+
+        if bal < clause:
+            return (
+                f"⚠️ Saldo contable insuficiente para clausular a <b>{html.escape(name)}</b>.\n"
+                f"• Cláusula: <code>{clause:,} €</code>\n"
+                f"• Tu caja actual: <code>{int(bal):,} €</code>\n"
+                f"• Te faltan: <b>{int(clause - bal):,} €</b>"
+            )
+
+        avail_max_bid = delta.get("available_max_bid")
+        if avail_max_bid is None:
+            avail_max_bid = int(bal)
+
+        if avail_max_bid < clause and not GeneralSettings.DRY_RUN:
+            out_bids = delta.get("outgoing_bids") or []
+            committed = delta.get("committed_bids_eur", 0)
+            status_map = delta.get("live_player_status") or {}
+            bids_summary = []
+            for b in out_bids[:4]:
+                b_pid = b.get("player_id", 0)
+                b_name = status_map.get(str(b_pid), {}).get("name", f"Jugador #{b_pid}")
+                bids_summary.append(
+                    f"  • <b>{html.escape(b_name)}</b>: <code>{b.get('amount', 0):,} €</code> (ID: <code>{b.get('offer_id')}</code>)"
+                )
+            bids_text = "\n".join(bids_summary) if bids_summary else "  (Ninguna registrada)"
+            return (
+                f"⚠️ <b>Puja máxima disponible en Biwenger superada para {html.escape(name)}:</b>\n\n"
+                f"• Coste de la cláusula: <code>{clause:,} €</code>\n"
+                f"• Saldo en cuenta: <code>{int(bal):,} €</code>\n"
+                f"• <b>Tu puja máxima actual:</b> <code>{avail_max_bid:,} €</code>\n\n"
+                f"ℹ️ <i>¿Por qué?</i> Tienes <b>{len(out_bids)}</b> pujas de compra activas en mercado comprometiendo "
+                f"<code>{committed:,} €</code> de tu capacidad crediticia:\n{bids_text}\n\n"
+                f"💡 <i>Solución:</i> Puedes cancelar alguna puja con <code>/cancelar_puja &lt;ID&gt;</code> (usa <code>/pujas</code>) "
+                f"para liberar margen o esperar a la resolución del mercado (07:00)."
+            )
+
+        mgr_map = delta.get("manager_id_by_name") or {}
+        owner_uid = int(mgr_map.get(owner_name, 0))
+
+        # Check autonomous execution limit (<= 6.000.000 € in FULL_AUTO)
+        can_auto = (
+            StrategySettings.AUTOPILOT_MODE == "FULL_AUTO"
+            and clause <= StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR
+            and bal >= clause
+        )
+
+        auth = self.delta_refresher._ensure_auth()
+        is_dry = GeneralSettings.DRY_RUN
+        actions = BiwengerMarketActions(
+            session=(auth.session if auth else None),
+            league_id=int(delta.get("league_id") or 0),
+            user_id=int(delta.get("team_id") or 0),
+            dry_run=is_dry,
+        )
+
+        if can_auto:
+            res = actions.pay_clause(player_id=pid, amount=clause, owner_user_id=owner_uid)
+            if res.get("status") in ("OK", "DRY_RUN"):
+                return (
+                    f"⚡ <b>¡Clausulazo Ejecutado ({res.get('status')})!</b>\n"
+                    f"Has pagado la cláusula de <b>{html.escape(name)}</b> por <code>{clause:,} €</code> a <b>{html.escape(owner_name)}</b>.\n"
+                    f"El jugador ya forma parte de tu plantilla."
+                )
+            return f"❌ Error ejecutando el clausulazo en Biwenger: {html.escape(str(res.get('detail', ''))[:200])}"
+        else:
+            # Queue as decision
+            dec_id = self.memory.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=pid,
+                nombre=name,
+                amount_eur=clause,
+                market_price_eur=int(price),
+                counterparty=owner_name,
+                owner_user_id=owner_uid,
+                rationale=f"Clausulazo directo a {owner_name} por {clause:,} €",
+                expires_hours=48,
+                payload={"player_id": pid, "amount": clause, "seller": owner_name},
+            )
+            return (
+                f"🔔 <b>Orden de Clausulazo Creada:</b> <code>{html.escape(dec_id)}</code>\n"
+                f"• Jugador: <b>{html.escape(name)}</b> (<i>{html.escape(owner_name)}</i>)\n"
+                f"• Importe: <code>{clause:,} €</code> (Tu saldo disponible: <code>{int(bal):,} €</code>)\n\n"
+                f"👉 Pulsa <code>/aprobar {html.escape(dec_id)}</code> para confirmar y ejecutar la compra inmediatamente en Biwenger."
+            )
+
+    def _cmd_pujas(self) -> str:
+        delta = self.delta_refresher.fetch(max_cache_age_seconds=15)
+        out_bids = delta.get("outgoing_bids") or []
+        bal = int(delta.get("balance") or 0)
+        avail = int(delta.get("available_max_bid") or bal)
+        status_map = delta.get("live_player_status") or {}
+        if not out_bids:
+            return (
+                f"📋 <b>Tus Pujas Activas en Biwenger:</b>\n"
+                f"• Saldo en cuenta: <code>{bal:,} €</code>\n"
+                f"• Puja máxima disponible: <code>{avail:,} €</code>\n\n"
+                f"No tienes pujas de compra activas en el mercado actualmente."
+            )
+        lines = [
+            f"📋 <b>Tus Pujas Activas en Biwenger ({len(out_bids)}):</b>",
+            f"• Saldo: <code>{bal:,} €</code> | Puja Máx. Disponible: <code>{avail:,} €</code>\n",
+        ]
+        for b in out_bids:
+            pid = b.get("player_id", 0)
+            p_name = status_map.get(str(pid), {}).get("name", f"Jugador #{pid}")
+            amt = int(b.get("amount", 0))
+            oid = b.get("offer_id")
+            to_obj = b.get("to")
+            to_mgr = to_obj.get("name", "Mercado") if isinstance(to_obj, dict) else "Mercado"
+            lines.append(
+                f"• <b>{html.escape(p_name)}</b> ({html.escape(to_mgr)}): <code>{amt:,} €</code>\n"
+                f"  👉 Cancelar: <code>/cancelar_puja {oid}</code>"
+            )
+        return "\n".join(lines)
+
+    def _cmd_cancelar_puja(self, offer_id_str: str) -> str:
+        q = (offer_id_str or "").strip()
+        if not q or not q.isdigit():
+            return "⚠️ Uso: <code>/cancelar_puja &lt;ID_OFERTA&gt;</code> (usa <code>/pujas</code> para ver tus pujas activas)"
+
+        off_id = int(q)
+        delta = self.delta_refresher.fetch(max_cache_age_seconds=0)
+        auth = self.delta_refresher.session_auth
+        is_dry = GeneralSettings.DRY_RUN
+        actions = BiwengerMarketActions(
+            session=(auth.session if auth else None),
+            league_id=int(delta.get("league_id") or 0),
+            user_id=int(delta.get("team_id") or 0),
+            dry_run=is_dry,
+        )
+        res = actions.cancel_offer(off_id)
+        if res.get("status") in ("OK", "DRY_RUN"):
+            return f"✅ <b>Oferta {off_id} cancelada ({res.get('status')})</b>. Tu margen de puja máxima ha aumentado."
+        return f"❌ Error cancelando oferta {off_id}: {html.escape(str(res.get('detail', ''))[:200])}"
+
+    def _cmd_recalcular(self) -> str:
+        from src.tools.strategy_engine.autopilot import AutopilotRunner
+        res = AutopilotRunner(mode=StrategySettings.AUTOPILOT_MODE).execute_cycle(
+            generate_briefing=False, send_notifications=False
+        )
+        plan = res.get("plan") or {}
+        lu = plan.get("lineup") or {}
+        cash = int(res.get("starting_cash", 0))
+        solvent = "✅ Solvente" if res.get("is_solvent") else "⚠️ En descubierto"
+        bids_cnt = len(plan.get("market_bids") or [])
+        return (
+            f"⚡ <b>¡Entrenador Ejecutado y Sincronizado en Biwenger!</b>\n\n"
+            f"• ⚽ Once: <b>{html.escape(str(lu.get('formation', '4-4-2')))}</b> (<b>{lu.get('expected_points', 0):.1f} xP</b>)\n"
+            f"• 💰 Caja: <code>{cash:,} €</code> ({solvent})\n"
+            f"• 🎯 Pujas activas de mercado: <b>{bids_cnt}</b>\n\n"
+            f"Alineación actualizada correctamente con la API de Biwenger."
+        )
+
+    def _handle_squad_shock_recovery(self, user_msg: str) -> str:
+        # 1. Fetch live snapshot with cache bypass
+        delta = self.delta_refresher.fetch(max_cache_age_seconds=0)
+        current_pids = set(str(p) for p in (delta.get("owned_players_meta") or {}).keys())
+        bal = float(delta.get("balance") or 0.0)
+
+        # 2. Compare against latest saved plan
+        latest = self._load_latest_plan()
+        prev_theses = (latest.get("plan") or {}).get("asset_theses") or []
+        prev_pids = set(str(t.get("player_id")) for t in prev_theses)
+
+        missing_pids = prev_pids - current_pids
+        missing_names = []
+        for t in prev_theses:
+            if str(t.get("player_id")) in missing_pids:
+                missing_names.append(t.get("nombre", f"ID {t.get('player_id')}"))
+
+        # 3. Trigger immediate Autopilot recovery
+        from src.tools.strategy_engine.autopilot import AutopilotRunner
+        rec_res = AutopilotRunner(mode="FULL_AUTO").execute_cycle(
+            generate_briefing=False, send_notifications=False
+        )
+        plan = rec_res.get("plan") or {}
+        lu = plan.get("lineup") or {}
+
+        # 4. Find top counterattack clause targets
+        rules = LeagueRulesEngine.load()
+        try:
+            df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)
+            latest_d = df_m["fecha"].max()
+            today = df_m[df_m["fecha"] == latest_d].copy()
+            rivals = today[~today["propietario_liga"].isin(["Libre", "Mercado", delta.get("team_name"), None]) & today["propietario_liga"].notna()].copy()
+            from src.utils.numeric import safe_num
+            cands = []
+            for _, r in rivals.iterrows():
+                pr = safe_num(r.get("precio", 0))
+                sub = safe_num(r.get("subida_24h", 0))
+                rc = safe_num(r.get("clausula_actual", 0))
+                cl = rc if rc > 0 else float(rules.compute_official_clause(pr))
+                avg_p = safe_num(str(r.get("media_puntos", "0")).replace(",", "."))
+                if 0 < cl <= bal and avg_p >= 4.8 and sub >= -20_000:
+                    cands.append({"nombre": str(r["nombre"]), "clausula": int(cl), "avg": avg_p, "owner": str(r.get("propietario_liga", ""))})
+            cands.sort(key=lambda x: x["avg"], reverse=True)
+        except Exception:
+            cands = []
+
+        missing_str = ", ".join(f"<b>{html.escape(m)}</b>" for m in missing_names) or "1 jugador"
+        lines = [
+            f"🚨 <b>¡Alerta Táctica: Baja Detectada en Biwenger!</b>\n",
+            f"• <b>Jugador que ha salido:</b> {missing_str} (Clausulazo / Venta)",
+            f"• <b>Saldo actual en caja:</b> <code>{int(bal):,} €</code> (100% Solvente)\n",
+            f"⚽ <b>Reajuste Táctico Inmediato (MILP):</b>",
+            f"• Formación: <b>{html.escape(str(lu.get('formation', '4-4-2')))}</b> (<b>{lu.get('expected_points', 0):.1f} xP</b>)",
+            f"• Nueva alineación sincronizada automáticamente en Biwenger.\n",
+        ]
+        if cands:
+            lines.append("🎯 <b>Opciones de Contraataque con tu liquidez:</b>")
+            for i, c in enumerate(cands[:2], 1):
+                lines.append(f"{i}. <b>{html.escape(c['nombre'])}</b> ({html.escape(c['owner'])}) · Cláusula: <code>{c['clausula']:,} €</code> (Media: {c['avg']:.2f} pts)\n   👉 <code>/clausular {html.escape(c['nombre'])}</code>")
+        else:
+            lines.append("💡 Consulta más opciones de mercado con <code>/clausulas</code> o <code>/plan</code>.")
+
+        return "\n".join(lines)
 
     def _handle_natural_conversation(self, user_msg: str) -> str:
         """Conversational AI Director response grounded in live state & persistent strategy memory."""

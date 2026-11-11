@@ -35,6 +35,7 @@ ENDPOINTS_VERIFIED: Dict[str, bool] = {
     "unlist_player": True,       # Standard Biwenger API v2 DELETE /market?player={id}
     "pay_clause": True,          # Gated by human approval in SEMI_AUTO (`/aprobar CL-xxx`)
     "raise_clause": True,        # Gated by human approval in SEMI_AUTO (`/aprobar BL-xxx`)
+    "cancel_offer": True,        # Cancels an outgoing purchase offer/bid to release maxBid capacity
 }
 
 
@@ -197,6 +198,10 @@ class BiwengerMarketActions:
     def reject_offer(self, offer_id: int) -> Dict[str, Any]:
         """Rejects a received offer (e.g., lowball Computer offer when rolling for tomorrow)."""
         return self._execute("accept_offer", "PUT", f"{API_BASE}/offers/{int(offer_id)}", {"status": "rejected"}, critical=False)
+
+    def cancel_offer(self, offer_id: int) -> Dict[str, Any]:
+        """Cancels a pending outgoing purchase offer/bid to release committed maxBid capacity."""
+        return self._execute("cancel_offer", "DELETE", f"{API_BASE}/offers/{int(offer_id)}", critical=False)
 
     def pay_clause(self, player_id: int, amount: int, owner_user_id: int) -> Dict[str, Any]:
         """Instant release-clause purchase from a rival."""

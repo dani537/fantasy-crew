@@ -33,10 +33,10 @@ class ClauseSniper:
 
     def __init__(
         self,
-        policy: str = "SURGICAL_SCARCITY",
+        policy: str = "COMPETITIVE_VORP",
         rules: Optional[LeagueRulesEngine] = None,
     ):
-        self.policy = (policy or "SURGICAL_SCARCITY").upper()
+        self.policy = (policy or "COMPETITIVE_VORP").upper()
         self.rules = rules or LeagueRulesEngine.load()
 
     def scan_offensive_targets(
@@ -99,9 +99,11 @@ class ClauseSniper:
             if clause <= 0 or clause > max_budget or price <= 0:
                 continue
 
-            # Never snipe falling players
+            # Never snipe rapidly falling assets unless they are established elite starters
+            avg_pts_raw = safe_num(str(r.get("media_puntos", "0")).replace(",", "."))
             efr_72h = float(efr_map.get(pid, subida * 2.4))
-            if subida < 0 or efr_72h < 0:
+            is_elite_rebound = (avg_pts_raw >= 5.0 and subida >= -20_000 and self.policy in ("COMPETITIVE_VORP", "AGGRESSIVE"))
+            if (subida < 0 or efr_72h < 0) and not is_elite_rebound:
                 continue
 
             xp_best = float(xp_info.get("xp_best", 0.0))
@@ -145,7 +147,27 @@ class ClauseSniper:
                 scarcity_tier = rep.scarcity_tier
                 n_free_comp = rep.n_free_comparable
 
-            if self.policy == "SURGICAL_SCARCITY":
+            if self.policy == "COMPETITIVE_VORP":
+                # In AZ Finance / standard Biwenger rules, minimum clauses are 1.70x to 2.25x.
+                # Allow official league ratios when cash is abundant and player delivers high VORP.
+                league_ratio_cap = 2.20 if float(idle_cash_eur) >= 5_000_000.0 else 1.95
+                is_micro_breakout = (
+                    clause <= 5_200_000
+                    and clause_ratio <= 2.25
+                    and p_start >= 0.65
+                    and (subida >= 60_000 or shock_pts >= 8.0)
+                    and net_alpha_eur >= max(200_000.0, clause * 0.08)
+                    and proj_12d_price >= clause * 0.88
+                )
+                is_star_steal = (
+                    p_start >= 0.70
+                    and (xp_best >= 4.2 or avg_pts_raw >= 4.8)
+                    and delta_xp >= 0.75
+                    and clause_ratio <= league_ratio_cap
+                    and (subida >= -20_000)
+                    and net_alpha_eur >= max(350_000.0, clause * 0.06)
+                )
+            elif self.policy == "SURGICAL_SCARCITY":
                 # Avoid >1.65x deadweight clause brackets (e.g. 225% sub-2M bench traps) and keep 1.5M auction buffer
                 has_surplus_buffer = float(idle_cash_eur) >= (clause + 1_500_000.0)
                 is_micro_breakout = (
@@ -158,21 +180,9 @@ class ClauseSniper:
                     and proj_12d_price >= clause * 1.08
                     and idle_cash_eur < 30_000_000.0
                 )
-            else:
-                is_micro_breakout = (
-                    clause <= 3_800_000
-                    and (subida >= 65_000 or shock_pts >= 9.0)
-                    and net_alpha_eur >= max(280_000.0, clause * 0.16)
-                    and proj_12d_price >= clause * 1.05
-                    and idle_cash_eur < 30_000_000.0
-                )
-
-            flush = idle_boost >= 1.6
-            ultra_flush = float(idle_cash_eur) >= 16_000_000.0
-            max_ratio = 1.38 if not ultra_flush else (1.46 if (subida >= 50_000 or n_free_comp <= 1) else 1.40)
-
-            if self.policy == "SURGICAL_SCARCITY":
-                # Only pay star clause overprice when free market truly lacks comparable starters (`n_free_comp <= 1`) OR ratio <= 1.26x
+                flush = idle_boost >= 1.6
+                ultra_flush = float(idle_cash_eur) >= 16_000_000.0
+                max_ratio = 1.38 if not ultra_flush else (1.46 if (subida >= 50_000 or n_free_comp <= 1) else 1.40)
                 scarcity_gate = (n_free_comp <= 1 and scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE")) or (clause_ratio <= 1.26)
                 is_star_steal = (
                     float(idle_cash_eur) >= (clause + 800_000.0)
@@ -183,13 +193,23 @@ class ClauseSniper:
                     and subida >= (0 if flush else 30_000)
                     and net_alpha_eur >= max(750_000.0, clause * (0.09 if flush else 0.13))
                 )
-            else:
+            else:  # AGGRESSIVE
+                is_micro_breakout = (
+                    clause <= 5_000_000
+                    and (subida >= 50_000 or shock_pts >= 8.0)
+                    and net_alpha_eur >= max(200_000.0, clause * 0.12)
+                    and proj_12d_price >= clause * 0.95
+                    and idle_cash_eur < 30_000_000.0
+                )
+                flush = idle_boost >= 1.6
+                ultra_flush = float(idle_cash_eur) >= 16_000_000.0
+                max_ratio = 1.85 if not ultra_flush else 2.10
                 is_star_steal = (
-                    p_start >= 0.75
-                    and delta_xp >= (0.70 if ultra_flush else 0.90)
+                    p_start >= 0.72
+                    and delta_xp >= 0.65
                     and clause_ratio <= max_ratio
-                    and subida >= (0 if flush else 40_000)
-                    and net_alpha_eur >= max(750_000.0, clause * (0.08 if flush else 0.12))
+                    and subida >= (0 if flush else 20_000)
+                    and net_alpha_eur >= max(500_000.0, clause * 0.08)
                 )
 
             if is_micro_breakout or is_star_steal:

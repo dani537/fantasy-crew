@@ -406,12 +406,20 @@ class AutopilotRunner:
                 try:
                     pid = int(c["player_id"])
                     owner_uid = int(mgr_id_map.get(str(c.get("seller", "")), 0))
-                    if self.mode == "SEMI_AUTO":
+                    amt = int(c["amount"])
+                    # Autonomous execution in FULL_AUTO up to configured cap (6M default) when cash is positive.
+                    # Clauses > 6M or in SEMI_AUTO are queued for 1-tap confirmation on Telegram!
+                    requires_approval = (
+                        self.mode == "SEMI_AUTO"
+                        or amt > StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR
+                        or not ctx.get("is_solvent", True)
+                    )
+                    if requires_approval and not self.dry_run:
                         dec_id = self.memory.queue_pending_decision(
                             action_type="CLAUSE_SNIPE",
                             player_id=pid,
                             nombre=c["nombre"],
-                            amount_eur=int(c["amount"]),
+                            amount_eur=amt,
                             market_price_eur=int(c["market_price"]),
                             counterparty=str(c.get("seller", "")),
                             owner_user_id=owner_uid,
@@ -424,7 +432,7 @@ class AutopilotRunner:
                         )
                         queued_decisions.append(dec_id)
                     elif self.mode == "FULL_AUTO" or self.dry_run:
-                        res = market_actions.pay_clause(player_id=pid, amount=int(c["amount"]), owner_user_id=owner_uid)
+                        res = market_actions.pay_clause(player_id=pid, amount=amt, owner_user_id=owner_uid)
                         execution_results.append({"type": "CLAUSE_SNIPE", "target": c["nombre"], "res": res})
                 except Exception as e:
                     execution_results.append({"type": "CLAUSE_SNIPE", "target": c.get("nombre", str(c)), "res": {"status": "ERROR", "detail": str(e)}})

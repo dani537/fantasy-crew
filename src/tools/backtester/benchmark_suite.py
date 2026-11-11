@@ -19,7 +19,7 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 
-from src.config import resolve_active_user_identity
+from src.config import StrategySettings, resolve_active_user_identity
 from src.tools.strategy_engine.league_rules import LeagueRulesEngine
 from src.tools.backtester.market_env import AZFinanceMarketEnv
 from src.utils.numeric import safe_num
@@ -336,7 +336,7 @@ class BacktestBenchmarkSuite:
                     "enable_leverage": True,
                     "enable_clauses": True,
                     "enable_preventive_listing": True,
-                    "clause_policy": "SURGICAL_SCARCITY",
+                    "clause_policy": getattr(StrategySettings, "CLAUSE_POLICY", "COMPETITIVE_VORP"),
                     "legacy_v2_mode": False,
                 },
             ),
@@ -364,7 +364,7 @@ class BacktestBenchmarkSuite:
             "enable_leverage": True,
             "enable_clauses": True,
             "enable_preventive_listing": True,
-            "clause_policy": "SURGICAL_SCARCITY",
+            "clause_policy": getattr(StrategySettings, "CLAUSE_POLICY", "COMPETITIVE_VORP"),
             "legacy_v2_mode": False,
         }
 

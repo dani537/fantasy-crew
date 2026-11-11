@@ -339,9 +339,17 @@ class _StrategySettingsMeta(type):
 
     @property
     def CLAUSE_POLICY(cls) -> str:
-        """SURGICAL_SCARCITY (recommended), AGGRESSIVE, or DISABLED."""
-        pol = _get_config_var("CLAUSE_POLICY", "SURGICAL_SCARCITY").upper()
-        return pol if pol in ("SURGICAL_SCARCITY", "AGGRESSIVE", "DISABLED") else "SURGICAL_SCARCITY"
+        """COMPETITIVE_VORP (default), SURGICAL_SCARCITY, AGGRESSIVE, or DISABLED."""
+        pol = _get_config_var("CLAUSE_POLICY", "COMPETITIVE_VORP").upper()
+        return pol if pol in ("COMPETITIVE_VORP", "SURGICAL_SCARCITY", "AGGRESSIVE", "DISABLED") else "COMPETITIVE_VORP"
+
+    @property
+    def AUTONOMOUS_CLAUSE_MAX_EUR(cls) -> int:
+        """Maximum clause amount executed autonomously in FULL_AUTO when cash is 100% available."""
+        try:
+            return int(float(_get_config_var("AUTONOMOUS_CLAUSE_MAX_EUR", "6000000")))
+        except ValueError:
+            return 6_000_000
 
     @property
     def PREVENTIVE_MARKET_LISTING(cls) -> bool:

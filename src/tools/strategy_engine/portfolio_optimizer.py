@@ -976,7 +976,7 @@ class PortfolioOptimizer:
 
             if is_empty_pos:
                 tier = 3
-            elif is_prio or dx >= 0.65 or reg == "STAR_UNDERCLAUSED_SNIPE" or (reg == "CORE_XI_UPGRADE" and dx >= 0.35):
+            elif is_prio or dx >= 0.65 or reg in ("STAR_UNDERCLAUSED_SNIPE", "VORP_ELITE_SNIPE", "MICRO_BREAKOUT_SNIPE") or (reg == "CORE_XI_UPGRADE" and dx >= 0.35):
                 tier = 2
             elif dx >= 0.25 or float(x.get("efr_72h", 0.0)) >= 80_000:
                 tier = 1

@@ -106,6 +106,11 @@ class FastDeltaRefresh:
             "current_lineup_ids": [],
             "currently_listed_pids": [],    # list[int] of our own players currently listed on market
             "waiting_offers_by_pid": {},    # str(pid) -> {offer_id, amount, from_id, from_name}
+            "outgoing_bids": [],            # list of outgoing purchase/clause offers locking bidding capacity
+            "team_value": 0,                # estimated live squad value
+            "max_credit": 0,                # 25% of team_value (AZ Finance 'quarterTeam')
+            "committed_bids_eur": 0,        # sum of outgoing active purchase bids
+            "available_max_bid": 0,         # balance + max_credit - committed_bids_eur
             "market_sales": [],             # list of dicts ready for listings_df
             "manager_id_by_name": {},       # manager_name -> user_id
             "live_player_status": {},       # str(pid) -> {status, price, subida_24h, name, team_id, position}
@@ -183,6 +188,23 @@ class FastDeltaRefresh:
                             "clause_locked": bool(lock_until > now_unix),
                             "clause_locked_until": lock_until,
                         }
+
+                    outgoing_bids: List[Dict[str, Any]] = []
+                    for off in (u_data.get("offers") or []):
+                        if (
+                            str(off.get("from", {}).get("id")) == str(team_id)
+                            and str(off.get("status", "")).lower() == "waiting"
+                            and off.get("type") in ("purchase", "clause")
+                        ):
+                            req = off.get("requestedPlayers") or []
+                            outgoing_bids.append({
+                                "offer_id": int(off.get("id", 0)),
+                                "amount": int(off.get("amount", 0)),
+                                "player_id": int(req[0]) if req else 0,
+                                "type": str(off.get("type", "purchase")),
+                                "to": off.get("to"),
+                            })
+                    result["outgoing_bids"] = outgoing_bids
 
                     os.makedirs("./data/raw", exist_ok=True)
                     with open("./data/raw/live_user_state.json", "w", encoding="utf-8") as fu:
@@ -297,6 +319,21 @@ class FastDeltaRefresh:
                     result["comuniate_refreshed_rows"] = len(df_c)
             except Exception:
                 pass
+
+        # Calculate team value, max credit, and available max bid
+        status_map = result.get("live_player_status") or {}
+        owned_meta = result.get("owned_players_meta") or {}
+        team_val = sum(
+            int(status_map.get(str(pid), {}).get("price") or meta.get("purchase_price", 0))
+            for pid, meta in owned_meta.items()
+        )
+        max_credit = int(team_val * 0.25)
+        committed = sum(int(b.get("amount", 0)) for b in result.get("outgoing_bids", []))
+        cur_bal = int(result.get("balance") or 0)
+        result["team_value"] = team_val
+        result["max_credit"] = max_credit
+        result["committed_bids_eur"] = committed
+        result["available_max_bid"] = max(0, cur_bal + max_credit - committed)
 
         result["elapsed_sec"] = round(time.time() - t0, 2)
         os.makedirs(os.path.dirname(LIVE_DELTA_CACHE_PATH) or ".", exist_ok=True)
