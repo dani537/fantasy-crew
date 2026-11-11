@@ -59,13 +59,18 @@ class PortfolioOptimizer:
         rules: Optional[LeagueRulesEngine] = None,
         important_sale_min_eur: Optional[int] = None,
         archetype: Optional[StrategyArchetype] = None,
-        protect_pillars_absolute: bool = True,
+        protect_pillars_absolute: Optional[bool] = None,
     ):
         self.rules = rules or LeagueRulesEngine.load()
         self.xp_engine = xp_engine or ExpectedPointsEngine()
         self.auction_model = auction_model or AuctionBidModel()
-        self.archetype = archetype
-        self.protect_pillars_absolute = bool(protect_pillars_absolute)
+        self.archetype = archetype or STRATEGY_ARCHETYPES.get(StrategySettings.ACTIVE_ARCHETYPE)
+        if protect_pillars_absolute is not None:
+            self.protect_pillars_absolute = bool(protect_pillars_absolute)
+        elif self.archetype is not None:
+            self.protect_pillars_absolute = bool(self.archetype.protect_pillars_absolute)
+        else:
+            self.protect_pillars_absolute = bool(StrategySettings.PROTECT_PILLARS_ABSOLUTE)
 
         # Initialize clause sniper with archetype parameters if provided
         if clause_sniper is not None:
@@ -76,12 +81,12 @@ class PortfolioOptimizer:
             min_avg = 4.8
             min_dx = 0.75
             res_pct = 0.80
-            if archetype is not None:
+            if self.archetype is not None:
                 c_pol = "COMPETITIVE_VORP"
-                r_cap = archetype.clause_ratio_cap
-                min_avg = archetype.clause_min_avg_pts
-                min_dx = archetype.clause_min_delta_xp
-                res_pct = archetype.clause_cash_reserve_pct
+                r_cap = self.archetype.clause_ratio_cap
+                min_avg = self.archetype.clause_min_avg_pts
+                min_dx = self.archetype.clause_min_delta_xp
+                res_pct = self.archetype.clause_cash_reserve_pct
             self.clause_sniper = ClauseSniper(
                 policy=c_pol,
                 rules=self.rules,
@@ -96,8 +101,8 @@ class PortfolioOptimizer:
             if credit_limit_ratio is not None
             else float(self.rules.credit_limit_ratio)
         )
-        if archetype is not None and max_squad_size is None:
-            self.max_squad_size = int(archetype.target_roster_size)
+        if self.archetype is not None and max_squad_size is None:
+            self.max_squad_size = int(self.archetype.target_roster_size)
         else:
             self.max_squad_size = (
                 int(max_squad_size)

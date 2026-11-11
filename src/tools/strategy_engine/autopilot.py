@@ -92,14 +92,13 @@ class AutopilotRunner:
 
         self.xp_engine = ExpectedPointsEngine()
         self.auction_model = AuctionBidModel()
-        self.clause_sniper = ClauseSniper(policy=StrategySettings.CLAUSE_POLICY, rules=self.rules)
         self.optimizer = PortfolioOptimizer(
             xp_engine=self.xp_engine,
             auction_model=self.auction_model,
-            clause_sniper=self.clause_sniper,
             preventive_listing=StrategySettings.PREVENTIVE_MARKET_LISTING,
             rules=self.rules,
         )
+        self.clause_sniper = self.optimizer.clause_sniper
 
     def load_active_context(self) -> Dict[str, Any]:
         """Loads market warehouse snapshot, overlays live `<12s` delta state, and resolves calendar phase."""
