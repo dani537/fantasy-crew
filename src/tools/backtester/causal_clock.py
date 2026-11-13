@@ -98,22 +98,49 @@ class StrictCausalDataView:
 
         if not self._df_bids.empty:
             self._df_bids["bid_day"] = self._df_bids["fecha"].astype(str).str.slice(0, 10)
+            self._df_bids = self._df_bids.sort_values("bid_day", kind="mergesort").reset_index(drop=True)
+            self._bid_days_arr = self._df_bids["bid_day"].values
         else:
             self._df_bids["bid_day"] = pd.Series(dtype=str)
+            self._bid_days_arr = np.array([], dtype=object)
 
         if not self._df_reports.empty:
             self._df_reports["fecha_partido"] = self._df_reports["fecha_partido"].astype(str)
             self._df_reports["jornada_num_int"] = pd.to_numeric(self._df_reports["jornada_num"], errors="coerce").fillna(0).astype(int)
+            # Pre-parse numeric fields once so compute_xp_table doesn't re-parse thousands of rows daily
+            self._df_reports["player_id"] = pd.to_numeric(self._df_reports["player_id"], errors="coerce").fillna(0).astype(int)
+            self._df_reports["puntos_biwenger"] = pd.to_numeric(self._df_reports["puntos_biwenger"], errors="coerce").fillna(0.0)
+            self._df_reports["puntos_sofascore"] = pd.to_numeric(self._df_reports.get("puntos_sofascore", 0), errors="coerce").fillna(0.0)
+            self._df_reports["minutos_jugados"] = pd.to_numeric(self._df_reports.get("minutos_jugados", 0), errors="coerce").fillna(0.0)
+            self._df_reports["goles"] = pd.to_numeric(self._df_reports.get("goles", 0), errors="coerce").fillna(0.0)
+            self._df_reports["es_titular_num"] = (
+                self._df_reports.get("es_titular", pd.Series(0, index=self._df_reports.index))
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .isin(["1", "TRUE", "SÍ", "SI"])
+                .astype(float)
+            )
+            # Keep non-empty fecha_partido first, sorted chronologically, for O(log N) searchsorted slicing
+            valid_rep = self._df_reports[self._df_reports["fecha_partido"] != ""].sort_values("fecha_partido", kind="mergesort")
+            empty_rep = self._df_reports[self._df_reports["fecha_partido"] == ""]
+            self._rep_valid_count = len(valid_rep)
+            self._df_reports = pd.concat([valid_rep, empty_rep], ignore_index=True)
+            self._rep_dates_arr = self._df_reports["fecha_partido"].values[:self._rep_valid_count]
         else:
             self._df_reports["jornada_num_int"] = pd.Series(dtype=int)
+            self._rep_valid_count = 0
+            self._rep_dates_arr = np.array([], dtype=object)
 
         if not self._df_calendar.empty:
             self._df_calendar["fecha_hora"] = self._df_calendar["fecha_hora"].astype(str)
             self._df_calendar["jornada_num_int"] = pd.to_numeric(self._df_calendar["jornada_num"], errors="coerce").fillna(0).astype(int)
             self._df_calendar["part_int"] = pd.to_numeric(self._df_calendar["part"], errors="coerce").fillna(1).astype(int)
+            self._df_calendar_p1 = self._df_calendar[self._df_calendar["part_int"] == 1].copy()
         else:
             self._df_calendar["jornada_num_int"] = pd.Series(dtype=int)
             self._df_calendar["part_int"] = pd.Series(dtype=int)
+            self._df_calendar_p1 = self._df_calendar.copy()
 
         if not self._df_comuniate.empty:
             self._df_comuniate["id_jornada_int"] = pd.to_numeric(self._df_comuniate["id_jornada"], errors="coerce").fillna(0).astype(int)
@@ -124,20 +151,24 @@ class StrictCausalDataView:
             self._comuniate_by_round = {}
 
         # Map each jornada_num -> earliest match kickoff date so Comuniate probable XIs
-        # are only exposed within the 6-day lead-up window before that round's kickoff!
+        # are only exposed within the 7-day lead-up window before that round's kickoff!
         self._round_earliest_date: Dict[int, str] = {}
-        cal_p1 = self._df_calendar[self._df_calendar["part_int"] == 1]
-        for jn, grp in cal_p1.groupby("jornada_num_int"):
+        self._round_earliest_ts: Dict[int, pd.Timestamp] = {}
+        for jn, grp in self._df_calendar_p1.groupby("jornada_num_int"):
             valid_dts = [s[:10] for s in grp["fecha_hora"].tolist() if len(s) >= 10]
             if valid_dts:
-                self._round_earliest_date[int(jn)] = min(valid_dts)
+                md = min(valid_dts)
+                self._round_earliest_date[int(jn)] = md
+                self._round_earliest_ts[int(jn)] = pd.Timestamp(md)
 
         self.current_date: str = self.all_dates[0] if self.all_dates else "2026-08-01"
+        self.current_ts: pd.Timestamp = pd.Timestamp(self.current_date)
         self.decision_cutoff_ts: str = f"{self.current_date} 12:00:00"
 
     def set_date(self, date_str: str) -> None:
         d = str(date_str)[:10]
         self.current_date = d
+        self.current_ts = pd.Timestamp(d)
         # Daytime decision cutoff at 12:00:00 (strictly prior to afternoon/evening kickoffs in both UTC and Europe/Madrid)
         self.decision_cutoff_ts = f"{d} 12:00:00"
 
@@ -172,7 +203,10 @@ class StrictCausalDataView:
     def get_past_bids(self, as_of_date: Optional[str] = None) -> pd.DataFrame:
         target = self._assert_no_leakage(as_of_date)
         # Morning auctions resolve at 05:00-06:00 UTC, strictly before daytime decisions
-        return self._df_bids[self._df_bids["bid_day"] <= target].copy()
+        if self._df_bids.empty:
+            return self._df_bids.copy()
+        idx = int(np.searchsorted(self._bid_days_arr, target, side="right"))
+        return self._df_bids.iloc[:idx].copy()
 
     def get_past_match_reports(self, as_of_timestamp: Optional[str] = None) -> pd.DataFrame:
         cutoff = str(as_of_timestamp) if as_of_timestamp is not None else self.decision_cutoff_ts
@@ -180,8 +214,10 @@ class StrictCausalDataView:
             raise ValueError(
                 f"Temporal Leakage Violation: requested match timestamp '{cutoff}' > current causal clock '{self.current_date}'"
             )
-        mask = (self._df_reports["fecha_partido"] != "") & (self._df_reports["fecha_partido"] < cutoff)
-        return self._df_reports[mask].copy()
+        if self._rep_valid_count == 0:
+            return self._df_reports.iloc[:0].copy()
+        idx = int(np.searchsorted(self._rep_dates_arr, cutoff, side="left"))
+        return self._df_reports.iloc[:idx].copy()
 
     @property
     def df_calendar(self) -> pd.DataFrame:
@@ -193,8 +229,8 @@ class StrictCausalDataView:
         Returns full season schedule (`Partidos_Calendario`) with post-match scores
         and match stats masked out for all matches with `fecha_hora >= decision_cutoff_ts`.
         """
-        cal = self._df_calendar[self._df_calendar["part_int"] == 1].copy()
-        future_mask = cal["fecha_hora"] >= self.decision_cutoff_ts
+        cal = self._df_calendar_p1.copy()
+        future_mask = cal["fecha_hora"].values >= self.decision_cutoff_ts
         for col in POST_MATCH_CALENDAR_COLS:
             if col in cal.columns:
                 if cal[col].dtype != object:
@@ -210,9 +246,9 @@ class StrictCausalDataView:
         is within 7 days of that round's kickoff (or after).
         """
         jn = int(jornada_num)
-        r_date = self._round_earliest_date.get(jn)
-        if r_date:
-            days_until = (pd.Timestamp(r_date) - pd.Timestamp(self.current_date)).days
+        r_ts = self._round_earliest_ts.get(jn)
+        if r_ts is not None:
+            days_until = (r_ts - self.current_ts).days
             if days_until > 7:
                 return pd.DataFrame()
         df = self._comuniate_by_round.get(jn)
@@ -359,18 +395,22 @@ class CausalEFRPredictor:
 
         self._maybe_refit_causal_ridge(valid_dates)
 
-        # Fresh 60-hour match shock map (strictly < decision_cutoff_ts)
+        # Fresh 54-hour match shock map (strictly < decision_cutoff_ts)
         past_rep = self.view.get_past_match_reports()
         shock_map: Dict[int, float] = {}
         if not past_rep.empty:
-            min_shock_ts = (pd.Timestamp(curr_d) - pd.Timedelta(hours=54)).strftime("%Y-%m-%d %H:%M:%S")
-            fresh = past_rep[past_rep["fecha_partido"] >= min_shock_ts]
+            min_shock_ts = (self.view.current_ts - pd.Timedelta(hours=54)).strftime("%Y-%m-%d %H:%M:%S")
+            # `past_rep` is already chronologically sorted on `fecha_partido` when coming from `StrictCausalDataView`
+            fp_arr = past_rep["fecha_partido"].values
+            s_idx = int(np.searchsorted(fp_arr, min_shock_ts, side="left"))
+            fresh = past_rep.iloc[s_idx:]
             if not fresh.empty:
-                for _, rr in fresh.iterrows():
-                    pid = int(safe_num(rr.get("player_id", 0), 0))
-                    pts = safe_num(rr.get("puntos_biwenger", 0), 0.0)
+                for pid_raw, pts_raw in zip(fresh["player_id"].values, fresh["puntos_biwenger"].values):
+                    pid = int(pid_raw) if pid_raw is not None else 0
                     if pid > 0:
-                        shock_map[pid] = max(shock_map.get(pid, -99.0), pts)
+                        pts = float(pts_raw) if pts_raw is not None else 0.0
+                        if pts > shock_map.get(pid, -99.0):
+                            shock_map[pid] = pts
 
         p_curr_map = self._price_by_date.get(curr_d, {})
         pids = list(p_curr_map.keys())
@@ -386,27 +426,27 @@ class CausalEFRPredictor:
         else:
             raw_efr = pred_prior
 
-        efr_map: Dict[int, float] = {}
-        for i, pid in enumerate(pids):
-            price = float(p_curr_map.get(pid, 150_000.0))
-            val = float(raw_efr[i])
+        if not pids:
+            return {}, shock_map
 
-            # Add fresh post-match shock impulse if market hasn't priced it in yet
-            if pid in shock_map:
-                sh_pts = shock_map[pid]
-                s0 = X_curr[i, 0]
-                if sh_pts >= 9.0 and s0 < 90_000:
-                    val += (sh_pts - 6.0) * 18_000.0
-                elif sh_pts <= -2.0 and s0 > -40_000:
-                    val -= abs(sh_pts) * 14_000.0
+        prices_arr = np.fromiter((float(p_curr_map[pid]) for pid in pids), dtype=float, count=len(pids))
+        vals_arr = raw_efr.copy()
+        if shock_map:
+            s0_col = X_curr[:, 0]
+            for i, pid in enumerate(pids):
+                sh_pts = shock_map.get(pid)
+                if sh_pts is not None:
+                    if sh_pts >= 9.0 and s0_col[i] < 90_000:
+                        vals_arr[i] += (sh_pts - 6.0) * 18_000.0
+                    elif sh_pts <= -2.0 and s0_col[i] > -40_000:
+                        vals_arr[i] -= abs(sh_pts) * 14_000.0
 
-            # Hard Biwenger constraints: price cannot drop below 150,000 € floor,
-            # nor surge > +28% in 72h (except sub-600k micro breakouts up to +380k)
-            min_delta = 150_000.0 - price
-            max_delta = max(380_000.0, price * 0.28)
-            clipped = float(np.clip(val, min_delta, max_delta))
-            # Quantize to Biwenger's 10,000 € daily price grid
-            quantized = round(clipped / 10_000.0) * 10_000.0
-            efr_map[int(pid)] = float(quantized)
+        # Hard Biwenger constraints: price cannot drop below 150,000 € floor,
+        # nor surge > +28% in 72h (except sub-600k micro breakouts up to +380k)
+        min_deltas = 150_000.0 - prices_arr
+        max_deltas = np.maximum(380_000.0, prices_arr * 0.28)
+        clipped = np.clip(vals_arr, min_deltas, max_deltas)
+        quantized = np.round(clipped / 10_000.0) * 10_000.0
+        efr_map: Dict[int, float] = {int(pid): float(q) for pid, q in zip(pids, quantized)}
 
         return efr_map, shock_map

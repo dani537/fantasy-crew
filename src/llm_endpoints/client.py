@@ -14,12 +14,14 @@ from src.config import Credentials, GeneralSettings
 # Verified October 2026 pricing (USD per 1M tokens) for live cost telemetry
 MODEL_PRICING_PER_1M: Dict[str, tuple] = {
     # Google AI Studio Free Tier / Google AI Pro ($10/mo Cloud Credit included -> $0 out of pocket)
+    "gemini-4-hydrogen": (0.0, 0.0),
     "gemini-3.8-flash": (0.0, 0.0),
     "gemini-3.5-flash-lite": (0.0, 0.0),
     "gemini-2.5-flash": (0.0, 0.0),
     "gemini-2.5-flash-lite": (0.0, 0.0),
     "gemini-4-argon": (0.0, 0.0),
-    # OpenRouter Verified Catalog (2026-10-30)
+    # OpenRouter Verified Catalog (2026-10-30 / 2026-11-12)
+    "google/gemini-4-hydrogen": (0.40, 1.80),
     "openai/gpt-6-luna-pro": (0.10, 0.50),
     "openai/gpt-6-luna": (0.10, 0.50),
     "openai/gpt-5.6-luna": (0.20, 1.20),

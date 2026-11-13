@@ -134,25 +134,52 @@ class DynamicRoundDispatcher:
             except Exception as e_tg:
                 print(f"⚠️ Dispatcher Telegram drain warning: {e_tg}")
 
-        # 2. Check calendar phase locally (<0.1s, 0 API calls)
+        # 2. Check calendar phase & settled-round / strategy cadence locally (<0.1s, 0 API calls)
         view = StrictCausalDataView(db_path=self.db_path)
         phase = self.rules.resolve_round_phase(view.df_calendar, now_ts=now_ts)
         jn = phase.target_jornada_num
 
+        # Detect newly settled round (`POST_ROUND_SETTLEMENT`) from local warehouse
+        settled_jn = 0
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                df_pr = pd.read_sql("SELECT DISTINCT Jornada FROM Primas_Jornadas", conn)
+            if not df_pr.empty:
+                j_nums = [int("".join(c for c in str(v) if c.isdigit())) for v in df_pr["Jornada"] if any(c.isdigit() for c in str(v))]
+                if j_nums:
+                    settled_jn = max(j_nums)
+        except Exception:
+            settled_jn = 0
+
+        # Resolve strategy-driven clause timing mode (`IMMEDIATE | PRE_LOCK_SURGICAL | HYBRID`)
+        timing_mode = StrategySettings.CLAUSE_TIMING_MODE
+        try:
+            from src.tools.strategy_engine.llm_supervisor import LLMStrategicSupervisor
+            sup_state = LLMStrategicSupervisor.load_persisted_state(memory_ledger=self.memory)
+            sup_timing = str((sup_state.get("overrides") or {}).get("clause_timing_preference", "AUTO")).upper()
+            if sup_timing in ("IMMEDIATE", "PRE_LOCK_SURGICAL", "HYBRID"):
+                timing_mode = sup_timing
+        except Exception:
+            pass
+
         chosen_trigger: Optional[str] = force_phase
-        if not chosen_trigger and not phase.is_schedule_placeholder:
-            if phase.in_final_lineup_guard_window:
-                key = f"J{jn}_FINAL_LINEUP_GUARD"
-                if not self.memory.has_round_event_fired(key):
-                    chosen_trigger = "FINAL_LINEUP_GUARD"
-            elif phase.in_pre_kickoff_solvency_window:
-                key = f"J{jn}_PRE_KICKOFF_SOLVENCY"
-                if not self.memory.has_round_event_fired(key):
-                    chosen_trigger = "PRE_KICKOFF_SOLVENCY"
-            elif phase.in_pre_clause_lock_window:
-                key = f"J{jn}_PRE_CLAUSE_LOCK"
-                if not self.memory.has_round_event_fired(key):
-                    chosen_trigger = "PRE_CLAUSE_LOCK"
+        chosen_jn = jn
+        if not chosen_trigger:
+            if not phase.is_schedule_placeholder:
+                if phase.in_final_lineup_guard_window:
+                    if not self.memory.has_round_event_fired(f"J{jn}_FINAL_LINEUP_GUARD"):
+                        chosen_trigger = "FINAL_LINEUP_GUARD"
+                elif phase.in_pre_kickoff_solvency_window:
+                    if not self.memory.has_round_event_fired(f"J{jn}_PRE_KICKOFF_SOLVENCY"):
+                        chosen_trigger = "PRE_KICKOFF_SOLVENCY"
+                elif phase.in_pre_clause_lock_window and timing_mode in ("PRE_LOCK_SURGICAL", "HYBRID", "IMMEDIATE"):
+                    if not self.memory.has_round_event_fired(f"J{jn}_PRE_CLAUSE_LOCK"):
+                        chosen_trigger = "PRE_CLAUSE_LOCK"
+            if not chosen_trigger and settled_jn >= 1 and phase.active_in_progress_jornada is None:
+                if not self.memory.has_round_event_fired(f"J{settled_jn}_POST_ROUND_SETTLEMENT"):
+                    chosen_trigger = "POST_ROUND_SETTLEMENT"
+                    chosen_jn = settled_jn
 
         if not chosen_trigger:
             return {
@@ -160,10 +187,11 @@ class DynamicRoundDispatcher:
                 "approvals_processed": approval_results,
                 "telegram_messages_processed": tg_processed,
                 "phase": phase.to_dict(),
+                "clause_timing_mode": timing_mode,
                 "reason": "Outside tactical windows or already executed for this round.",
             }
 
-        event_key = f"J{jn}_{chosen_trigger}"
+        event_key = f"J{chosen_jn}_{chosen_trigger}"
         eff_mode = mode or StrategySettings.AUTOPILOT_MODE
         print(f"⚡ Ventana táctica activa detectada: {event_key} (Kickoff J{jn}: {phase.next_kickoff_ts}) -> Disparando Autopilot ({eff_mode})...")
 
@@ -181,7 +209,7 @@ class DynamicRoundDispatcher:
         if chosen_trigger != "MORNING_FULL":
             self.memory.mark_round_event_fired(
                 event_key=event_key,
-                jornada_num=jn,
+                jornada_num=chosen_jn,
                 trigger_type=chosen_trigger,
                 status="OK",
                 summary=f"Modo={eff_mode} | SaldoProy={summary.get('projected_cash')} | XI={summary['plan']['lineup']['formation']}",
@@ -203,7 +231,7 @@ def main():
     parser.add_argument(
         "--force-phase",
         default=None,
-        choices=["MORNING_FULL", "PRE_CLAUSE_LOCK", "PRE_KICKOFF_SOLVENCY", "FINAL_LINEUP_GUARD"],
+        choices=["MORNING_FULL", "POST_ROUND_SETTLEMENT", "PRE_CLAUSE_LOCK", "PRE_KICKOFF_SOLVENCY", "FINAL_LINEUP_GUARD"],
     )
     parser.add_argument("--approve-id", default=None, help="Immediately approve & execute a SEMI_AUTO pending decision ID")
     parser.add_argument("--reject-id", default=None, help="Immediately reject a SEMI_AUTO pending decision ID")

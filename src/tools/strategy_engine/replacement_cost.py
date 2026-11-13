@@ -30,6 +30,93 @@ POS_NORMALIZE = {
     "4": "FW", "delantero": "FW", "fw": "FW", "dl": "FW",
 }
 
+LINE_BIT = {"GK": 1, "DF": 2, "MF": 4, "FW": 8}
+
+
+def _lines_to_bitmask(lines: Any) -> int:
+    if isinstance(lines, int):
+        return lines
+    mask = 0
+    if isinstance(lines, (set, list, tuple)):
+        for ln in lines:
+            mask |= LINE_BIT.get(str(ln).strip(), 0)
+        return mask
+    for tok in str(lines or "").split(","):
+        mask |= LINE_BIT.get(tok.strip(), 0)
+    return mask
+
+
+def _compute_official_clause_vec(prices: np.ndarray) -> np.ndarray:
+    """Vectorized Biwenger official clause brackets matching LeagueRulesEngine.compute_official_clause."""
+    out = np.empty_like(prices, dtype=float)
+    m1 = prices < 2_000_000.0
+    m2 = (~m1) & (prices < 6_000_000.0)
+    m3 = (~m1) & (~m2) & (prices < 12_000_000.0)
+    m4 = (~m1) & (~m2) & (~m3) & (prices < 22_000_000.0)
+    m5 = (~m1) & (~m2) & (~m3) & (~m4) & (prices < 32_000_000.0)
+    m6 = ~(m1 | m2 | m3 | m4 | m5)
+    out[m1] = np.maximum(1_000_000.0, prices[m1] * 2.25)
+    out[m2] = prices[m2] * 2.00
+    out[m3] = prices[m3] * 1.6667
+    out[m4] = prices[m4] * 1.50
+    out[m5] = prices[m5] * 1.3333
+    out[m6] = prices[m6] * 1.25
+    return np.round(out / 10_000.0) * 10_000.0
+
+
+def _build_calendar_index(df_calendar: Optional[pd.DataFrame]) -> Optional[Tuple[List[Tuple[int, pd.Timestamp]], Dict[Tuple[int, str], pd.Timestamp]]]:
+    """Parses Partidos_Calendario once into sorted (j_num, round_start_ts) + (j_num, team_lower)->match_ts."""
+    if df_calendar is None or df_calendar.empty or "jornada" not in df_calendar.columns:
+        return None
+    ts_col = "fecha_hora" if "fecha_hora" in df_calendar.columns else ("fecha" if "fecha" in df_calendar.columns else None)
+    if not ts_col:
+        return None
+
+    j_nums = (
+        df_calendar["jornada_num"].values
+        if "jornada_num" in df_calendar.columns
+        else df_calendar["jornada"].astype(str).str.extract(r"(\d+)")[0].values
+    )
+    j_num_s = pd.to_numeric(j_nums, errors="coerce")
+    dt_s = pd.to_datetime(df_calendar[ts_col], errors="coerce")
+
+    valid_mask = pd.notna(j_num_s) & pd.notna(dt_s)
+    if not np.any(valid_mask):
+        return None
+
+    j_arr = np.asarray(j_num_s[valid_mask], dtype=int)
+    dt_arr = dt_s[valid_mask].values
+
+    has_loc = "equipo_local" in df_calendar.columns or "local" in df_calendar.columns
+    loc_col = "equipo_local" if "equipo_local" in df_calendar.columns else ("local" if "local" in df_calendar.columns else None)
+    vis_col = "equipo_visitante" if "equipo_visitante" in df_calendar.columns else ("visitante" if "visitante" in df_calendar.columns else None)
+    locs = df_calendar.loc[valid_mask, loc_col].values if loc_col else None
+    viss = df_calendar.loc[valid_mask, vis_col].values if vis_col else None
+
+    round_min: Dict[int, pd.Timestamp] = {}
+    team_match: Dict[Tuple[int, str], pd.Timestamp] = {}
+
+    for idx in range(len(j_arr)):
+        j_i = int(j_arr[idx])
+        ts_v = pd.Timestamp(dt_arr[idx])
+        prev_r = round_min.get(j_i)
+        if prev_r is None or ts_v < prev_r:
+            round_min[j_i] = ts_v
+        if has_loc and locs is not None and viss is not None:
+            l_s = str(locs[idx] or "").strip().lower()
+            v_s = str(viss[idx] or "").strip().lower()
+            if l_s:
+                k_l = (j_i, l_s)
+                if k_l not in team_match or ts_v < team_match[k_l]:
+                    team_match[k_l] = ts_v
+            if v_s:
+                k_v = (j_i, v_s)
+                if k_v not in team_match or ts_v < team_match[k_v]:
+                    team_match[k_v] = ts_v
+
+    sorted_rounds = sorted(round_min.items(), key=lambda x: x[0])
+    return sorted_rounds, team_match
+
 
 def _norm_pos(raw: Any) -> str:
     s = str(raw or "").strip().lower()
@@ -68,6 +155,7 @@ def estimate_missed_rounds_from_calendar(
     df_calendar: Optional[pd.DataFrame] = None,
     team_name: Optional[str] = None,
     horizon_rounds: int = 6,
+    calendar_index: Optional[Tuple[List[Tuple[int, pd.Timestamp]], Dict[Tuple[int, str], pd.Timestamp]]] = None,
 ) -> Tuple[int, List[int]]:
     """
     Counts how many upcoming LaLiga rounds (`0 .. horizon_rounds`) a player actually misses
@@ -79,42 +167,20 @@ def estimate_missed_rounds_from_calendar(
 
     now_ts = pd.Timestamp(current_date)
     return_ts = now_ts + pd.Timedelta(days=int(absence_days))
+    cal_idx = calendar_index if calendar_index is not None else _build_calendar_index(df_calendar)
 
-    if df_calendar is not None and not df_calendar.empty and "jornada" in df_calendar.columns:
-        cal = df_calendar.copy()
-        cal["j_num"] = (
-            cal["jornada"].astype(str).str.extract(r"(\d+)")[0].pipe(pd.to_numeric, errors="coerce")
-        )
-        ts_col = "fecha_hora" if "fecha_hora" in cal.columns else ("fecha" if "fecha" in cal.columns else None)
-        if ts_col:
-            cal["dt"] = pd.to_datetime(cal[ts_col], errors="coerce")
-            cal = cal.dropna(subset=["j_num", "dt"])
-            cal["j_num"] = cal["j_num"].astype(int)
-
-            # Group round start timestamps for upcoming rounds
-            round_starts = cal.groupby("j_num")["dt"].min().sort_index()
-            upcoming_rounds = [int(j) for j, dt_min in round_starts.items() if dt_min >= now_ts - pd.Timedelta(hours=6)]
-            upcoming_rounds = upcoming_rounds[:horizon_rounds]
-
-            if upcoming_rounds:
-                missed: List[int] = []
-                norm_team = str(team_name or "").strip().lower()
-                for j_num in upcoming_rounds:
-                    j_rows = cal[cal["j_num"] == j_num]
-                    match_dt = None
-                    if norm_team and "equipo_local" in j_rows.columns and "equipo_visitante" in j_rows.columns:
-                        m_team = j_rows[
-                            (j_rows["equipo_local"].astype(str).str.strip().str.lower() == norm_team)
-                            | (j_rows["equipo_visitante"].astype(str).str.strip().str.lower() == norm_team)
-                        ]
-                        if not m_team.empty:
-                            match_dt = m_team["dt"].min()
-                    if match_dt is None or pd.isna(match_dt):
-                        match_dt = j_rows["dt"].min()
-
-                    if match_dt < return_ts:
-                        missed.append(j_num)
-                return min(len(missed), horizon_rounds), missed
+    if cal_idx is not None:
+        sorted_rounds, team_match = cal_idx
+        cutoff_ts = now_ts - pd.Timedelta(hours=6)
+        upcoming = [(j_num, dt_min) for j_num, dt_min in sorted_rounds if dt_min >= cutoff_ts][:horizon_rounds]
+        if upcoming:
+            missed: List[int] = []
+            norm_team = str(team_name or "").strip().lower()
+            for j_num, dt_min in upcoming:
+                match_dt = team_match.get((j_num, norm_team), dt_min) if norm_team else dt_min
+                if match_dt < return_ts:
+                    missed.append(j_num)
+            return min(len(missed), horizon_rounds), missed
 
     # Fallback when calendar table is unavailable: ~1 round per 7.5 days
     est_missed = int(np.clip(np.ceil(absence_days / 7.5), 1, horizon_rounds))
@@ -151,25 +217,75 @@ class MarketScarcityEngine:
         rules: Optional[LeagueRulesEngine] = None,
         clause_locked_ids: Optional[Set[int]] = None,
         auction_overbid_pct: float = 0.08,
+        df_calendar: Optional[pd.DataFrame] = None,
     ):
         self.my_manager_name = str(my_manager_name or "").strip()
         self.rules = rules or LeagueRulesEngine.load()
         self.clause_locked_ids = set(clause_locked_ids or set())
         self.auction_overbid_pct = float(auction_overbid_pct)
+        self._calendar_index = _build_calendar_index(df_calendar) if df_calendar is not None else None
+        self._rep_cache: Dict[Tuple[int, str, float, int, int], ReplacementProfile] = {}
+        self._reinvest_cache: Dict[Tuple[int, int, bool], Tuple[float, float]] = {}
 
         # Build unified player universe table on date t
         self.universe_df = self._build_universe(df_market_today, xp_table)
-        free_mask = self.universe_df["owner_class"] == "FREE"
+        if self.universe_df.empty:
+            self.n_free_total = 1
+            self.p85_starter_xp = 5.8
+            self.p60_starter_xp = 4.4
+            self._u_pid = np.empty(0, dtype=np.int64)
+            self._u_pos_mask = np.empty(0, dtype=np.uint8)
+            self._u_precio = np.empty(0, dtype=float)
+            self._u_xp_healthy = np.empty(0, dtype=float)
+            self._u_eff_clause = np.empty(0, dtype=float)
+            self._u_is_avail = np.empty(0, dtype=bool)
+            self._u_is_free_avail = np.empty(0, dtype=bool)
+            self._u_is_rival_unlocked_avail = np.empty(0, dtype=bool)
+            return
+
+        owner_arr = self.universe_df["owner_class"].values
+        free_mask = (owner_arr == "FREE")
         self.n_free_total = max(1, int(free_mask.sum()))
 
-        # Compute dynamic elite starter xP threshold (85th percentile of active starters)
-        starters = self.universe_df[self.universe_df["p_start_healthy"] >= 0.60]
-        if not starters.empty:
-            self.p85_starter_xp = float(np.percentile(starters["xp_healthy"], 85))
-            self.p60_starter_xp = float(np.percentile(starters["xp_healthy"], 60))
+        p_start_h = self.universe_df["p_start_healthy"].values
+        xp_h_arr = self.universe_df["xp_healthy"].values
+        starters_xp = xp_h_arr[p_start_h >= 0.60]
+        if len(starters_xp) > 0:
+            self.p85_starter_xp = float(np.percentile(starters_xp, 85))
+            self.p60_starter_xp = float(np.percentile(starters_xp, 60))
         else:
             self.p85_starter_xp = 5.8
             self.p60_starter_xp = 4.4
+
+        # Pre-extract contiguous NumPy arrays for microsecond bitmask queries
+        self._u_pid = self.universe_df["player_id"].values.astype(np.int64)
+        self._u_pos_mask = np.fromiter(
+            (_lines_to_bitmask(v) for v in self.universe_df["valid_lines"].values),
+            dtype=np.uint8,
+            count=len(self._u_pid),
+        )
+        self._u_precio = self.universe_df["precio"].values.astype(float)
+        self._u_xp_healthy = xp_h_arr.astype(float)
+        raw_cl = self.universe_df["clausula_actual"].values.astype(float)
+        need_calc = raw_cl <= 0.0
+        eff_cl = raw_cl.copy()
+        if np.any(need_calc):
+            if self.rules.clause_enabled:
+                # Use league-specific scaling when customized, fallback to fast vectorized official brackets
+                eff_cl[need_calc] = np.array(
+                    [float(self.rules.compute_official_clause(float(p))) for p in self._u_precio[need_calc]],
+                    dtype=float,
+                )
+            else:
+                eff_cl[need_calc] = _compute_official_clause_vec(self._u_precio[need_calc])
+        self._u_eff_clause = eff_cl
+        self._u_is_avail = self.universe_df["is_available"].values.astype(bool)
+        self._u_is_free_avail = free_mask & self._u_is_avail
+        if self.clause_locked_ids:
+            unlocked_mask = ~np.isin(self._u_pid, list(self.clause_locked_ids))
+        else:
+            unlocked_mask = np.ones(len(self._u_pid), dtype=bool)
+        self._u_is_rival_unlocked_avail = (owner_arr == "RIVAL") & self._u_is_avail & unlocked_mask
 
     def _build_universe(self, df_mkt: pd.DataFrame, xp_table: pd.DataFrame) -> pd.DataFrame:
         if df_mkt is None or df_mkt.empty:
@@ -188,20 +304,27 @@ class MarketScarcityEngine:
         else:
             mkt["clausula_actual"] = 0.0
 
-        def _classify_owner(val: Any) -> str:
-            s = str(val or "").strip()
+        owners_raw = mkt["propietario_liga"].values if "propietario_liga" in mkt.columns else ["Libre"] * len(mkt)
+        my_mgr = self.my_manager_name
+        owner_classes: List[str] = []
+        for val in owners_raw:
+            s = str(val or "").strip() if (val is not None and val == val) else ""
             if not s or s in ("Libre", "Mercado", "nan", "None"):
-                return "FREE"
-            if self.my_manager_name and s == self.my_manager_name:
-                return "MINE"
-            return "RIVAL"
+                owner_classes.append("FREE")
+            elif my_mgr and s == my_mgr:
+                owner_classes.append("MINE")
+            else:
+                owner_classes.append("RIVAL")
+        mkt["owner_class"] = owner_classes
 
-        mkt["owner_class"] = mkt.get("propietario_liga", pd.Series(["Libre"] * len(mkt))).apply(_classify_owner)
-        mkt["fallback_pos"] = mkt.get("posicion", pd.Series(["MF"] * len(mkt))).apply(_norm_pos)
+        pos_raw = mkt["posicion"].values if "posicion" in mkt.columns else ["MF"] * len(mkt)
+        mkt["fallback_pos"] = [_norm_pos(p) for p in pos_raw]
 
         if xp_table is not None and not xp_table.empty:
-            xp = xp_table.copy()
-            xp["player_id"] = pd.to_numeric(xp["player_id"], errors="coerce").fillna(0).astype(int)
+            xp = xp_table
+            if not np.issubdtype(xp["player_id"].dtype, np.integer):
+                xp = xp_table.copy()
+                xp["player_id"] = pd.to_numeric(xp["player_id"], errors="coerce").fillna(0).astype(int)
             cols_keep = [
                 c for c in (
                     "player_id", "natural_pos", "valid_lines", "is_available",
@@ -245,15 +368,20 @@ class MarketScarcityEngine:
         """
         Computes exact replacement cost `C_replace(i, t)` for a player of `(valid_lines, xp_healthy)`.
         """
-        u = self.universe_df
         pos = _norm_pos(natural_pos)
         lines = valid_lines or {pos}
+        target_mask = _lines_to_bitmask(lines) or LINE_BIT.get(pos, 4)
         target_xp = max(1.5, float(xp_healthy))
+        cache_key = (int(player_id), pos, round(target_xp, 3), int(round(market_price)), target_mask)
+        cached = self._rep_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         comparable_xp_floor = max(target_xp * 0.92, target_xp - 0.45)
 
-        if u.empty:
+        if len(self._u_pid) == 0:
             fallback_clause = float(self.rules.compute_official_clause(market_price))
-            return ReplacementProfile(
+            prof = ReplacementProfile(
                 player_id=player_id,
                 natural_pos=pos,
                 xp_healthy=target_xp,
@@ -266,53 +394,39 @@ class MarketScarcityEngine:
                 blended_replacement_cost_eur=fallback_clause,
                 scarcity_tier="IRREPLACEABLE_FREE",
             )
+            self._rep_cache[cache_key] = prof
+            return prof
 
-        # Comparable peers: share at least one valid line, not this player, healthy xP >= comparable floor
-        def _shares_line(vl: Any) -> bool:
-            s_lines = {x.strip() for x in str(vl or "").split(",") if x.strip()}
-            return bool(s_lines & lines)
+        peer_mask = (
+            (self._u_pid != int(player_id))
+            & (self._u_xp_healthy >= comparable_xp_floor)
+            & ((self._u_pos_mask & target_mask) != 0)
+        )
+        free_prices = self._u_precio[peer_mask & self._u_is_free_avail]
+        rival_clauses = self._u_eff_clause[peer_mask & self._u_is_rival_unlocked_avail]
 
-        peers = u[
-            (u["player_id"] != int(player_id))
-            & (u["xp_healthy"] >= comparable_xp_floor)
-            & (u["valid_lines"].apply(_shares_line))
-        ]
+        n_free_comp = int(len(free_prices))
+        n_rival_comp = int(len(rival_clauses))
 
-        free_peers = peers[(peers["owner_class"] == "FREE") & (peers["is_available"])]
-        rival_peers = peers[(peers["owner_class"] == "RIVAL") & (peers["is_available"])]
-
-        n_free_comp = int(len(free_peers))
-        n_rival_comp = int(len(rival_peers))
-
-        # Daily market draws K = market_free_slots out of n_free_total
         k_slots = max(5, int(self.rules.market_free_slots))
         p_single_slot = min(0.95, k_slots / max(float(k_slots), float(self.n_free_total)))
         if n_free_comp > 0:
             p_appear_daily = 1.0 - float((1.0 - p_single_slot) ** n_free_comp)
             wait_days = float(np.clip(1.0 / max(1e-4, p_appear_daily), 1.0, 45.0))
-            # Median auction cost among the 4 most efficient comparable free agents
-            cheapest_free = free_peers.nsmallest(min(4, n_free_comp), "precio")
-            free_cost = float(cheapest_free["precio"].median()) * (1.0 + self.auction_overbid_pct)
+            k_small = min(4, n_free_comp)
+            cheapest = np.partition(free_prices, k_small - 1)[:k_small] if n_free_comp > k_small else free_prices
+            free_cost = float(np.median(cheapest)) * (1.0 + self.auction_overbid_pct)
         else:
             wait_days = 45.0
             free_cost = float(market_price) * (1.0 + self.auction_overbid_pct)
 
-        # Minimum unlocked rival clause for comparable quality (or official clause of equivalent asset)
         own_reclause_equiv = float(self.rules.compute_official_clause(market_price))
-        unlocked_rivals = rival_peers[~rival_peers["player_id"].isin(self.clause_locked_ids)].copy()
-        if not unlocked_rivals.empty and self.rules.clause_enabled:
-            clauses = unlocked_rivals.apply(
-                lambda r: float(r["clausula_actual"]) if float(r["clausula_actual"]) > 0 else float(self.rules.compute_official_clause(float(r["precio"]))),
-                axis=1,
-            )
-            # Take 25th percentile / minimum realistic unlocked clause to avoid outlier noise
-            clause_cost = float(np.percentile(clauses, 20)) if len(clauses) >= 3 else float(clauses.min())
+        if n_rival_comp > 0 and self.rules.clause_enabled:
+            clause_cost = float(np.percentile(rival_clauses, 20)) if n_rival_comp >= 3 else float(np.min(rival_clauses))
             clause_cost = max(clause_cost, market_price * 1.15)
         else:
             clause_cost = own_reclause_equiv
 
-        # Smooth microeconomic blend: when free agents appear within 1-3 days, free_weight ~ 0.74-0.90;
-        # when n_free_comp == 0 (wait_days = 45), free_weight = 0.0 -> 100% clause replacement cost!
         free_weight = 0.0 if n_free_comp == 0 else float(np.exp(-wait_days / 9.0))
         blended_cost = free_weight * free_cost + (1.0 - free_weight) * clause_cost
 
@@ -325,7 +439,7 @@ class MarketScarcityEngine:
         else:
             tier = "ABUNDANT"
 
-        return ReplacementProfile(
+        prof = ReplacementProfile(
             player_id=int(player_id),
             natural_pos=pos,
             xp_healthy=round(target_xp, 3),
@@ -338,6 +452,8 @@ class MarketScarcityEngine:
             blended_replacement_cost_eur=round(blended_cost),
             scarcity_tier=tier,
         )
+        self._rep_cache[cache_key] = prof
+        return prof
 
     def best_achievable_reinvestment_xp(
         self,
@@ -350,51 +466,50 @@ class MarketScarcityEngine:
           `(achievable_xp_healthy, expected_wait_rounds)`
         achievable in the current league market (via realistic free-agent auction or unlocked rival clause).
         """
-        u = self.universe_df
-        if u.empty or budget_eur <= 150_000:
+        if len(self._u_pid) == 0 or budget_eur <= 150_000:
             return 2.2, 1.0
 
-        def _shares_line(vl: Any) -> bool:
-            s_lines = {x.strip() for x in str(vl or "").split(",") if x.strip()}
-            return bool(s_lines & valid_lines)
+        target_mask = _lines_to_bitmask(valid_lines) or 15
+        cache_key = (int(round(budget_eur)), target_mask, bool(clauses_open))
+        cached = self._reinvest_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-        pool = u[(u["is_available"]) & (u["valid_lines"].apply(_shares_line))]
+        line_avail_mask = (self._u_pos_mask & target_mask) != 0
 
-        # Path 1: Affordable free agents (`precio * (1 + overbid) <= budget_eur`)
+        # Path 1: Affordable free agents
         max_free_vm = budget_eur / (1.0 + self.auction_overbid_pct)
-        aff_free = pool[(pool["owner_class"] == "FREE") & (pool["precio"] <= max_free_vm)]
+        aff_free_xps = self._u_xp_healthy[line_avail_mask & self._u_is_free_avail & (self._u_precio <= max_free_vm)]
         best_free_xp = 2.4
         free_wait_rounds = 1.0
-        if not aff_free.empty:
-            # Because only 20 of ~350 free agents appear per day, over ~7-10 days we sample ~35-50% of the pool,
-            # so expected best captured free agent is around the 85th-90th percentile of affordable free agents (not the single #1 outlier!)
-            top_free = aff_free.nlargest(min(8, len(aff_free)), "xp_healthy")
-            best_free_xp = float(np.percentile(top_free["xp_healthy"], 65))
+        n_aff = len(aff_free_xps)
+        if n_aff > 0:
+            k_top = min(8, n_aff)
+            top_xps = np.partition(aff_free_xps, n_aff - k_top)[-k_top:] if n_aff > k_top else aff_free_xps
+            best_free_xp = float(np.percentile(top_xps, 65))
             k_slots = max(5, int(self.rules.market_free_slots))
-            p_hit = 1.0 - float((1.0 - min(0.95, k_slots / max(k_slots, self.n_free_total))) ** len(top_free))
+            p_hit = 1.0 - float((1.0 - min(0.95, k_slots / max(k_slots, self.n_free_total))) ** k_top)
             wait_days = float(np.clip(1.0 / max(1e-3, p_hit), 1.0, 21.0))
             free_wait_rounds = float(np.clip(np.floor(wait_days / 7.0), 0.0, 3.0))
 
-        # Path 2: Affordable unlocked rival clause (`clausula <= budget_eur`, instant 0 wait rounds if clauses open)
+        # Path 2: Affordable unlocked rival clause
         best_clause_xp = 0.0
         if self.rules.clause_enabled:
-            rivals = pool[(pool["owner_class"] == "RIVAL") & (~pool["player_id"].isin(self.clause_locked_ids))].copy()
-            if not rivals.empty:
-                rivals["eff_clause"] = rivals.apply(
-                    lambda r: float(r["clausula_actual"]) if float(r["clausula_actual"]) > 0 else float(self.rules.compute_official_clause(float(r["precio"]))),
-                    axis=1,
-                )
-                aff_clauses = rivals[rivals["eff_clause"] <= budget_eur]
-                if not aff_clauses.empty:
-                    best_clause_xp = float(aff_clauses["xp_healthy"].max())
+            aff_cl_xps = self._u_xp_healthy[
+                line_avail_mask & self._u_is_rival_unlocked_avail & (self._u_eff_clause <= budget_eur)
+            ]
+            if len(aff_cl_xps) > 0:
+                best_clause_xp = float(np.max(aff_cl_xps))
 
         clause_wait_rounds = 0.0 if clauses_open else 1.0
-        # Compare net 6-round effective xP of free path vs clause path
         free_6r = (6.0 - free_wait_rounds) * best_free_xp
         clause_6r = (6.0 - clause_wait_rounds) * best_clause_xp
         if clause_6r > free_6r and best_clause_xp > 0:
-            return round(best_clause_xp, 3), clause_wait_rounds
-        return round(best_free_xp, 3), free_wait_rounds
+            res = (round(best_clause_xp, 3), clause_wait_rounds)
+        else:
+            res = (round(best_free_xp, 3), free_wait_rounds)
+        self._reinvest_cache[cache_key] = res
+        return res
 
     def classify_asset_role(
         self,
@@ -500,12 +615,15 @@ def evaluate_hold_vs_sell_npv(
         is_available=is_available,
         explicit_return_days=explicit_return_days,
     )
+    if scarcity_engine._calendar_index is None and df_calendar is not None:
+        scarcity_engine._calendar_index = _build_calendar_index(df_calendar)
     missed_rounds, missed_j_nums = estimate_missed_rounds_from_calendar(
         current_date=current_date,
         absence_days=absence_days,
         df_calendar=df_calendar,
         team_name=team_name,
         horizon_rounds=horizon_rounds,
+        calendar_index=scarcity_engine._calendar_index,
     )
     active_rounds_if_held = max(0, horizon_rounds - missed_rounds)
 

@@ -16,10 +16,12 @@ import smtplib
 import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Dict, List, Any, Optional
+from email.mime.image import MIMEImage
+from typing import Dict, List, Any, Optional, Set
 import requests
 
-from src.config import Credentials, resolve_active_user_identity
+from src.config import Credentials, GeneralSettings, StrategySettings, resolve_active_user_identity
+from src.tools.notifications.email_visuals import build_animated_hero_gif, build_animated_pitch_gif
 
 
 NOTIFICATION_LOG_PATH = "./data/autopilot/notifications_log.jsonl"
@@ -54,7 +56,13 @@ class NotificationHub:
         except Exception:
             pass
 
-    def send_email(self, subject: str, html_body: str, text_body: str) -> Dict[str, Any]:
+    def send_email(
+        self,
+        subject: str,
+        html_body: str,
+        text_body: str,
+        inline_images: Optional[Dict[str, bytes]] = None,
+    ) -> Dict[str, Any]:
         if not self.email_configured:
             return {"sent": False, "reason": "EMAIL_NOT_CONFIGURED"}
 
@@ -62,12 +70,29 @@ class NotificationHub:
         pwd = Credentials.GMAIL_PASSWORD
         recipient = Credentials.NOTIFY_EMAIL_TO
 
-        msg = MIMEMultipart("alternative")
+        alt_part = MIMEMultipart("alternative")
+        alt_part.attach(MIMEText(text_body, "plain", "utf-8"))
+        alt_part.attach(MIMEText(html_body, "html", "utf-8"))
+
+        if inline_images:
+            msg = MIMEMultipart("related")
+            msg.attach(alt_part)
+            for cid, raw_bytes in inline_images.items():
+                if not raw_bytes:
+                    continue
+                img_part = MIMEImage(raw_bytes, _subtype="gif")
+                img_part.add_header("Content-ID", f"<{cid}>")
+                img_part.add_header("Content-Disposition", "inline", filename=f"{cid}.gif")
+                img_part.add_header("X-Attachment-Id", cid)
+                msg.attach(img_part)
+        else:
+            msg = alt_part
+
         msg["Subject"] = subject
         msg["From"] = f"Fantasy Champion Bot <{sender}>"
+        msg["Reply-To"] = sender
         msg["To"] = recipient
-        msg.attach(MIMEText(text_body, "plain", "utf-8"))
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
+        msg["X-Mailer"] = "FantasyChampion/3.0"
 
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
@@ -151,9 +176,44 @@ class NotificationHub:
 
         txt_body = self._build_plain_text(cycle_summary, pending, team_name, league_name, trigger_label, phase_name)
         tg_html = self._build_telegram_html(cycle_summary, pending, team_name, league_name, trigger_label, phase_name)
-        email_html = self._build_email_html(cycle_summary, pending, team_name, league_name, trigger_label, phase_name)
 
-        email_res = self.send_email(subject=subj, html_body=email_html, text_body=txt_body)
+        inline_images: Dict[str, bytes] = {}
+        try:
+            sup_rep = cycle_summary.get("supervisor_report") or {}
+            model_used = str(sup_rep.get("model_used") or GeneralSettings.LLM_MODEL_DAILY or "gemini-4-hydrogen")
+            llm_badge = "GEMINI 4 HYDROGEN" if "hydrogen" in model_used.lower() else model_used.split("/")[-1].upper()
+            hero_gif = build_animated_hero_gif(
+                summary=cycle_summary,
+                team_name=team_name,
+                league_name=league_name,
+                trigger_label=trigger_label,
+                active_archetype=StrategySettings.ACTIVE_ARCHETYPE,
+                llm_label=llm_badge,
+            )
+            if hero_gif:
+                inline_images["hero_banner"] = hero_gif
+            pitch_gif = build_animated_pitch_gif(lineup=lineup, jornada_num=j_num)
+            if pitch_gif:
+                inline_images["tactical_pitch"] = pitch_gif
+        except Exception:
+            inline_images = {}
+
+        email_html = self._build_email_html(
+            cycle_summary,
+            pending,
+            team_name,
+            league_name,
+            trigger_label,
+            phase_name,
+            inline_cids=set(inline_images.keys()),
+        )
+
+        email_res = self.send_email(
+            subject=subj,
+            html_body=email_html,
+            text_body=txt_body,
+            inline_images=inline_images or None,
+        )
         tg_res = self.send_telegram(text=tg_html, parse_mode="HTML")
         return {"email": email_res, "telegram": tg_res, "subject": subj}
 
@@ -193,9 +253,9 @@ class NotificationHub:
                     f"Cambia status a 'APROBAR' en Google Sheets (Decisiones_Pendientes), usa GitHub Actions (Run workflow), o '/aprobar {p['decision_id']}' en Telegram"
                 )
         if summary.get("briefing"):
-            lines.append("\n--- BRIEFING DIRECTOR DEPORTIVO ---\n" + str(summary["briefing"]))
+            lines.append("\n--- BRIEFING DIRECTOR DEPORTIVO ---\n" + NotificationHub._normalize_llm_text_to_markdown(str(summary["briefing"])))
         if summary.get("easy_summary"):
-            lines.append("\n--- RESUMEN FÁCIL DE LO QUE SE HA HECHO HOY ---\n" + str(summary["easy_summary"]))
+            lines.append("\n--- RESUMEN FÁCIL DE LO QUE SE HA HECHO HOY ---\n" + NotificationHub._normalize_llm_text_to_markdown(str(summary["easy_summary"])))
         return "\n".join(lines)
 
     @staticmethod
@@ -219,6 +279,19 @@ class NotificationHub:
             f"💰 Caja: <b>{int(summary.get('starting_cash', 0)):,} €</b> → Proy: <b>{int(summary.get('projected_cash', 0)):,} €</b> "
             f"({'✅ Solvente' if summary.get('is_solvent') else '⚠️ Revisar Deuda'})",
         ]
+        if summary.get("high_value_clause_alerts"):
+            for hvc in summary["high_value_clause_alerts"]:
+                out.append(
+                    f"🚨 <b>CLAUSULAZO AUTÓNOMO ALTO IMPORTE:</b> <b>{esc(hvc['nombre'])}</b> "
+                    f"({int(hvc['amount']):,} € a {esc(hvc.get('seller', ''))}, +{hvc.get('delta_xp_xi', 0):.2f} xP)"
+                )
+        posture_info = summary.get("strategy_posture") or {}
+        if posture_info.get("posture"):
+            out.append(
+                f"🧭 Postura: <b>{esc(str(posture_info['posture']))}</b> "
+                f"(#{posture_info.get('my_rank', '?')}/{posture_info.get('total_managers', '?')}, "
+                f"{posture_info.get('gap_to_leader', 0):+.0f} pts)"
+            )
         if phase_ctx.get("next_kickoff_ts"):
             out.append(
                 f"⏱️ J{summary.get('target_jornada_num')} arranca: <code>{esc(str(phase_ctx['next_kickoff_ts']))}</code> "
@@ -286,6 +359,155 @@ class NotificationHub:
         return "\n".join(out)
 
     @staticmethod
+    def _normalize_llm_text_to_markdown(raw_text: str) -> str:
+        """Converts raw markdown or structured JSON LLM responses into clean human-readable markdown."""
+        txt = str(raw_text or "").strip()
+        if not txt:
+            return ""
+        candidate = txt
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json|markdown|md)?\s*", "", candidate, flags=re.IGNORECASE)
+            candidate = re.sub(r"\s*```$", "", candidate).strip()
+
+        if candidate.startswith("{") or candidate.startswith("["):
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                title_map = {
+                    "1_diagnostico_financiero_fase_y_escasez": "1. Diagnóstico Financiero, Fase y Escasez",
+                    "2_operaciones_autonomas_ejecutadas": "2. Operaciones Autónomas Ejecutadas",
+                    "3_operaciones_de_alto_impacto": "3. Operaciones de Alto Impacto",
+                    "4_continuidad_estrategica_medio_plazo": "4. Continuidad Estratégica a Medio Plazo",
+                }
+                lines: List[str] = []
+
+                def _clean_item(val: Any) -> str:
+                    item_s = str(val or "").strip()
+                    item_s = re.sub(r"^[•\-*]+\s+", "", item_s)
+                    item_s = re.sub(r"^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 /+()%-]{2,42}):\s+", r"**\1:** ", item_s)
+                    return item_s
+
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        k_str = str(k or "").strip()
+                        k_low = k_str.lower()
+                        if k_low in ("resumen", "easy_summary", "puntos", "summary") and isinstance(v, list):
+                            for entry in v:
+                                c = _clean_item(entry)
+                                if c:
+                                    lines.append(f"- {c}")
+                            continue
+                        if k_low == "sesion" and isinstance(v, str):
+                            lines.append(f"**Sesión:** {v.strip()}")
+                            continue
+
+                        heading = title_map.get(k_low)
+                        if not heading:
+                            heading = re.sub(r"^(\d+)_", r"\1. ", k_str).replace("_", " ").strip().capitalize()
+                        lines.append(f"#### {heading}")
+                        if isinstance(v, list):
+                            for entry in v:
+                                c = _clean_item(entry)
+                                if c:
+                                    lines.append(f"- {c}")
+                        elif isinstance(v, dict):
+                            for sub_k, sub_v in v.items():
+                                c = _clean_item(f"{sub_k}: {sub_v}")
+                                if c:
+                                    lines.append(f"- {c}")
+                        else:
+                            c = _clean_item(v)
+                            if c:
+                                lines.append(c)
+                    return "\n".join(lines).strip()
+
+                if isinstance(parsed, list):
+                    for entry in parsed:
+                        c = _clean_item(entry)
+                        if c:
+                            lines.append(f"- {c}")
+                    return "\n".join(lines).strip()
+
+        return candidate
+
+    @staticmethod
+    def _format_markdown_blocks_html(
+        raw_text: str,
+        text_color: str = "#1e293b",
+        heading_color: str = "#065f46",
+        bullet_color: str = "#10b981",
+        code_bg: str = "#f1f5f9",
+        code_fg: str = "#0f172a",
+    ) -> str:
+        """Converts markdown bullets, bold spans, inline code, and section headers into clean email-safe HTML."""
+        esc = html.escape
+        txt = NotificationHub._normalize_llm_text_to_markdown(raw_text)
+        if not txt:
+            return ""
+
+        def _inline_fmt(line_s: str) -> str:
+            s = esc(line_s)
+            s = re.sub(r"\*\*(.+?)\*\*", r"<strong style='font-weight:700;'>\1</strong>", s)
+            s = re.sub(
+                r"`([^`]+?)`",
+                rf"<code style='background:{code_bg};color:{code_fg};padding:1px 6px;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;'>\1</code>",
+                s,
+            )
+            return s
+
+        blocks: List[str] = []
+        bullet_rows: List[str] = []
+
+        def _flush_bullets() -> None:
+            if bullet_rows:
+                blocks.append(
+                    "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='margin:4px 0 10px 0;'>"
+                    + "".join(bullet_rows)
+                    + "</table>"
+                )
+                bullet_rows.clear()
+
+        for raw_line in txt.splitlines():
+            line = raw_line.strip()
+            if not line:
+                _flush_bullets()
+                continue
+            if re.match(r"^(#{1,4})\s+", line):
+                _flush_bullets()
+                hd = re.sub(r"^#{1,4}\s+", "", line)
+                blocks.append(
+                    f"<div style='margin:12px 0 5px 0;font-size:14px;font-weight:800;color:{heading_color};'>{_inline_fmt(hd)}</div>"
+                )
+                continue
+            bullet_m = re.match(r"^(?:[-*•]+|\d+\.)\s+(.*)$", line)
+            if bullet_m:
+                content = bullet_m.group(1).strip()
+                is_numbered = bool(re.match(r"^\d+\.", line))
+                if is_numbered and len(content) < 75 and ":" not in content and not content.endswith("."):
+                    _flush_bullets()
+                    blocks.append(
+                        f"<div style='margin:12px 0 5px 0;font-size:13.5px;font-weight:800;color:{heading_color};'>{_inline_fmt(line)}</div>"
+                    )
+                else:
+                    bullet_rows.append(
+                        "<tr>"
+                        f"<td valign='top' style='width:18px;padding:4px 6px 4px 0;color:{bullet_color};font-weight:800;font-size:14px;line-height:1.5;'>•</td>"
+                        f"<td style='padding:4px 0;color:{text_color};font-size:13.5px;line-height:1.6;'>{_inline_fmt(content)}</td>"
+                        "</tr>"
+                    )
+                continue
+
+            _flush_bullets()
+            blocks.append(
+                f"<p style='margin:0 0 8px 0;color:{text_color};font-size:13.5px;line-height:1.62;'>{_inline_fmt(line)}</p>"
+            )
+
+        _flush_bullets()
+        return "".join(blocks)
+
+    @staticmethod
     def _build_email_html(
         summary: Dict[str, Any],
         pending: List[Dict[str, Any]],
@@ -293,189 +515,397 @@ class NotificationHub:
         league_name: str,
         trigger_label: str,
         phase_name: str,
+        inline_cids: Optional[Set[str]] = None,
     ) -> str:
         esc = html.escape
+        cids = inline_cids or set()
         plan = summary.get("plan") or {}
         lu = plan.get("lineup") or {}
         phase_ctx = summary.get("phase_context") or {}
         scarcity = plan.get("scarcity_summary") or {}
+        posture_info = summary.get("strategy_posture") or {}
+        sup_rep = summary.get("supervisor_report") or {}
 
-        pending_html = ""
-        if pending:
-            rows = "".join(
-                f"<tr><td style='padding:8px;border-bottom:1px solid #fecaca;'><b>{esc(p['decision_id'])}</b></td>"
-                f"<td style='padding:8px;border-bottom:1px solid #fecaca;'>{esc(p['action_type'])}</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #fecaca;'><b>{esc(p['nombre'])}</b></td>"
-                f"<td style='padding:8px;border-bottom:1px solid #fecaca;'>{int(p['amount_eur']):,} €</td>"
-                f"<td style='padding:8px;border-bottom:1px solid #fecaca;'>{esc(str(p.get('rationale', '')))}<br/>"
-                f"<span style='color:#7f1d1d;font-size:12px;'>👉 En Google Sheets (pestaña <b>Decisiones_Pendientes</b>) escribe <code>APROBAR</code> en <i>status</i>, "
-                f"o en GitHub Actions pulsa <b>Run workflow</b> con <code>{esc(p['decision_id'])}</code>, o en Telegram <code>/aprobar {esc(p['decision_id'])}</code></span></td></tr>"
-                for p in pending
+        mode_str = str(summary.get("mode", "FULL_AUTO")).upper()
+        is_full_auto = (mode_str == "FULL_AUTO")
+        is_solvent = bool(summary.get("is_solvent", True))
+        j_num = summary.get("target_jornada_num", "?")
+        formation = str(lu.get("formation", "4-4-2"))
+        expected_xp = float(lu.get("expected_points", 0.0) or 0.0)
+        start_cash = int(summary.get("starting_cash", 0) or 0)
+        proj_cash = int(summary.get("projected_cash", 0) or 0)
+        cap_eur = int(summary.get("autonomous_clause_cap_eur", 0) or StrategySettings.AUTONOMOUS_CLAUSE_HARD_CAP_EUR)
+        archetype_id = StrategySettings.ACTIVE_ARCHETYPE
+
+        posture_name = str(posture_info.get("posture") or "BALANCED")
+        posture_palette = {
+            "PROTECT_LEAD": ("#ecfdf5", "#065f46", "#10b981"),
+            "TACTICAL_PRESS": ("#eff6ff", "#1e40af", "#3b82f6"),
+            "ASYMMETRIC_CHASER": ("#fff7ed", "#9a3412", "#f97316"),
+        }
+        p_bg, p_fg, p_bd = posture_palette.get(posture_name, ("#eef2ff", "#3730a3", "#6366f1"))
+        rank_badge = (
+            f"#{posture_info.get('my_rank', '?')}/{posture_info.get('total_managers', '?')} · "
+            f"{posture_info.get('gap_to_leader', 0):+.0f} pts"
+            if posture_info.get("my_rank")
+            else "Calibración inicial"
+        )
+
+        # Hidden inbox preheader text for Gmail / Apple Mail list preview
+        preheader = (
+            f"J{j_num} ({phase_name}) · Caja {start_cash:,}€ → {proj_cash:,}€ · "
+            f"Once {formation} ({expected_xp:.1f} xP) · Postura {posture_name}"
+        )
+
+        # Header block: Animated GIF hero if available, plus sleek metadata sub-rail
+        hero_media_html = ""
+        if "hero_banner" in cids:
+            hero_media_html = (
+                "<img src='cid:hero_banner' width='680' alt='Fantasy Champion Autopilot' "
+                "style='width:100%;max-width:680px;height:auto;display:block;border-radius:16px 16px 0 0;border:0;'/>"
             )
-            pending_html = f"""
-            <div style="background:#fef2f2;border-left:4px solid #dc2626;padding:14px;margin:16px 0;border-radius:6px;">
-              <h3 style="margin:0 0 8px 0;color:#991b1b;">🔔 Decisiones Reservadas para Ti (Cláusulas y Ventas Importantes)</h3>
-              <table style="width:100%;border-collapse:collapse;font-size:13px;">
-                <tr style="background:#fee2e2;text-align:left;">
-                  <th style="padding:8px;">ID</th><th style="padding:8px;">Tipo</th><th style="padding:8px;">Jugador</th>
-                  <th style="padding:8px;">Importe</th><th style="padding:8px;">Tesis / Comando Telegram</th>
-                </tr>
-                {rows}
-              </table>
+        else:
+            hero_media_html = f"""
+            <div style="background:linear-gradient(135deg,#07111e 0%,#0b2930 60%,#064e3b 100%);padding:22px 24px;border-radius:16px 16px 0 0;color:#f8fafc;">
+              <div style="font-size:11px;font-weight:800;letter-spacing:0.08em;color:#34d399;text-transform:uppercase;">FANTASY CHAMPION AUTOPILOT · {esc(mode_str)}</div>
+              <div style="font-size:24px;font-weight:800;margin:4px 0 2px 0;color:#ffffff;">🏆 {esc(team_name)}</div>
+              <div style="font-size:13px;color:#cbd5e1;">{esc(league_name)} · Jornada Objetivo <b>J{esc(str(j_num))}</b> · {esc(str(summary.get('date', '')))}</div>
             </div>
             """
 
-        is_full_auto = (str(summary.get("mode", "")).upper() == "FULL_AUTO")
-        exec_ops_items: List[str] = []
-        for s in (plan.get("all_sales") or []):
-            if is_full_auto or not s.get("requires_human_approval"):
-                exec_ops_items.append(
-                    f"<li>💸 <b>Venta ejecutada:</b> {esc(s['nombre'])} por <b>{int(s['sale_price']):,} €</b> ({esc(s['reason'])})</li>"
-                )
-        if is_full_auto:
-            for c in (plan.get("clause_snipes") or []):
-                exec_ops_items.append(
-                    f"<li>⚡ <b>Cláusula ejecutada:</b> {esc(c['nombre'])} por <b>{int(c['amount']):,} €</b> a {esc(str(c.get('seller', '')))} (+{c['delta_xp_xi']:.2f} xP)</li>"
-                )
-            for sh in (plan.get("defensive_shields") or []):
-                exec_ops_items.append(
-                    f"<li>🛡️ <b>Blindaje ejecutado:</b> {esc(sh['nombre'])} (+<b>{int(sh['recommended_cash_spend']):,} €</b>)</li>"
-                )
-        exec_ops_html = ""
-        if exec_ops_items:
-            exec_ops_html = (
-                "<div style='background:#eff6ff;border-left:4px solid #2563eb;padding:12px 16px;margin:14px 0;border-radius:6px;font-size:13px;'>"
-                "<b style='color:#1e40af;'>⚡ Ventas, Cláusulas y Blindajes Ejecutados Autónomamente:</b>"
-                f"<ul style='margin:6px 0 0 0;padding-left:18px;'>{''.join(exec_ops_items)}</ul></div>"
+        hero_card_html = f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#080f1d;border-radius:16px;overflow:hidden;box-shadow:0 12px 30px rgba(8,15,29,0.22);">
+          <tr><td style="padding:0;">{hero_media_html}</td></tr>
+          <tr>
+            <td style="background:#0c172a;padding:10px 18px;border-top:1px solid #1e293b;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td style="font-size:11.5px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">
+                    Arquetipo: <strong style="color:#f5b942;">{esc(archetype_id)}</strong>
+                  </td>
+                  <td align="center" style="font-size:11.5px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">
+                    Fase: <strong style="color:#38bdf8;">{esc(trigger_label)}</strong>
+                  </td>
+                  <td align="right" style="font-size:11.5px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">
+                    Techo Auto: <strong style="color:#34d399;">{cap_eur/1e6:.1f}M€</strong>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+        """
+
+        # 3-Column KPI Strip (email-safe table)
+        solvency_pill = (
+            "<span style='display:inline-block;background:#dcfce7;color:#166534;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;'>✅ 100% Solvente</span>"
+            if is_solvent
+            else "<span style='display:inline-block;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;'>⚠️ Revisar Liquidez</span>"
+        )
+        clauses_badge = (
+            "<span style='color:#059669;font-weight:700;'>🟢 Cláusulas Abiertas</span>"
+            if plan.get("clauses_open", True)
+            else "<span style='color:#d97706;font-weight:700;'>🔒 Cerradas (48h/J)</span>"
+        )
+        kickoff_short = esc(str(phase_ctx.get("next_kickoff_ts", "N/D")))[:16]
+        kpi_strip_html = f"""
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:14px;">
+          <tr>
+            <td class="kpi-col" width="32%" valign="top" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:13px 14px;">
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:0.06em;color:#64748b;text-transform:uppercase;">💰 Tesorería</div>
+              <div style="font-size:16px;font-weight:800;color:#0f172a;margin:5px 0 3px 0;">{start_cash:,} €</div>
+              <div style="font-size:12px;color:#475569;margin-bottom:6px;">Proy: <b>{proj_cash:,} €</b></div>
+              {solvency_pill}
+            </td>
+            <td width="2%" style="font-size:0;">&nbsp;</td>
+            <td class="kpi-col" width="32%" valign="top" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:13px 14px;">
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:0.06em;color:#64748b;text-transform:uppercase;">🧭 Postura Causal</div>
+              <div style="margin:6px 0 5px 0;">
+                <span style="display:inline-block;background:{p_bg};color:{p_fg};border:1px solid {p_bd};padding:3px 9px;border-radius:999px;font-size:11px;font-weight:800;">{esc(posture_name)}</span>
+              </div>
+              <div style="font-size:12px;color:#334155;"><b>{esc(rank_badge)}</b></div>
+            </td>
+            <td width="2%" style="font-size:0;">&nbsp;</td>
+            <td class="kpi-col" width="32%" valign="top" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:13px 14px;">
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:0.06em;color:#64748b;text-transform:uppercase;">⏱️ Ventana &amp; Mercado</div>
+              <div style="font-size:12.5px;margin:5px 0 3px 0;">{clauses_badge}</div>
+              <div style="font-size:11.5px;color:#475569;">Kickoff: <b>{kickoff_short}</b></div>
+              <div style="font-size:11.5px;color:#475569;margin-top:2px;">Libres ≥5M: <b>{scarcity.get('free_ge_5m', 0)}</b> · ≥10M: <b>{scarcity.get('free_ge_10m', 0)}</b></div>
+            </td>
+          </tr>
+        </table>
+        """
+
+        # Conditional Alerts & Supervisor Card
+        alerts_blocks: List[str] = []
+        if pending:
+            p_rows = "".join(
+                f"<tr>"
+                f"<td style='padding:9px 8px;border-bottom:1px solid #fecaca;'><code style='background:#fee2e2;color:#991b1b;padding:2px 6px;border-radius:5px;font-weight:700;'>{esc(p['decision_id'])}</code></td>"
+                f"<td style='padding:9px 8px;border-bottom:1px solid #fecaca;font-size:12px;'>{esc(p['action_type'])}</td>"
+                f"<td style='padding:9px 8px;border-bottom:1px solid #fecaca;'><b>{esc(p['nombre'])}</b></td>"
+                f"<td style='padding:9px 8px;border-bottom:1px solid #fecaca;font-weight:700;'>{int(p['amount_eur']):,} €</td>"
+                f"<td style='padding:9px 8px;border-bottom:1px solid #fecaca;font-size:12px;color:#475569;'>{esc(str(p.get('rationale', '')))}<br/>"
+                f"<span style='color:#991b1b;font-weight:600;'>👉 Telegram: <code>/aprobar {esc(p['decision_id'])}</code> · Sheets: <code>APROBAR</code></span></td>"
+                f"</tr>"
+                for p in pending
             )
+            alerts_blocks.append(f"""
+            <div style="background:#fff1f2;border:1px solid #fda4af;border-left:4px solid #e11d48;border-radius:12px;padding:15px 16px;margin-top:14px;">
+              <div style="font-size:14px;font-weight:800;color:#9f1239;margin-bottom:8px;">🔔 Decisiones Pendientes de Tu Confirmación ({len(pending)})</div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:12.5px;">
+                <tr style="background:#ffe4e6;color:#881337;text-align:left;">
+                  <th style="padding:7px 8px;">ID</th><th style="padding:7px 8px;">Tipo</th>
+                  <th style="padding:7px 8px;">Jugador</th><th style="padding:7px 8px;">Importe</th><th style="padding:7px 8px;">Tesis &amp; Acción</th>
+                </tr>
+                {p_rows}
+              </table>
+            </div>
+            """)
 
-        bids_rows = "".join(
-            f"<tr><td style='padding:6px;border-bottom:1px solid #e5e7eb;'><b>{esc(b['nombre'])}</b> ({b['position']})</td>"
-            f"<td style='padding:6px;border-bottom:1px solid #e5e7eb;'>{int(b['market_price']):,} €</td>"
-            f"<td style='padding:6px;border-bottom:1px solid #e5e7eb;'><b>{int(b['amount']):,} €</b></td>"
-            f"<td style='padding:6px;border-bottom:1px solid #e5e7eb;'>+{b['delta_xp_xi']:.2f} xP ({esc(b['regime'])})</td></tr>"
-            for b in (plan.get("market_bids") or [])
-        ) or "<tr><td colspan='4' style='padding:8px;color:#6b7280;'>Sin pujas recomendadas hoy.</td></tr>"
+        hv_alerts = summary.get("high_value_clause_alerts") or []
+        if hv_alerts:
+            hv_li = "".join(
+                f"<li style='margin:4px 0;'><b>{esc(a['nombre'])}</b> — <b>{int(a['amount']):,} €</b> a {esc(a.get('seller', ''))} "
+                f"<span style='color:#047857;font-weight:700;'>(+{a.get('delta_xp_xi', 0):.2f} xP)</span></li>"
+                for a in hv_alerts
+            )
+            alerts_blocks.append(f"""
+            <div style="background:#fffbeb;border:1px solid #fcd34d;border-left:4px solid #d97706;border-radius:12px;padding:13px 16px;margin-top:14px;font-size:13px;color:#78350f;">
+              <div style="font-weight:800;margin-bottom:4px;">🚨 Clausulazo Autónomo de Alto Importe (&gt;6M €, dentro del tope FULL_AUTO)</div>
+              <ul style="margin:4px 0 0 0;padding-left:18px;">{hv_li}</ul>
+            </div>
+            """)
 
-        xi_rows = "".join(
-            f"<span style='display:inline-block;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;"
-            f"padding:4px 9px;margin:3px;border-radius:12px;font-size:12px;'><b>{s['linea']}</b> · {esc(s['nombre'])} ({s['xp']:.1f} xP)</span>"
+        sup_ov = (sup_rep.get("overrides") or {}) if isinstance(sup_rep, dict) else {}
+        sup_reason = str(sup_ov.get("strategic_rationale") or "").strip()
+        if sup_rep and (sup_rep.get("llm_called") or sup_rep.get("triggered") or sup_reason):
+            prio_pos = ", ".join(sup_ov.get("priority_positions") or [])
+            display_reason = sup_reason or str(posture_info.get("rationale") or "")
+            sup_model = str(sup_rep.get("model_used") or GeneralSettings.LLM_MODEL_DAILY)
+            sup_status = "Supervisor Estratégico Activado" if (sup_rep.get("llm_called") or sup_rep.get("triggered")) else "Directriz Estratégica Vigente"
+            alerts_blocks.append(f"""
+            <div style="background:#eef2ff;border:1px solid #c7d2fe;border-left:4px solid #4f46e5;border-radius:12px;padding:12px 16px;margin-top:14px;font-size:12.5px;color:#312e81;">
+              <div style="font-weight:800;margin-bottom:3px;">
+                🧠 {esc(sup_status)} · <code>{esc(str(sup_rep.get('trigger', 'AUTO')))}</code>
+                <span style="font-weight:600;color:#4338ca;">({esc(sup_model)}{' · Prioridad: ' + esc(prio_pos) if prio_pos else ''})</span>
+              </div>
+              <div style="color:#3730a3;line-height:1.5;">{esc(display_reason)}</div>
+            </div>
+            """)
+
+        alerts_html = "".join(alerts_blocks)
+
+        # Once Titular Section (Animated Pitch GIF + Clean Color-Coded Pills)
+        line_pill_styles = {
+            "GK": ("#fffbeb", "#92400e", "#fcd34d"),
+            "DF": ("#f0f9ff", "#075985", "#bae6fd"),
+            "MF": ("#ecfdf5", "#065f46", "#a7f3d0"),
+            "FW": ("#fff1f2", "#9f1239", "#fecdd3"),
+        }
+        xi_pills = "".join(
+            f"<span style='display:inline-block;background:{line_pill_styles.get(s.get('linea','MF'), ('#ecfdf5','#065f46','#a7f3d0'))[0]};"
+            f"color:{line_pill_styles.get(s.get('linea','MF'), ('#ecfdf5','#065f46','#a7f3d0'))[1]};"
+            f"border:1px solid {line_pill_styles.get(s.get('linea','MF'), ('#ecfdf5','#065f46','#a7f3d0'))[2]};"
+            f"padding:4px 9px;margin:3px;border-radius:999px;font-size:12px;font-weight:600;'>"
+            f"<b>{esc(str(s.get('linea', 'MF')))}</b> · {esc(s['nombre'])} <span style='opacity:0.85;'>({s['xp']:.1f} xP)</span></span>"
             for s in (lu.get("slots") or [])
+        ) or "<span style='font-size:12.5px;color:#64748b;'>Alineación sin slots detallados en esta vista.</span>"
+
+        pitch_img_html = (
+            "<div style='margin:10px 0 12px 0;border-radius:12px;overflow:hidden;'>"
+            "<img src='cid:tactical_pitch' width='648' alt='Campo Táctico MILP' style='width:100%;max-width:648px;height:auto;display:block;border-radius:12px;border:0;'/>"
+            "</div>"
+            if "tactical_pitch" in cids
+            else ""
         )
 
-        listings_str = ", ".join(
-            f"<b>{esc(p['nombre'])}</b> ({int(p['asking_price']):,} € · {esc(p.get('listing_reason', ''))})"
-            for p in (plan.get("preventive_listings") or [])
-        ) or "Ninguno"
-
-        brief_html = esc(str(summary.get("briefing") or "")).replace("\n", "<br/>")
-
-        # 📋 Resumen Ejecutivo de Decisiones Tomadas (Cierre claro del ciclo)
-        bids_summary_str = ", ".join(f"<b>{esc(b['nombre'])}</b> ({int(b['amount']):,} €)" for b in (plan.get("market_bids") or [])) or "Ninguna puja hoy"
-        sales_summary_str = ", ".join(f"<b>{esc(s['nombre'])}</b> ({int(s['sale_price']):,} €)" for s in (plan.get("all_sales") or [])) or "Ninguna venta forzada"
-        listings_summary_str = ", ".join(f"<b>{esc(p['nombre'])}</b>" for p in (plan.get("preventive_listings") or [])) or "Ninguno"
-        solvency_badge = "<span style='color:#16a34a;font-weight:700;'>✅ 100% Solvente</span>" if summary.get("is_solvent", True) else "<span style='color:#dc2626;font-weight:700;'>⚠️ Requiere Liquidez</span>"
-
-        decisions_summary_html = f"""
-        <div style="margin-top:20px;background:#f0fdf4;border:2px solid #86efac;border-radius:8px;padding:16px;">
-          <h3 style="margin:0 0 10px 0;color:#166534;font-size:15px;">
-            📋 Resumen Ejecutivo de Decisiones Tomadas en esta Ejecución
-          </h3>
-          <table style="width:100%;border-collapse:collapse;font-size:13px;line-height:1.6;">
+        lineup_card_html = f"""
+        <div class="fc-card" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px;margin-top:14px;box-shadow:0 2px 10px rgba(15,23,42,0.04);">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-bottom:1px solid #f1f5f9;padding-bottom:8px;margin-bottom:8px;">
             <tr>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;width:28%;font-weight:600;color:#14532d;">⚽ Alineación Sincronizada:</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;">Formación <b>{esc(str(lu.get('formation', '4-4-2')))}</b> ({lu.get('expected_points', 0):.1f} xP proyectados) · {len(lu.get('slots') or [])} titulares fijados en Biwenger.</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;font-weight:600;color:#14532d;">💰 Tesorería y Caja:</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;"><b>{int(summary.get('starting_cash', 0)):,} €</b> disponibles · {solvency_badge}.</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;font-weight:600;color:#14532d;">🎯 Ofertas y Pujas Mercado:</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;">{bids_summary_str}.</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;font-weight:600;color:#14532d;">🏷️ Escaparate (+5% s/VM):</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #dcfce7;color:#1f2937;">{listings_summary_str} (colateral activo y pescando ofertas pico).</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 8px;font-weight:600;color:#14532d;">⚡ Movimientos de Plantilla:</td>
-              <td style="padding:6px 8px;color:#1f2937;">{sales_summary_str}.</td>
+              <td style="font-size:15px;font-weight:800;color:#065f46;">⚽ Once Titular Óptimo MILP · {esc(formation)}</td>
+              <td align="right">
+                <span style="background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:800;">{expected_xp:.1f} xP proyectados</span>
+              </td>
             </tr>
           </table>
+          {pitch_img_html}
+          <div style="margin-top:4px;">{xi_pills}</div>
         </div>
         """
 
-        easy_raw = str(summary.get("easy_summary") or "").strip()
-        easy_summary_html = ""
-        if easy_raw:
-            easy_fmt = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", esc(easy_raw)).replace("\n", "<br/>")
-            easy_summary_html = f"""
-            <div style="margin-top:20px;background:#f8fafc;border:2px solid #cbd5e1;border-radius:8px;padding:16px;">
-              <h3 style="margin:0 0 8px 0;color:#1e293b;font-size:15px;">
-                💬 En resumen: ¿qué se ha hecho hoy?
-              </h3>
-              <div style="font-size:13.5px;line-height:1.6;color:#334155;">
-                {easy_fmt}
-              </div>
-            </div>
-            """
+        # Unified Daily Operations Card (Executions + Market Bids + Preventive Showcase)
+        is_dry_run = (mode_str == "DRY_RUN")
+        dry_tag = " <span style='color:#d97706;font-size:11px;font-weight:700;'>[Simulacro]</span>" if is_dry_run else ""
+        exec_ops_items: List[str] = []
+        for s in (plan.get("all_sales") or []):
+            if is_full_auto or is_dry_run or not s.get("requires_human_approval"):
+                exec_ops_items.append(
+                    f"<tr><td style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;color:#1e293b;'>"
+                    f"💸 <b>Venta:</b> {esc(s['nombre'])} <span style='color:#64748b;'>({esc(s['reason'])})</span>{dry_tag}</td>"
+                    f"<td align='right' style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;font-weight:800;color:#059669;'>+{int(s['sale_price']):,} €</td></tr>"
+                )
+        if is_full_auto or is_dry_run:
+            for c in (plan.get("clause_snipes") or []):
+                exec_ops_items.append(
+                    f"<tr><td style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;color:#1e293b;'>"
+                    f"⚡ <b>Cláusula:</b> {esc(c['nombre'])} a {esc(str(c.get('seller', '')))}{dry_tag} "
+                    f"<span style='color:#0284c7;font-weight:700;'>(+{c['delta_xp_xi']:.2f} xP)</span></td>"
+                    f"<td align='right' style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;font-weight:800;color:#dc2626;'>-{int(c['amount']):,} €</td></tr>"
+                )
+            for sh in (plan.get("defensive_shields") or []):
+                exec_ops_items.append(
+                    f"<tr><td style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;color:#1e293b;'>"
+                    f"🛡️ <b>Blindaje:</b> {esc(sh['nombre'])}{dry_tag}</td>"
+                    f"<td align='right' style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;font-weight:800;color:#4f46e5;'>+{int(sh['recommended_cash_spend']):,} €</td></tr>"
+                )
 
-        return f"""
-        <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#111827;max-width:740px;margin:0 auto;padding:16px;">
-          <div style="background:linear-gradient(135deg,#064e3b,#047857);color:white;padding:18px 22px;border-radius:10px;">
-            <h2 style="margin:0;">🏆 Fantasy Champion v3 — {esc(team_name)}</h2>
-            <p style="margin:6px 0 0 0;opacity:0.9;font-size:14px;">
-              Liga: <b>{esc(league_name)}</b> · Jornada Objetivo: <b>J{summary.get('target_jornada_num')}</b> ·
-              Disparador: <b>{esc(trigger_label)}</b> ({esc(phase_name)}) · Modo: <b>{esc(str(summary.get('mode')))}</b>
-            </p>
+        ops_ledger_html = (
+            f"<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='margin-bottom:12px;'>{''.join(exec_ops_items)}</table>"
+            if exec_ops_items
+            else "<div style='font-size:12.5px;color:#64748b;background:#f8fafc;padding:8px 12px;border-radius:8px;margin-bottom:12px;'>Sin ventas ni clausulazos ejecutados hoy — preservando liquidez y titulares.</div>"
+        )
+
+        def _bid_row(b: Dict[str, Any]) -> str:
+            p_win = max(0, min(100, int(round(float(b.get("win_prob_est", 0.5) or 0.5) * 100))))
+            bar_col = "#10b981" if p_win >= 65 else ("#f59e0b" if p_win >= 40 else "#ef4444")
+            return (
+                f"<tr>"
+                f"<td style='padding:8px 6px;border-bottom:1px solid #f1f5f9;'><b>{esc(b['nombre'])}</b> <span style='color:#64748b;font-size:11.5px;'>({esc(str(b.get('position', '')))})</span></td>"
+                f"<td align='right' style='padding:8px 6px;border-bottom:1px solid #f1f5f9;color:#64748b;font-size:12.5px;'>{int(b['market_price']):,} €</td>"
+                f"<td align='right' style='padding:8px 6px;border-bottom:1px solid #f1f5f9;font-weight:800;color:#0f172a;'>{int(b['amount']):,} €</td>"
+                f"<td style='padding:8px 6px;border-bottom:1px solid #f1f5f9;'>"
+                f"<span style='background:#ecfdf5;color:#047857;padding:2px 7px;border-radius:999px;font-size:11.5px;font-weight:700;'>+{b['delta_xp_xi']:.2f} xP</span> "
+                f"<span style='font-size:11px;color:#64748b;'>{esc(str(b.get('regime', '')))}</span></td>"
+                f"<td align='right' style='padding:8px 6px;border-bottom:1px solid #f1f5f9;width:82px;'>"
+                f"<div style='font-size:11px;font-weight:700;color:#334155;'>{p_win}%</div>"
+                f"<div style='background:#e2e8f0;height:5px;border-radius:4px;overflow:hidden;margin-top:2px;'>"
+                f"<div style='background:{bar_col};width:{p_win}%;height:5px;border-radius:4px;'></div></div>"
+                f"</td></tr>"
+            )
+
+        bids_rows = "".join(_bid_row(b) for b in (plan.get("market_bids") or [])) or (
+            "<tr><td colspan='5' style='padding:10px 6px;color:#64748b;font-size:12.5px;'>Ninguna puja supera hoy el umbral rentabilidad/riesgo.</td></tr>"
+        )
+
+        listings_chips = "".join(
+            f"<span style='display:inline-block;background:#f8fafc;border:1px solid #cbd5e1;color:#334155;"
+            f"padding:4px 9px;margin:3px;border-radius:8px;font-size:12px;'>"
+            f"<b>{esc(p['nombre'])}</b> · {int(p['asking_price']):,} € <span style='color:#64748b;'>({esc(str(p.get('listing_reason', '')))})</span></span>"
+            for p in (plan.get("preventive_listings") or [])
+        ) or "<span style='font-size:12.5px;color:#64748b;'>Ninguno</span>"
+
+        operations_card_html = f"""
+        <div class="fc-card" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px;margin-top:14px;box-shadow:0 2px 10px rgba(15,23,42,0.04);">
+          <div style="font-size:15px;font-weight:800;color:#0f172a;border-bottom:1px solid #f1f5f9;padding-bottom:8px;margin-bottom:12px;">
+            📊 Operaciones y Mercado del Día
           </div>
-
-          <div style="display:flex;gap:12px;margin:16px 0;flex-wrap:wrap;">
-            <div style="flex:1;min-width:160px;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:8px;">
-              <div style="font-size:12px;color:#6b7280;">SALDO ACTUAL → PROYECTADO</div>
-              <div style="font-size:16px;font-weight:700;margin-top:4px;">{int(summary.get('starting_cash', 0)):,} € → {int(summary.get('projected_cash', 0)):,} €</div>
-            </div>
-            <div style="flex:1;min-width:160px;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:8px;">
-              <div style="font-size:12px;color:#6b7280;">VENTANA CLÁUSULAS / INICIO J{summary.get('target_jornada_num')}</div>
-              <div style="font-size:13px;font-weight:600;margin-top:4px;">
-                {'🟢 Cláusulas Abiertas' if plan.get('clauses_open', True) else '🔒 Cláusulas Cerradas (48h)'}<br/>
-                Kickoff: {esc(str(phase_ctx.get('next_kickoff_ts', 'N/D')))}
-              </div>
-            </div>
-            <div style="flex:1;min-width:160px;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:8px;">
-              <div style="font-size:12px;color:#6b7280;">ESCASEZ DE MERCADO</div>
-              <div style="font-size:13px;font-weight:600;margin-top:4px;">
-                Libres ≥5M: {scarcity.get('free_ge_5m', 0)} · Libres ≥10M: {scarcity.get('free_ge_10m', 0)}
-              </div>
-            </div>
-          </div>
-
-          {pending_html}
-          {exec_ops_html}
-
-          <h3 style="color:#065f46;border-bottom:2px solid #d1fae5;padding-bottom:6px;">⚽ Once Titular Óptimo MILP ({esc(str(lu.get('formation', '4-4-2')))} · {lu.get('expected_points', 0):.1f} xP)</h3>
-          <div style="margin-bottom:16px;">{xi_rows}</div>
-
-          <h3 style="color:#065f46;border-bottom:2px solid #d1fae5;padding-bottom:6px;">🎯 Pujas Autónomas de Mercado</h3>
-          <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;">
-            <tr style="background:#f3f4f6;text-align:left;">
-              <th style="padding:6px;">Jugador</th><th style="padding:6px;">Valor Mercado</th>
-              <th style="padding:6px;">Puja Óptima</th><th style="padding:6px;">Impacto</th>
+          {ops_ledger_html}
+          <div style="font-size:12px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin:8px 0 6px 0;">🎯 Pujas Autónomas en Subasta</div>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="font-size:12.5px;margin-bottom:14px;">
+            <tr style="background:#f8fafc;color:#475569;text-align:left;">
+              <th style="padding:7px 6px;font-size:11px;">Jugador</th>
+              <th align="right" style="padding:7px 6px;font-size:11px;">VM</th>
+              <th align="right" style="padding:7px 6px;font-size:11px;">Puja</th>
+              <th style="padding:7px 6px;font-size:11px;">Impacto</th>
+              <th align="right" style="padding:7px 6px;font-size:11px;">Éxito</th>
             </tr>
             {bids_rows}
           </table>
-
-          <p style="font-size:13px;background:#f9fafb;padding:10px;border-radius:6px;border:1px solid #e5e7eb;">
-            <b>🏷️ Escaparate Preventivo Top-{len(plan.get('preventive_listings') or [])} (máx. oficial 5, +5% VM):</b> {listings_str}
-          </p>
-
-          <h3 style="color:#065f46;border-bottom:2px solid #d1fae5;padding-bottom:6px;">🧠 Informe del Director Deportivo</h3>
-          <div style="font-size:13.5px;line-height:1.55;background:#ffffff;border:1px solid #e5e7eb;padding:14px;border-radius:8px;">
-            {brief_html}
+          <div style="font-size:12px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin:6px 0 4px 0;">
+            🏷️ Escaparate Preventivo Top-{len(plan.get('preventive_listings') or [])} (+5% VM · coste 0 €)
           </div>
-
-          {decisions_summary_html}
-          {easy_summary_html}
-        </body></html>
+          <div>{listings_chips}</div>
+        </div>
         """
+
+        # Executive Briefing Card (Formatted Markdown)
+        brief_raw = str(summary.get("briefing") or "").strip()
+        brief_fmt = (
+            NotificationHub._format_markdown_blocks_html(
+                brief_raw,
+                text_color="#334155",
+                heading_color="#065f46",
+                bullet_color="#10b981",
+            )
+            or "<p style='color:#64748b;font-size:13px;margin:0;'>Sin briefing textual en esta ejecución.</p>"
+        )
+        briefing_card_html = f"""
+        <div class="fc-card" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 18px;margin-top:14px;box-shadow:0 2px 10px rgba(15,23,42,0.04);">
+          <div style="font-size:15px;font-weight:800;color:#065f46;border-bottom:1px solid #f1f5f9;padding-bottom:8px;margin-bottom:10px;">
+            🧠 Informe del Director Deportivo
+          </div>
+          {brief_fmt}
+        </div>
+        """
+
+        # Featured Plain-Language Closing Card at the end
+        easy_raw = str(summary.get("easy_summary") or "").strip()
+        easy_summary_html = ""
+        if easy_raw:
+            easy_fmt = NotificationHub._format_markdown_blocks_html(
+                easy_raw,
+                text_color="#e2e8f0",
+                heading_color="#fcd34d",
+                bullet_color="#34d399",
+                code_bg="#1e293b",
+                code_fg="#f8fafc",
+            )
+            easy_summary_html = f"""
+            <div style="background:linear-gradient(135deg,#0b172a 0%,#0f2933 100%);border:1px solid #1e3a5f;border-top:3px solid #f5b942;border-radius:14px;padding:18px 20px;margin-top:16px;color:#f8fafc;box-shadow:0 10px 26px rgba(8,15,29,0.18);">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-bottom:10px;">
+                <tr>
+                  <td style="font-size:16px;font-weight:800;color:#ffffff;">💬 En resumen: ¿qué se ha hecho hoy?</td>
+                  <td align="right">
+                    <span style="background:#132f3a;color:#34d399;border:1px solid #10b981;padding:3px 9px;border-radius:999px;font-size:10.5px;font-weight:700;">LECTURA FÁCIL</span>
+                  </td>
+                </tr>
+              </table>
+              {easy_fmt}
+            </div>
+            """
+
+        return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <style type="text/css">
+    @keyframes fcFadeUp {{
+      from {{ opacity: 0.92; transform: translateY(3px); }}
+      to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    .fc-card {{ animation: fcFadeUp 0.45s ease-out; }}
+    @media only screen and (max-width: 620px) {{
+      .kpi-col {{ display: block !important; width: 100% !important; margin-bottom: 10px !important; }}
+    }}
+  </style>
+</head>
+<body style="margin:0;padding:0;background:#edf2f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;-webkit-font-smoothing:antialiased;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">{esc(preheader)}</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#edf2f7;padding:18px 10px 30px 10px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="680" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;">
+          <tr>
+            <td>
+              {hero_card_html}
+              {kpi_strip_html}
+              {alerts_html}
+              {lineup_card_html}
+              {operations_card_html}
+              {briefing_card_html}
+              {easy_summary_html}
+              <div style="text-align:center;font-size:11.5px;color:#64748b;margin-top:18px;padding:0 12px;">
+                Fantasy Champion Autopilot · Estrategia <b>{esc(archetype_id)}</b> · Motor Causal + Gemini 4 Hydrogen<br/>
+                ¿Necesitas intervenir? Responde por Telegram con <code>/estado</code>, <code>/once</code> o <code>/tesis</code>.
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""

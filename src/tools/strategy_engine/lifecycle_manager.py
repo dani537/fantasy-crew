@@ -59,28 +59,38 @@ class LeagueLifecycleEngine:
         else:
             phase = SeasonPhase.EARLY_EXPANSION
 
-        # 2. Derive Phase-Aware Strategic Posture
+        # 2. Derive Phase-Aware Strategic Posture & Continuous Economic Pricing
         if phase == SeasonPhase.EARLY_EXPANSION:
             max_simultaneous_bids = 5
             min_efr_threshold = 30_000
-            clause_budget_fraction = 0.25          # 25% cash to clauses, 75% to auction compounding
+            clause_budget_fraction = 0.30          # 30% cash to clauses (bargains), 70% to auction compounding
             target_roster_size = 19                # Deep roster for maximum daily appreciation
             allow_pillar_liquidation = False       # Pillars strictly protected from day-trading
             overbid_ceiling_pct = 0.025
+            xp_point_value_eur = 55_000.0
+            points_weight = 0.94
+            speculation_weight = 1.16
         elif phase == SeasonPhase.MATURE_SCARCITY:
-            max_simultaneous_bids = 2
-            min_efr_threshold = 70_000             # Only bid on market for high-conviction momentum
+            max_simultaneous_bids = 3
+            min_efr_threshold = 65_000             # Focus bids on genuine conviction momentum & XI upgrades
             clause_budget_fraction = 0.80          # 80% cash reserved for star clause snipes
             target_roster_size = 15                # Lean squad: 11 starters + 4 key rotations
             allow_pillar_liquidation = False
-            overbid_ceiling_pct = 0.040
+            overbid_ceiling_pct = 0.045
+            scarcity_bump = max(0.0, (12.0 - float(free_players_ge_5m)) / 12.0) * 18_000.0
+            xp_point_value_eur = 62_000.0 + scarcity_bump
+            points_weight = 1.08
+            speculation_weight = 0.96
         else:  # ENDGAME_RUNIN
-            max_simultaneous_bids = 1
+            max_simultaneous_bids = 2
             min_efr_threshold = 999_999            # Zero day-trading: no time to harvest capital gains
             clause_budget_fraction = 1.00          # 100% liquidity dedicated to starting-XI upgrades
             target_roster_size = 12                # 11 starters + 1 goalkeeper backup
             allow_pillar_liquidation = False
             overbid_ceiling_pct = 0.080
+            xp_point_value_eur = 85_000.0
+            points_weight = 1.32
+            speculation_weight = 0.45
 
         # 3. Calendar Event: FIFA Break Optimization
         fifa_break_hold_momentum = bool(is_international_break and days_to_next_match >= 5)
@@ -100,4 +110,7 @@ class LeagueLifecycleEngine:
             "target_roster_size": target_roster_size,
             "allow_pillar_liquidation": allow_pillar_liquidation,
             "overbid_ceiling_pct": overbid_ceiling_pct,
+            "xp_point_value_eur": xp_point_value_eur,
+            "points_weight": points_weight,
+            "speculation_weight": speculation_weight,
         }

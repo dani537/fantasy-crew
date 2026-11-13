@@ -47,10 +47,12 @@ class TieredLLMRouter:
         if gem_key:
             if tier == "high_stakes":
                 _add("gemini", GeneralSettings.LLM_MODEL_HIGH_STAKES if GeneralSettings.LLM_PROVIDER == "gemini" else "gemini-4-argon", gem_key)
+                _add("gemini", "gemini-4-hydrogen", gem_key)
                 _add("gemini", "gemini-3.8-flash", gem_key)
                 _add("gemini", "gemini-2.5-flash", gem_key)
             else:
-                _add("gemini", GeneralSettings.LLM_MODEL_DAILY if GeneralSettings.LLM_PROVIDER == "gemini" else "gemini-3.8-flash", gem_key)
+                _add("gemini", GeneralSettings.LLM_MODEL_DAILY if GeneralSettings.LLM_PROVIDER == "gemini" else "gemini-4-hydrogen", gem_key)
+                _add("gemini", "gemini-3.8-flash", gem_key)
                 _add("gemini", "gemini-3.5-flash-lite", gem_key)
                 _add("gemini", "gemini-2.5-flash", gem_key)
 
@@ -61,11 +63,14 @@ class TieredLLMRouter:
                 if not hs_or.startswith("gemini-"):
                     _add("openrouter", hs_or, or_key)
                 else:
+                    _add("openrouter", "google/gemini-4-hydrogen", or_key)
                     _add("openrouter", "openai/gpt-6.1-terra", or_key)
             else:
                 daily_or = GeneralSettings.LLM_MODEL_DAILY
                 if not daily_or.startswith("gemini-"):
                     _add("openrouter", daily_or, or_key)
+                else:
+                    _add("openrouter", "google/gemini-4-hydrogen", or_key)
 
             for fb_model in GeneralSettings.LLM_FALLBACK_MODELS:
                 _add("openrouter", fb_model, or_key)

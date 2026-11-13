@@ -1944,9 +1944,22 @@ def run_historical_pipeline(
     if extract_comuniate_history:
         try:
             df_existing_com_h = warehouse.read_table("Comuniate_Historico")
-            if len(df_existing_com_h) >= 2500:
-                print(f"⚡ Reutilizando 'Comuniate_Historico' desde el Data Warehouse ({len(df_existing_com_h):,} filas).")
-                # Persist into local SQLite when hydrated from Google Sheets fallback on fresh CI runners
+            existing_jns = set()
+            if not df_existing_com_h.empty and "id_jornada" in df_existing_com_h.columns:
+                existing_jns = {
+                    int(j) for j in pd.to_numeric(df_existing_com_h["id_jornada"], errors="coerce").dropna().tolist()
+                }
+            expected_jns = set()
+            for r_meta in (season_rounds or []):
+                st_r = str(r_meta.get("status", "")).strip().lower()
+                if st_r in {"finished", "active"}:
+                    dig = "".join(c for c in str(r_meta.get("short") or r_meta.get("name") or "") if c.isdigit())
+                    if dig:
+                        expected_jns.add(int(dig))
+            missing_jns = sorted(expected_jns - existing_jns) if expected_jns else ([] if len(df_existing_com_h) >= 2500 else None)
+
+            if existing_jns and missing_jns == []:
+                print(f"⚡ Reutilizando 'Comuniate_Historico' desde el Data Warehouse ({len(df_existing_com_h):,} filas, J{min(existing_jns)}-J{max(existing_jns)}).")
                 with warehouse.get_connection() as conn:
                     has_local_tbl = conn.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Comuniate_Historico'"
@@ -1960,7 +1973,9 @@ def run_historical_pipeline(
                         replace_all=True,
                     )
             else:
-                com_hist_df = ComuniateData().extract_historical_lineups()
+                if missing_jns:
+                    print(f"📥 Sincronizando jornadas faltantes de Comuniate_Historico: {missing_jns}")
+                com_hist_df = ComuniateData().extract_historical_lineups(jornadas=missing_jns)
                 if not com_hist_df.empty:
                     warehouse.upsert_table(
                         "Comuniate_Historico",

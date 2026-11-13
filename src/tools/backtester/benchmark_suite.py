@@ -81,8 +81,9 @@ class BacktestBenchmarkSuite:
         as_of_date: Optional[str] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Loads exact official J1..J10 points (`Primas_Jornadas`), H1/H2 regime points,
-        live J11 partial points, net worth, trading alpha, and daily curves for all managers.
+        Loads exact official settled points (`Primas_Jornadas` across `1..max_settled_jn`),
+        H1/H2 regime points, any active live round partial points (strictly `> max_settled_jn`),
+        net worth, trading alpha, and daily curves for all managers.
         """
         conn = sqlite3.connect(self.db_path)
         try:
@@ -116,8 +117,10 @@ class BacktestBenchmarkSuite:
             df_primas = df_primas[df_primas["payout_date"] <= max_d].copy()
 
         pts_by_mgr = df_primas.groupby("Manager")["pts_int"].sum().to_dict()
+        pts_j1_j10_by_mgr = df_primas[df_primas["jn_int"].between(1, 10)].groupby("Manager")["pts_int"].sum().to_dict()
         pts_h1_by_mgr = df_primas[df_primas["jn_int"].between(1, 5)].groupby("Manager")["pts_int"].sum().to_dict()
-        pts_h2_by_mgr = df_primas[df_primas["jn_int"].between(6, 10)].groupby("Manager")["pts_int"].sum().to_dict()
+        pts_h2_6_10_by_mgr = df_primas[df_primas["jn_int"].between(6, 10)].groupby("Manager")["pts_int"].sum().to_dict()
+        pts_h2_full_by_mgr = df_primas[df_primas["jn_int"] >= 6].groupby("Manager")["pts_int"].sum().to_dict()
         primas_by_mgr = df_primas.groupby("Manager")["prima_int"].sum().to_dict()
         max_settled_jn = int(df_primas["jn_int"].max()) if not df_primas.empty else 10
 
@@ -138,25 +141,30 @@ class BacktestBenchmarkSuite:
             p_opt = pd.to_numeric(grp["puntos_optimos_posibles"], errors="coerce").fillna(0).sum()
             eff_by_mgr[str(mgr)] = round((p_act / p_opt * 100.0), 2) if p_opt > 0 else 100.0
 
-        # 2b. Live J11 Partial Points (if `max_d >= 2026-11-01` and J11 active in `Alineaciones_Jornadas`)
-        j11_partial_by_mgr: Dict[str, int] = {}
-        al_j11 = (
-            df_al[df_al["jn_int"] == 11]
+        # 2b. Live Partial Points ONLY if a round strictly `> max_settled_jn` is currently active (ZERO double-counting!)
+        live_partial_by_mgr: Dict[str, int] = {}
+        next_jn = max_settled_jn + 1
+        al_live = (
+            df_al[
+                (df_al["jn_int"] == next_jn)
+                & (df_al.get("estado_jornada", pd.Series("", index=df_al.index)).astype(str).str.lower() == "active")
+            ]
             .sort_values(["jn_int", "part_int"])
             .drop_duplicates(subset=["manager"], keep="last")
         )
-        if not al_j11.empty and max_d >= "2026-10-31":
+        if not al_live.empty:
             ref_env = AZFinanceMarketEnv(db_path=self.db_path, target_manager=self.target_manager)
-            gt_j11 = ref_env.ground_truth_round_pts.get(11, {})
-            for _, r11 in al_j11.iterrows():
-                m_name = str(r11.get("manager", ""))
-                puntua = str(r11.get("puntua_jornada", "SÍ")).strip().upper() not in ("NO", "FALSE", "0")
-                if not puntua:
-                    j11_partial_by_mgr[m_name] = 0
-                    continue
-                t_ids_raw = str(r11.get("titulares_ids", ""))
-                pids = [int(x) for x in t_ids_raw.split(",") if x.strip().isdigit()]
-                j11_partial_by_mgr[m_name] = int(sum(gt_j11.get(pid, 0) for pid in pids))
+            gt_live = ref_env.ground_truth_round_pts.get(next_jn, {})
+            if gt_live:
+                for _, r_live in al_live.iterrows():
+                    m_name = str(r_live.get("manager", ""))
+                    puntua = str(r_live.get("puntua_jornada", "SÍ")).strip().upper() not in ("NO", "FALSE", "0")
+                    if not puntua:
+                        live_partial_by_mgr[m_name] = 0
+                        continue
+                    t_ids_raw = str(r_live.get("titulares_ids", ""))
+                    pids = [int(x) for x in t_ids_raw.split(",") if x.strip().isdigit()]
+                    live_partial_by_mgr[m_name] = int(sum(gt_live.get(pid, 0) for pid in pids))
 
         # 3. Initial (`2026-08-01`) vs Final (`max_d`) Manager Net Worth & Trading Alpha
         min_d = str(df_mgrs["fecha_d"].min())
@@ -175,17 +183,21 @@ class BacktestBenchmarkSuite:
             sells = int(safe_num(r_fin.get("ventas_acum", 0), 0))
             bonuses = int(primas_by_mgr.get(mgr_str, safe_num(r_fin.get("primas_acumuladas", 0), 0.0)))
             pts_tot = int(pts_by_mgr.get(mgr_str, 0))
-            pts_j11 = int(j11_partial_by_mgr.get(mgr_str, 0))
+            pts_j1_10 = int(pts_j1_j10_by_mgr.get(mgr_str, 0))
+            pts_live = int(live_partial_by_mgr.get(mgr_str, 0))
             trading_alpha = fin_nw + shields - init_nw - bonuses
 
             standings_rows.append({
                 "manager": mgr_str,
                 "is_bot": False,
-                "points_j1_j10": pts_tot,
+                "max_settled_jn": max_settled_jn,
+                "points_settled": pts_tot,
+                "points_j1_j10": pts_j1_10,
                 "points_h1_j1_j5": int(pts_h1_by_mgr.get(mgr_str, 0)),
-                "points_h2_j6_j10": int(pts_h2_by_mgr.get(mgr_str, 0)),
-                "j11_partial_points": pts_j11,
-                "points_incl_j11": pts_tot + pts_j11,
+                "points_h2_j6_j10": int(pts_h2_6_10_by_mgr.get(mgr_str, 0)),
+                "points_h2": int(pts_h2_full_by_mgr.get(mgr_str, 0)),
+                "j11_partial_points": pts_live,
+                "points_incl_j11": pts_tot + pts_live,
                 "net_worth_eur": fin_nw,
                 "cash_eur": fin_cash,
                 "squad_value_eur": fin_sq,
@@ -199,7 +211,7 @@ class BacktestBenchmarkSuite:
             })
 
         df_real_standings = pd.DataFrame(standings_rows).sort_values(
-            ["points_j1_j10", "net_worth_eur"], ascending=[False, False]
+            ["points_settled", "net_worth_eur"], ascending=[False, False]
         ).reset_index(drop=True)
         df_real_standings["real_rank"] = df_real_standings.index + 1
 
@@ -242,14 +254,17 @@ class BacktestBenchmarkSuite:
         target_real = target_rows.iloc[0] if not target_rows.empty else df_real_standings.iloc[-1]
         leader_real = df_real_standings.iloc[0]
         leader_name = str(leader_real["manager"])
-        podium_pts = int(df_real_standings.iloc[min(2, len(df_real_standings) - 1)]["points_j1_j10"])
+        max_settled_jn = int(target_real.get("max_settled_jn", 12))
+        n_h2_rounds = max(1, max_settled_jn - 5)
+        n_sim_days = len(df_real_curves["fecha"].unique()) if not df_real_curves.empty else 105
+        podium_pts = int(df_real_standings.iloc[min(2, len(df_real_standings) - 1)]["points_settled"])
         rivals_only = df_real_standings[df_real_standings["manager"] != self.target_manager].copy()
-        as_of_date = str(target_real.get("as_of_date", "2026-11-02"))
+        as_of_date = str(target_real.get("as_of_date", "2026-11-13"))
 
         def _compute_simulated_rank(pts: float, nw: float) -> int:
             better = rivals_only[
-                (rivals_only["points_j1_j10"] > pts)
-                | ((rivals_only["points_j1_j10"] == pts) & (rivals_only["net_worth_eur"] > nw))
+                (rivals_only["points_settled"] > pts)
+                | ((rivals_only["points_settled"] == pts) & (rivals_only["net_worth_eur"] > nw))
             ]
             return 1 + len(better)
 
@@ -276,14 +291,15 @@ class BacktestBenchmarkSuite:
         # Row 0: Real Manager Observed Baseline
         ablation_rows.append({
             "strategy_id": "0_Real_Manager",
-            "description": f"{self.target_manager} Real (Histórico Observado J1-J10 + J11 en curso)",
+            "description": f"{self.target_manager} Real (Histórico Observado J1-J{max_settled_jn})",
             "market_mode": "observed_actual",
-            "points_mean": float(target_real["points_j1_j10"]),
+            "points_mean": float(target_real["points_settled"]),
+            "points_j1_j10_mean": float(target_real["points_j1_j10"]),
             "points_std": 0.0,
-            "points_p10": float(target_real["points_j1_j10"]),
-            "points_p90": float(target_real["points_j1_j10"]),
+            "points_p10": float(target_real["points_settled"]),
+            "points_p90": float(target_real["points_settled"]),
             "points_h1_j1_j5": float(target_real["points_h1_j1_j5"]),
-            "points_h2_j6_j10": float(target_real["points_h2_j6_j10"]),
+            "points_h2_j6_j10": float(target_real["points_h2"]),
             "j11_partial_points": float(target_real["j11_partial_points"]),
             "points_incl_j11": float(target_real["points_incl_j11"]),
             "simulated_rank": int(target_real["real_rank"]),
@@ -382,10 +398,10 @@ class BacktestBenchmarkSuite:
         ]
         all_tasks = det_tasks + legacy_tasks + v3_tasks
 
-        workers = min(16, os.cpu_count() or 4, len(all_tasks))
+        workers = min(14, os.cpu_count() or 4, len(all_tasks))
         ctx = mp.get_context("spawn")
         print(
-            f"   🎲 Ejecutando {len(all_tasks)} simulaciones causales de 94 días en paralelo ({workers} núcleos)...",
+            f"   🎲 Ejecutando {len(all_tasks)} simulaciones causales de {n_sim_days} días en paralelo ({workers} núcleos)...",
             flush=True,
         )
         with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as executor:
@@ -398,6 +414,9 @@ class BacktestBenchmarkSuite:
         legacy_runs = all_outputs[n_det : n_det + n_legacy_seeds]
         mc_runs = all_outputs[n_det + n_legacy_seeds :]
 
+        live_jn_candidate = max_settled_jn + 1
+        has_live_partial = int(target_real["j11_partial_points"]) > 0
+
         def _summarize_runs(
             s_id: str,
             s_desc: str,
@@ -405,11 +424,15 @@ class BacktestBenchmarkSuite:
             runs_list: List[Dict[str, Any]],
             entity_type: str,
         ) -> Tuple[Dict[str, Any], Dict[str, Any], pd.DataFrame]:
-            p_arr = np.array([r["total_points_j1_j10"] for r in runs_list], dtype=float)
+            p_arr = np.array([r.get("total_points_settled", r["total_points_j1_j10"]) for r in runs_list], dtype=float)
+            p_j10_arr = np.array([r["total_points_j1_j10"] for r in runs_list], dtype=float)
             h1_arr = np.array([r["points_h1_j1_j5"] for r in runs_list], dtype=float)
-            h2_arr = np.array([r["points_h2_j6_j10"] for r in runs_list], dtype=float)
-            j11_arr = np.array([r["j11_partial_points"] for r in runs_list], dtype=float)
-            p_all_arr = np.array([r["total_points_incl_j11"] for r in runs_list], dtype=float)
+            h2_arr = np.array([r.get("points_h2", r["points_h2_j6_j10"]) for r in runs_list], dtype=float)
+            live_arr = np.array(
+                [r["round_breakdown"].get(live_jn_candidate, {}).get("points", 0) if has_live_partial else 0 for r in runs_list],
+                dtype=float,
+            )
+            p_all_arr = p_arr + live_arr
             w_arr = np.array([r["final_net_worth"] for r in runs_list], dtype=float)
             c_arr = np.array([r["final_cash"] for r in runs_list], dtype=float)
             a_arr = np.array([r["trading_alpha_eur"] for r in runs_list], dtype=float)
@@ -463,12 +486,13 @@ class BacktestBenchmarkSuite:
                 "description": s_desc,
                 "market_mode": m_mode_label,
                 "points_mean": round(m_pts, 1),
+                "points_j1_j10_mean": round(float(p_j10_arr.mean()), 1),
                 "points_std": round(float(p_arr.std()), 1) if len(runs_list) > 1 else 0.0,
                 "points_p10": round(float(np.quantile(p_arr, 0.10)), 1),
                 "points_p90": round(float(np.quantile(p_arr, 0.90)), 1),
                 "points_h1_j1_j5": round(float(h1_arr.mean()), 1),
                 "points_h2_j6_j10": round(float(h2_arr.mean()), 1),
-                "j11_partial_points": round(float(j11_arr.mean()), 1),
+                "j11_partial_points": round(float(live_arr.mean()), 1),
                 "points_incl_j11": round(float(p_all_arr.mean()), 1),
                 "simulated_rank": m_rk,
                 "net_worth_mean_eur": m_nw,
@@ -527,7 +551,7 @@ class BacktestBenchmarkSuite:
         df_ablation = pd.DataFrame(ablation_rows)
         df_all_curves = pd.concat([df_real_curves, pd.DataFrame(bot_curve_rows)], ignore_index=True)
 
-        # Out-of-Time Scarcity Regime Split Table (`J1-J5` Abundance vs `J6-J10 + J11` Scarcity)
+        # Out-of-Time Scarcity Regime Split Table (`J1-J5` Abundance vs `J6-max_settled` Scarcity)
         h1_scarcity = mc_daily_bands[mc_daily_bands["fecha"] <= "2026-09-15"]
         h2_scarcity = mc_daily_bands[mc_daily_bands["fecha"] > "2026-09-15"]
         free5_h1 = round(float(h1_scarcity["free_ge_5m"].mean()), 1) if not h1_scarcity.empty else 0.0
@@ -546,14 +570,14 @@ class BacktestBenchmarkSuite:
                 "h1_pts_per_round": round(h1_p / 5.0, 2),
                 "h1_avg_free_players_ge_5m": free5_h1,
                 "h1_avg_free_players_ge_10m": free10_h1,
-                "h2_scarcity_j6_j10_pts": h2_p,
-                "h2_pts_per_round": round(h2_p / 5.0, 2),
-                "j11_scarcity_live_pts": j11_p,
-                "h2_plus_j11_total_pts": round(h2_p + j11_p, 1),
+                "h2_scarcity_j6_plus_pts": h2_p,
+                "h2_pts_per_round": round(h2_p / n_h2_rounds, 2),
+                "live_round_pts": j11_p,
+                "h2_plus_live_total_pts": round(h2_p + j11_p, 1),
                 "h2_avg_free_players_ge_5m": free5_h2,
                 "h2_avg_free_players_ge_10m": free10_h2,
-                "h2_vs_real_delta_pts": round(h2_p - float(target_real["points_h2_j6_j10"]), 1),
-                "total_j1_j10_pts": float(ab_r["points_mean"]),
+                "h2_vs_real_delta_pts": round(h2_p - float(target_real["points_h2"]), 1),
+                "total_settled_pts": float(ab_r["points_mean"]),
                 "net_worth_mean_eur": int(ab_r["net_worth_mean_eur"]),
             })
         df_regime_split = pd.DataFrame(regime_rows)
@@ -564,9 +588,11 @@ class BacktestBenchmarkSuite:
             {
                 "manager": "🤖 Fantasy Champion v3 (MC20 Media)",
                 "is_bot": True,
-                "points_j1_j10": int(round(row_5["points_mean"])),
+                "points_settled": int(round(row_5["points_mean"])),
+                "points_j1_j10": int(round(row_5["points_j1_j10_mean"])),
                 "points_h1_j1_j5": int(round(row_5["points_h1_j1_j5"])),
                 "points_h2_j6_j10": int(round(row_5["points_h2_j6_j10"])),
+                "points_h2": int(round(row_5["points_h2_j6_j10"])),
                 "j11_partial_points": int(round(row_5["j11_partial_points"])),
                 "points_incl_j11": int(round(row_5["points_incl_j11"])),
                 "net_worth_eur": int(row_5["net_worth_mean_eur"]),
@@ -583,11 +609,13 @@ class BacktestBenchmarkSuite:
             {
                 "manager": "🛡️ Fantasy Champion v3 (Strict Conservador)",
                 "is_bot": True,
+                "points_settled": int(strict_res.get("total_points_settled", strict_res["total_points_j1_j10"])),
                 "points_j1_j10": int(strict_res["total_points_j1_j10"]),
                 "points_h1_j1_j5": int(strict_res["points_h1_j1_j5"]),
-                "points_h2_j6_j10": int(strict_res["points_h2_j6_j10"]),
-                "j11_partial_points": int(strict_res["j11_partial_points"]),
-                "points_incl_j11": int(strict_res["total_points_incl_j11"]),
+                "points_h2_j6_j10": int(strict_res.get("points_h2", strict_res["points_h2_j6_j10"])),
+                "points_h2": int(strict_res.get("points_h2", strict_res["points_h2_j6_j10"])),
+                "j11_partial_points": int(strict_res["round_breakdown"].get(live_jn_candidate, {}).get("points", 0) if has_live_partial else 0),
+                "points_incl_j11": int(strict_res.get("total_points_settled", strict_res["total_points_j1_j10"])) + (int(strict_res["round_breakdown"].get(live_jn_candidate, {}).get("points", 0)) if has_live_partial else 0),
                 "net_worth_eur": int(strict_res["final_net_worth"]),
                 "cash_eur": int(strict_res["final_cash"]),
                 "squad_value_eur": int(strict_res["final_squad_value"]),
@@ -602,9 +630,11 @@ class BacktestBenchmarkSuite:
             {
                 "manager": "⚠️ Legacy v2 (Auditado con Reglas Reales)",
                 "is_bot": True,
-                "points_j1_j10": int(round(row_2["points_mean"])),
+                "points_settled": int(round(row_2["points_mean"])),
+                "points_j1_j10": int(round(row_2["points_j1_j10_mean"])),
                 "points_h1_j1_j5": int(round(row_2["points_h1_j1_j5"])),
                 "points_h2_j6_j10": int(round(row_2["points_h2_j6_j10"])),
+                "points_h2": int(round(row_2["points_h2_j6_j10"])),
                 "j11_partial_points": int(round(row_2["j11_partial_points"])),
                 "points_incl_j11": int(round(row_2["points_incl_j11"])),
                 "net_worth_eur": int(row_2["net_worth_mean_eur"]),
@@ -622,10 +652,10 @@ class BacktestBenchmarkSuite:
         df_combined_standings = pd.concat(
             [df_real_standings.drop(columns=["real_rank"]), pd.DataFrame(bot_entries)],
             ignore_index=True,
-        ).sort_values(["points_j1_j10", "net_worth_eur"], ascending=[False, False]).reset_index(drop=True)
+        ).sort_values(["points_settled", "net_worth_eur"], ascending=[False, False]).reset_index(drop=True)
         df_combined_standings.insert(0, "rank", df_combined_standings.index + 1)
 
-        # Round-by-round J1..J11 comparison table
+        # Round-by-round J1..max_settled_jn (+ optional live partial) comparison table
         strict_rb = strict_res["round_breakdown"]
         passive_rb = variant_results["1_Passive_MILP_XI"]["round_breakdown"]
         target_round_pts: Dict[int, int] = {}
@@ -633,22 +663,26 @@ class BacktestBenchmarkSuite:
             dig = "".join(c for c in str(pr_r["Jornada"]) if c.isdigit())
             if dig:
                 target_round_pts[int(dig)] = int(safe_num(pr_r["Puntos"], 0))
-        target_round_pts[11] = int(target_real["j11_partial_points"])
+        if has_live_partial:
+            target_round_pts[live_jn_candidate] = int(target_real["j11_partial_points"])
 
         ref_env_for_rivals = AZFinanceMarketEnv(db_path=self.db_path, target_manager=self.target_manager)
-        leader_j11_pts = int(leader_real["j11_partial_points"])
+        leader_live_pts = int(leader_real["j11_partial_points"])
+        max_round_loop = live_jn_candidate if has_live_partial else max_settled_jn
         round_rows = []
-        for jn in range(1, 12):
+        for jn in range(1, max_round_loop + 1):
             mc_j_pts = [r["round_breakdown"].get(jn, {}).get("points", 0) for r in mc_runs]
             mc_j_bon = [r["round_breakdown"].get(jn, {}).get("bonus_eur", 0) for r in mc_runs]
             leg_j_pts = [r["round_breakdown"].get(jn, {}).get("points", 0) for r in legacy_runs]
-            if jn <= 10:
+            if jn <= max_settled_jn:
                 leader_j = ref_env_for_rivals.rival_round_points.get(jn, {}).get(leader_name, 0)
+                st_lbl = "SETTLED"
             else:
-                leader_j = leader_j11_pts
+                leader_j = leader_live_pts
+                st_lbl = "LIVE_PARTIAL"
             round_rows.append({
                 "jornada_num": jn,
-                "status": "SETTLED" if jn <= 10 else "LIVE_PARTIAL_9_OF_10",
+                "status": st_lbl,
                 "real_manager_pts": target_round_pts.get(jn, 0),
                 "passive_milp_pts": passive_rb.get(jn, {}).get("points", 0),
                 "legacy_v2_honest_mean_pts": round(float(np.mean(leg_j_pts)), 1),
@@ -657,7 +691,7 @@ class BacktestBenchmarkSuite:
                 "champion_v3_mc20_p10_pts": round(float(np.quantile(mc_j_pts, 0.10)), 1),
                 "champion_v3_mc20_p90_pts": round(float(np.quantile(mc_j_pts, 0.90)), 1),
                 "league_leader_real_pts": leader_j,
-                "champion_v3_mc20_mean_bonus_eur": int(round(float(np.mean(mc_j_bon)))) if jn <= 10 else 0,
+                "champion_v3_mc20_mean_bonus_eur": int(round(float(np.mean(mc_j_bon)))) if jn <= max_settled_jn else 0,
             })
         df_rounds = pd.DataFrame(round_rows)
 
@@ -686,7 +720,9 @@ class BacktestBenchmarkSuite:
             "iteration_tag": iteration_tag,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "n_seeds": n_seeds,
+            "max_settled_jn": max_settled_jn,
             "real_pts_j1_j10": row_1 and float(target_real["points_j1_j10"]),
+            "real_pts_settled": float(target_real["points_settled"]),
             "legacy_v2_honest_pts": row_2["points_mean"],
             "v3_no_clauses_pts": row_3["points_mean"],
             "v3_strict_pts": row_4["points_mean"],
@@ -716,7 +752,7 @@ class BacktestBenchmarkSuite:
             df_ablation.to_excel(writer, sheet_name="Ablation_Summary", index=False)
             df_regime_split.to_excel(writer, sheet_name="OutOfTime_Regime_Split", index=False)
             df_combined_standings.to_excel(writer, sheet_name="Standings_vs_Rivals", index=False)
-            df_rounds.to_excel(writer, sheet_name="Round_By_Round_J1_J11", index=False)
+            df_rounds.to_excel(writer, sheet_name=f"Round_By_Round_J1_J{max_round_loop}", index=False)
             mc_daily_bands.to_excel(writer, sheet_name="MC20_Daily_Bands", index=False)
             rep_mc["trade_log"].to_excel(writer, sheet_name="v3_MC_Median_Trades", index=False)
             rep_legacy["trade_log"].to_excel(writer, sheet_name="Legacy_v2_Honest_Trades", index=False)
@@ -728,10 +764,14 @@ class BacktestBenchmarkSuite:
             df_combined_standings=df_combined_standings,
             df_rounds=df_rounds,
             leader_name=leader_name,
-            leader_pts=int(leader_real["points_j1_j10"]),
+            leader_pts=int(leader_real["points_settled"]),
             podium_pts=podium_pts,
             n_seeds=n_seeds,
             as_of_date=as_of_date,
+            max_settled_jn=max_settled_jn,
+            n_sim_days=n_sim_days,
+            has_live_partial=has_live_partial,
+            live_jn=live_jn_candidate,
         )
         with open(report_md_path, "w", encoding="utf-8") as f:
             f.write(md_text)
@@ -761,6 +801,10 @@ class BacktestBenchmarkSuite:
         podium_pts: int,
         n_seeds: int,
         as_of_date: str,
+        max_settled_jn: int = 12,
+        n_sim_days: int = 105,
+        has_live_partial: bool = False,
+        live_jn: int = 13,
     ) -> str:
         real_row = df_ablation[df_ablation["strategy_id"] == "0_Real_Manager"].iloc[0]
         leg_row = df_ablation[df_ablation["strategy_id"] == "2_Legacy_v2_HonestRules"].iloc[0]
@@ -772,11 +816,15 @@ class BacktestBenchmarkSuite:
         delta_nw_mc = (mc_row["net_worth_mean_eur"] - real_row["net_worth_mean_eur"]) / 1e6
         delta_pts_strict = strict_row["points_mean"] - real_row["points_mean"]
         delta_nw_strict = (strict_row["net_worth_mean_eur"] - real_row["net_worth_mean_eur"]) / 1e6
+        settled_lbl = f"J1–J{max_settled_jn}"
+        h2_lbl = f"J6–J{max_settled_jn}"
+        live_desc = f" + J{live_jn} en vivo" if has_live_partial else " cerradas"
+        max_round_loop = live_jn if has_live_partial else max_settled_jn
 
         lines = [
-            f"# 🏆 Informe de Backtesting Honesto 94 Días — `Fantasy Champion v3` ({self.league_name})",
+            f"# 🏆 Informe de Backtesting Honesto {n_sim_days} Días — `Fantasy Champion` ({self.league_name})",
             "",
-            f"**Ventana Auditada:** `2026-08-01` → `{as_of_date}` (94 días continuos, J1–J10 cerradas + J11 en vivo 9/10 partidos)  ",
+            f"**Ventana Auditada:** `2026-08-01` → `{as_of_date}` ({n_sim_days} días continuos, {settled_lbl}{live_desc})  ",
             f"**Paridad Estricta de Reglas Oficiales:** Máximo `{self.rules.market_max_user_sales}` jugadores en venta simultáneos, "
             f"bloqueo de cláusulas `{self.rules.clause_disabled_hours}h` antes de jornada + durante jornada activa, "
             f"blindaje `{self.rules.clause_increment_ratio:.1f}:1`, crédito `{int(self.rules.credit_limit_ratio*100)}%` L-J  ",
@@ -785,18 +833,22 @@ class BacktestBenchmarkSuite:
             "",
             "## 1. Resumen Ejecutivo",
             "",
-            f"- **Fantasy Champion v3 (Monte Carlo 20 huecos `Mercado`, N={n_seeds} semillas):** **`{mc_row['points_mean']:.1f} ± {mc_row['points_std']:.1f} pts`** en J1–J10 "
-            f"(P10–P90: `{mc_row['points_p10']:.0f}..{mc_row['points_p90']:.0f}` pts, **`{delta_pts_mc:+.1f} pts`** vs `{self.target_manager}` Real y **`{delta_pts_vs_leg:+.1f} pts`** vs `Legacy v2` bajo las mismas reglas reales), "
-            f"más **`{mc_row['j11_partial_points']:.1f} pts`** en J11 parcial (total acumulado **`{mc_row['points_incl_j11']:.1f} pts`** vs `{real_row['points_incl_j11']:.0f}` real). "
-            f"Patrimonio Neto **`{mc_row['net_worth_mean_eur']/1e6:.2f} M€`** (**`{delta_nw_mc:+.2f} M€`** vs real), "
+            f"- **Fantasy Champion (Monte Carlo 20 huecos `Mercado`, N={n_seeds} semillas):** **`{mc_row['points_mean']:.1f} ± {mc_row['points_std']:.1f} pts`** en {settled_lbl} "
+            f"(P10–P90: `{mc_row['points_p10']:.0f}..{mc_row['points_p90']:.0f}` pts, **`{delta_pts_mc:+.1f} pts`** vs `{self.target_manager}` Real y **`{delta_pts_vs_leg:+.1f} pts`** vs `Legacy v2` bajo las mismas reglas reales)"
+            + (
+                f", más **`{mc_row['j11_partial_points']:.1f} pts`** en J{live_jn} parcial (total acumulado **`{mc_row['points_incl_j11']:.1f} pts`** vs `{real_row['points_incl_j11']:.0f}` real). "
+                if has_live_partial else ". "
+            )
+            + f"Patrimonio Neto **`{mc_row['net_worth_mean_eur']/1e6:.2f} M€`** (**`{delta_nw_mc:+.2f} M€`** vs real), "
             f"Posición Simulada **`#{int(mc_row['simulated_rank'])}/15`** (Prob. Campeón #1 > {leader_pts} pts: **`{mc_row['win_league_prob_pct']:.1f}%`**, Prob. Podio Top-3 >= {podium_pts} pts: **`{mc_row['podium_top3_prob_pct']:.1f}%`**).",
-            f"- **Fantasy Champion v3 (Modo Conservador Estricto — Solo Subastas Observadas):** **`{strict_row['points_mean']:.0f} pts`** en J1–J10 (**`{delta_pts_strict:+.0f} pts`** vs real) + **`{strict_row['j11_partial_points']:.0f} pts`** en J11, "
-            f"Patrimonio Neto **`{strict_row['net_worth_mean_eur']/1e6:.2f} M€`** (**`{delta_nw_strict:+.2f} M€`**), Posición **`#{int(strict_row['simulated_rank'])}/15`**.",
+            f"- **Fantasy Champion (Modo Conservador Estricto — Solo Subastas Observadas):** **`{strict_row['points_mean']:.0f} pts`** en {settled_lbl} (**`{delta_pts_strict:+.0f} pts`** vs real)"
+            + (f" + **`{strict_row['j11_partial_points']:.0f} pts`** en J{live_jn}, " if has_live_partial else ", ")
+            + f"Patrimonio Neto **`{strict_row['net_worth_mean_eur']/1e6:.2f} M€`** (**`{delta_nw_strict:+.2f} M€`**), Posición **`#{int(strict_row['simulated_rank'])}/15`**.",
             f"- **Solvencia Matemática Impecable:** **`{int(mc_row['insolvent_rounds'])}` jornadas en negativo** en las {n_seeds} semillas (`0` roscos por insolvencia) y **`{mc_row['lineup_efficiency_pct']:.1f}%`** de eficiencia de alineación MILP.",
             "",
             "## 2. Estudio de Ablación Honesto (Reglas Reales Biwenger: `<=5` Ventas, Bloqueo `48h` Cláusulas)",
             "",
-            "| Estrategia | Puntos J1-J10 | H1 (J1-J5) | H2 (J6-J10) | +J11 Vivo | Rank | Patrimonio (`02-Nov`) | Trading Alpha | Eficiencia XI | Jornadas <0€ | Subastas / Cláusulas / Ventas |",
+            f"| Estrategia | Puntos {settled_lbl} | H1 (J1-J5) | H2 ({h2_lbl}) | +Vivo | Rank | Patrimonio (`{as_of_date}`) | Trading Alpha | Eficiencia XI | Jornadas <0€ | Subastas / Cláusulas / Ventas |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
         ]
 
@@ -816,9 +868,9 @@ class BacktestBenchmarkSuite:
 
         lines.extend([
             "",
-            "## 3. Validación *Out-of-Time* por Régimen de Escasez (`Ago–Sep` Abundancia vs `Sep–Nov` Escasez)",
+            f"## 3. Validación *Out-of-Time* por Régimen de Escasez (`H1 J1-J5` Abundancia vs `H2 {h2_lbl}` Escasez)",
             "",
-            "| Estrategia | Libres >=5M (H1 -> H2) | Libres >=10M (H1 -> H2) | Puntos/J en Abundancia (J1-J5) | Puntos/J en Escasez (J6-J10) | Ventaja en Escasez vs Real |",
+            f"| Estrategia | Libres >=5M (H1 -> H2) | Libres >=10M (H1 -> H2) | Puntos/J en Abundancia (J1-J5) | Puntos/J en Escasez ({h2_lbl}) | Ventaja en Escasez vs Real |",
             "| :--- | :---: | :---: | :---: | :---: | :---: |",
         ])
         for _, rr in df_regime_split.iterrows():
@@ -831,29 +883,30 @@ class BacktestBenchmarkSuite:
 
         lines.extend([
             "",
-            f"## 4. Clasificación General `{self.league_name}` (Bot v3 vs Legacy v2 vs 15 Mánagers Reales)",
+            f"## 4. Clasificación General `{self.league_name}` (Bot vs Legacy v2 vs 15 Mánagers Reales)",
             "",
-            f"| Pos | Mánager | Puntos J1-J10 | +J11 Vivo | Total J1-J11 | Patrimonio (`{as_of_date}`) | Caja | Trading Alpha | Eficiencia XI |",
+            f"| Pos | Mánager | Puntos {settled_lbl} | +Vivo | Total | Patrimonio (`{as_of_date}`) | Caja | Trading Alpha | Eficiencia XI |",
             "| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
         ])
 
         for _, r in df_combined_standings.iterrows():
             nm = f"**{r['manager']}**" if (r["is_bot"] or r["manager"] == self.target_manager) else str(r["manager"])
+            pts_set_val = int(r.get("points_settled", r["points_j1_j10"]))
             lines.append(
-                f"| {int(r['rank'])} | {nm} | **{int(r['points_j1_j10'])}** | +{int(r['j11_partial_points'])} | "
+                f"| {int(r['rank'])} | {nm} | **{pts_set_val}** | +{int(r['j11_partial_points'])} | "
                 f"{int(r['points_incl_j11'])} | {r['net_worth_eur']/1e6:.2f} M€ | {r['cash_eur']/1e6:+.2f} M€ | "
                 f"{r['trading_alpha_eur']/1e6:+.2f} M€ | {r['lineup_efficiency_pct']:.1f}% |"
             )
 
         lines.extend([
             "",
-            "## 5. Evolución Jornada a Jornada (J1 a J11)",
+            f"## 5. Evolución Jornada a Jornada (J1 a J{max_round_loop})",
             "",
-            f"| Jornada | Estado | `{self.target_manager}` Real | `1_Passive_MILP` | `2_Legacy_v2_Honest` | `4_v3_Strict` | `5_v3_MC20` (Media) | `#1 {leader_name}` | Prima Media v3 |",
+            f"| Jornada | Estado | `{self.target_manager}` Real | `1_Passive_MILP` | `2_Legacy_v2_Honest` | `4_v3_Strict` | `5_v3_MC20` (Media) | `#1 {leader_name}` | Prima Media Bot |",
             "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
         ])
         for _, r in df_rounds.iterrows():
-            st_lbl = "Cerrada" if r["status"] == "SETTLED" else "En Vivo (9/10)"
+            st_lbl = "Cerrada" if r["status"] == "SETTLED" else "En Vivo"
             lines.append(
                 f"| J{int(r['jornada_num'])} | {st_lbl} | {int(r['real_manager_pts'])} | {int(r['passive_milp_pts'])} | "
                 f"{r['legacy_v2_honest_mean_pts']:.1f} | {int(r['champion_v3_strict_pts'])} | "

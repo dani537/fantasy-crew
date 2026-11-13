@@ -38,6 +38,8 @@ from src.tools.strategy_engine.auction_model import AuctionBidModel
 from src.tools.strategy_engine.clause_sniper import ClauseSniper
 from src.tools.strategy_engine.strategy_memory import StrategyMemoryLedger
 from src.tools.strategy_engine.portfolio_optimizer import PortfolioOptimizer
+from src.tools.strategy_engine.posture_controller import StandingsPostureController
+from src.tools.strategy_engine.llm_supervisor import LLMStrategicSupervisor
 from src.tools.backtester.causal_clock import StrictCausalDataView, CausalEFRPredictor
 from src.tools.coach_analytic.guardrails import validate_autopilot_plan_v2
 from src.tools.biwenger_actions.market_actions import BiwengerMarketActions
@@ -47,6 +49,7 @@ from src.llm_endpoints.router import TieredLLMRouter
 
 VALID_TRIGGER_PHASES = (
     "MORNING_FULL",
+    "POST_ROUND_SETTLEMENT",
     "PRE_CLAUSE_LOCK",
     "PRE_KICKOFF_SOLVENCY",
     "FINAL_LINEUP_GUARD",
@@ -232,6 +235,15 @@ class AutopilotRunner:
                     max_rival_pp = float(p_vals.max())
 
         directives = self.memory.resolve_active_directives(catalog_df=mkt_today)
+        standings_snapshot = self._load_causal_standings_snapshot(
+            team_name=team_name,
+            mgrs_today=mgrs_today,
+            squad_df=squad_df,
+            current_cash=current_cash,
+        )
+        is_solvent_now = (current_cash >= 0.0) if phase_ctx.must_be_solvent_now else (
+            current_cash + float(squad_df["precio"].sum() if not squad_df.empty else 0.0) > 0.0
+        )
 
         return {
             "date": self.today_date,
@@ -240,6 +252,8 @@ class AutopilotRunner:
             "league_name": league_name,
             "league_id": league_id,
             "current_cash": current_cash,
+            "is_solvent": bool(is_solvent_now),
+            "standings_snapshot": standings_snapshot,
             "squad_df": squad_df,
             "market_today_df": mkt_today,
             "listings_df": listings_df,
@@ -258,6 +272,73 @@ class AutopilotRunner:
             "max_rival_pp": max_rival_pp,
             "directives": directives,
             "is_live_api": bool(delta_state.get("is_live")),
+        }
+
+    def _load_causal_standings_snapshot(
+        self,
+        team_name: str,
+        mgrs_today: pd.DataFrame,
+        squad_df: pd.DataFrame,
+        current_cash: float,
+    ) -> Dict[str, Any]:
+        """Builds causal league standings context (`rank`, `gap_to_leader`, `rounds_settled`) from warehouse."""
+        sq_val = float(pd.to_numeric(squad_df["precio"], errors="coerce").fillna(0).sum()) if not squad_df.empty else 0.0
+        my_nw = float(current_cash) + sq_val
+        standings: Dict[str, float] = {}
+        rounds_settled = 0
+        try:
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                df_pr = pd.read_sql("SELECT Jornada, Manager, Puntos FROM Primas_Jornadas", conn)
+            if not df_pr.empty:
+                j_nums = set()
+                for _, r in df_pr.iterrows():
+                    dig = "".join(c for c in str(r.get("Jornada", "")) if c.isdigit())
+                    if dig:
+                        j_nums.add(int(dig))
+                    mgr = str(r.get("Manager", "")).strip()
+                    if mgr:
+                        standings[mgr] = standings.get(mgr, 0.0) + float(pd.to_numeric(r.get("Puntos"), errors="coerce") or 0.0)
+                rounds_settled = len(j_nums)
+        except Exception:
+            pass
+
+        if not standings:
+            return {
+                "my_rank": 1,
+                "total_managers": max(2, len(mgrs_today) if not mgrs_today.empty else 15),
+                "my_points": 0.0,
+                "leader_points": 0.0,
+                "second_points": 0.0,
+                "podium_points": 0.0,
+                "rounds_settled": rounds_settled,
+                "my_net_worth": my_nw,
+                "leader_net_worth": my_nw,
+            }
+
+        ranked = sorted(standings.items(), key=lambda x: x[1], reverse=True)
+        my_pts = float(standings.get(team_name, 0.0))
+        my_rank = next((i + 1 for i, (m, _) in enumerate(ranked) if m == team_name), len(ranked))
+        leader_mgr, leader_pts = ranked[0]
+        second_pts = ranked[1][1] if len(ranked) > 1 else leader_pts
+        podium_pts = ranked[min(2, len(ranked) - 1)][1]
+
+        leader_nw = my_nw
+        if not mgrs_today.empty and "patrimonio_total_estimado" in mgrs_today.columns:
+            lrow = mgrs_today[mgrs_today["manager"] == leader_mgr]
+            if not lrow.empty:
+                leader_nw = float(pd.to_numeric(lrow.iloc[0]["patrimonio_total_estimado"], errors="coerce") or my_nw)
+
+        return {
+            "my_rank": int(my_rank),
+            "total_managers": int(len(ranked)),
+            "my_points": round(my_pts, 1),
+            "leader_points": round(float(leader_pts), 1),
+            "second_points": round(float(second_pts), 1),
+            "podium_points": round(float(podium_pts), 1),
+            "rounds_settled": int(rounds_settled),
+            "my_net_worth": round(my_nw, 0),
+            "leader_net_worth": round(leader_nw, 0),
         }
 
     def execute_cycle(
@@ -298,6 +379,67 @@ class AutopilotRunner:
         mgrs_today = self.view.get_manager_snapshots(ctx["date"])
         self.auction_model.fit_causal(past_bids, mgrs_today)
 
+        # 2B. Adaptive Causal Standings Posture + Event-Driven Pre-Decision LLM Supervisor
+        posture_ctrl = StandingsPostureController(enabled=StrategySettings.POSTURE_ADAPTATION_ENABLED)
+        st_snap = ctx.get("standings_snapshot") or {}
+        base_mods = posture_ctrl.compute_modifiers(
+            my_rank=int(st_snap.get("my_rank", 1)),
+            total_managers=int(st_snap.get("total_managers", 15)),
+            my_points=float(st_snap.get("my_points", 0.0)),
+            leader_points=float(st_snap.get("leader_points", 0.0)),
+            second_points=float(st_snap.get("second_points", 0.0)),
+            podium_points=float(st_snap.get("podium_points", 0.0)),
+            rounds_settled=int(st_snap.get("rounds_settled", 0)),
+            my_net_worth=float(st_snap.get("my_net_worth", 0.0)),
+            leader_net_worth=float(st_snap.get("leader_net_worth", 0.0)),
+        )
+        mkt_free = ctx["market_today_df"]
+        if not mkt_free.empty and "propietario_liga" in mkt_free.columns:
+            free_mask = mkt_free["propietario_liga"].astype(str).isin(["Mercado", "Libre", "", "nan", "None"])
+            free_prices = pd.to_numeric(mkt_free.loc[free_mask, "precio"], errors="coerce").fillna(0)
+            scarcity_pre = {
+                "free_ge_5m": int((free_prices >= 5_000_000).sum()),
+                "free_ge_10m": int((free_prices >= 10_000_000).sum()),
+            }
+        else:
+            scarcity_pre = {"free_ge_5m": 0, "free_ge_10m": 0}
+
+        squad_inj_core: List[Dict[str, Any]] = []
+        if not ctx["squad_df"].empty:
+            for _, sr in ctx["squad_df"].iterrows():
+                est = str(sr.get("estado", "ok")).strip().lower()
+                pr_v = float(pd.to_numeric(sr.get("precio"), errors="coerce") or 0.0)
+                if est not in ("ok", "fit", "available", "") and pr_v >= 3_000_000:
+                    squad_inj_core.append({
+                        "player_id": int(sr["player_id"]),
+                        "nombre": str(sr.get("nombre", "")),
+                        "estado": est,
+                        "precio": int(pr_v),
+                    })
+
+        sup_client = None
+        if self.trigger_phase in ("MORNING_FULL", "POST_ROUND_SETTLEMENT", "PRE_CLAUSE_LOCK"):
+            try:
+                sup_client = TieredLLMRouter.get_client(tier="daily")
+            except Exception:
+                sup_client = None
+
+        supervisor = LLMStrategicSupervisor(llm_client=sup_client, tier="daily")
+        supervisor_res = supervisor.evaluate_or_reuse(
+            current_date=ctx["date"],
+            standings_snapshot=st_snap,
+            posture_modifiers=base_mods.to_dict(),
+            scarcity_summary=scarcity_pre,
+            squad_injuries_core=squad_inj_core,
+            days_to_kickoff=ctx["days_to_kickoff"],
+            hours_to_clause_lock=phase_ctx.hours_to_clause_lock,
+            clauses_open=phase_ctx.clauses_open,
+            target_jornada_num=ctx["target_jornada_num"],
+            memory_ledger=self.memory,
+        )
+        final_mods = posture_ctrl.apply_llm_overrides(base_mods, supervisor_res.get("overrides"))
+        causal_standings_ctx = {**st_snap, "posture_modifiers": final_mods.to_dict()}
+
         # 3. Generate Daily Plan via MILP + Replacement Cost NPV Solver
         raw_plan = self.optimizer.generate_daily_plan(
             current_date=ctx["date"],
@@ -324,6 +466,8 @@ class AutopilotRunner:
             force_sell_ids=directives["force_sell_ids"],
             blacklist_buy_ids=directives["blacklist_buy_ids"],
             priority_target_ids=directives["priority_target_ids"],
+            causal_standings_ctx=causal_standings_ctx,
+            llm_overrides=supervisor_res.get("overrides"),
         )
 
         # 4. Guardrails v3 Validation
@@ -399,19 +543,53 @@ class AutopilotRunner:
                 except Exception as e:
                     execution_results.append({"type": "ROUTINE_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
 
-        # 5C. Release Clauses & Defensive Shields (ALWAYS Human-Gated in SEMI_AUTO!)
-        if self.trigger_phase in ("MORNING_FULL", "PRE_CLAUSE_LOCK"):
+        # 5C. Release Clauses & Defensive Shields
+        #   - SEMI_AUTO: Always human-gated in `Decisiones_Pendientes`.
+        #   - FULL_AUTO: Autonomous up to `min(HARD_CAP_25M, max(6M, 45% Net Equity))` when solvent,
+        #     respecting `clause_timing_mode` (IMMEDIATE | PRE_LOCK_SURGICAL | HYBRID).
+        high_value_clause_alerts: List[Dict[str, Any]] = []
+        eff_timing = final_mods.clause_timing_preference if final_mods.clause_timing_preference != "AUTO" else StrategySettings.CLAUSE_TIMING_MODE
+        net_equity = max(0.0, float(ctx["current_cash"]) + squad_val)
+        dyn_clause_cap = min(
+            StrategySettings.AUTONOMOUS_CLAUSE_HARD_CAP_EUR,
+            max(StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR, int(net_equity * StrategySettings.AUTONOMOUS_CLAUSE_MAX_PCT)),
+        )
+        running_cash_for_clauses = float(ctx["current_cash"])
+        if self.trigger_phase in ("MORNING_FULL", "POST_ROUND_SETTLEMENT", "PRE_CLAUSE_LOCK"):
             for c in approved_plan.get("clause_snipes", []):
                 try:
                     pid = int(c["player_id"])
                     owner_uid = int(mgr_id_map.get(str(c.get("seller", "")), 0))
                     amt = int(c["amount"])
-                    # Autonomous execution in FULL_AUTO up to configured cap (6M default) when cash is positive.
-                    # Clauses > 6M or in SEMI_AUTO are queued for 1-tap confirmation on Telegram!
+
+                    # Strategy-driven clause cadence gate before PRE_CLAUSE_LOCK
+                    if self.trigger_phase != "PRE_CLAUSE_LOCK" and float(phase_ctx.hours_to_clause_lock) > 52.0:
+                        high_conv = (
+                            float(c.get("delta_xp_xi", 0.0)) >= 1.50
+                            or scarcity_pre.get("free_ge_5m", 99) <= 6
+                        )
+                        if eff_timing == "PRE_LOCK_SURGICAL" and float(c.get("delta_xp_xi", 0.0)) < 2.20:
+                            execution_results.append({
+                                "type": "CLAUSE_DEFERRED",
+                                "target": c["nombre"],
+                                "res": {"status": "DEFERRED_TO_PRE_LOCK", "timing": eff_timing, "hours_to_lock": round(phase_ctx.hours_to_clause_lock, 1)},
+                            })
+                            continue
+                        if eff_timing == "HYBRID" and not high_conv:
+                            execution_results.append({
+                                "type": "CLAUSE_DEFERRED",
+                                "target": c["nombre"],
+                                "res": {"status": "DEFERRED_TO_PRE_LOCK", "timing": eff_timing, "hours_to_lock": round(phase_ctx.hours_to_clause_lock, 1)},
+                            })
+                            continue
+
+                    is_solvent_clause = bool(ctx.get("is_solvent", True)) and (
+                        (not phase_ctx.must_be_solvent_now) or ((running_cash_for_clauses - amt) >= 0.0)
+                    )
                     requires_approval = (
                         self.mode == "SEMI_AUTO"
-                        or amt > StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR
-                        or not ctx.get("is_solvent", True)
+                        or amt > dyn_clause_cap
+                        or not is_solvent_clause
                     )
                     if requires_approval and not self.dry_run:
                         dec_id = self.memory.queue_pending_decision(
@@ -432,7 +610,21 @@ class AutopilotRunner:
                         queued_decisions.append(dec_id)
                     elif self.mode == "FULL_AUTO" or self.dry_run:
                         res = market_actions.pay_clause(player_id=pid, amount=amt, owner_user_id=owner_uid)
-                        execution_results.append({"type": "CLAUSE_SNIPE", "target": c["nombre"], "res": res})
+                        running_cash_for_clauses -= amt
+                        is_hi_val = amt > StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR
+                        if is_hi_val:
+                            high_value_clause_alerts.append({
+                                "nombre": c["nombre"],
+                                "amount": amt,
+                                "seller": str(c.get("seller", "")),
+                                "delta_xp_xi": float(c.get("delta_xp_xi", 0.0)),
+                            })
+                        execution_results.append({
+                            "type": "CLAUSE_SNIPE",
+                            "target": c["nombre"],
+                            "high_value_alert": is_hi_val,
+                            "res": res,
+                        })
                 except Exception as e:
                     execution_results.append({"type": "CLAUSE_SNIPE", "target": c.get("nombre", str(c)), "res": {"status": "ERROR", "detail": str(e)}})
 
@@ -459,7 +651,7 @@ class AutopilotRunner:
                     execution_results.append({"type": "DEFENSIVE_SHIELD", "target": sh.get("nombre", str(sh)), "res": {"status": "ERROR", "detail": str(e)}})
 
         # 5D. Autonomous Market Bids (Executed in SEMI_AUTO when AUTONOMOUS_BIDS_IN_SEMI_AUTO=True!)
-        if self.trigger_phase == "MORNING_FULL":
+        if self.trigger_phase in ("MORNING_FULL", "POST_ROUND_SETTLEMENT"):
             can_bid = (
                 self.mode == "FULL_AUTO"
                 or (self.mode == "SEMI_AUTO" and StrategySettings.AUTONOMOUS_BIDS_IN_SEMI_AUTO)
@@ -544,6 +736,8 @@ class AutopilotRunner:
                 plan=approved_plan,
                 blocked=validated["blocked"],
                 pending=pending_all,
+                posture=final_mods.to_dict(),
+                supervisor_res=supervisor_res,
             )
             easy_summary_text = self._generate_plain_execution_summary(
                 ctx=ctx,
@@ -552,6 +746,8 @@ class AutopilotRunner:
                 pending=pending_all,
                 projected_cash=validated["projected_cash"],
                 is_solvent=validated["is_safe"],
+                posture=final_mods.to_dict(),
+                supervisor_res=supervisor_res,
             )
 
         cycle_summary = {
@@ -565,6 +761,10 @@ class AutopilotRunner:
             "is_kickoff_day": ctx["is_kickoff_day"],
             "target_jornada_num": ctx["target_jornada_num"],
             "phase_context": phase_ctx.to_dict(),
+            "strategy_posture": final_mods.to_dict(),
+            "supervisor_report": supervisor_res,
+            "high_value_clause_alerts": high_value_clause_alerts,
+            "autonomous_clause_cap_eur": int(dyn_clause_cap),
             "starting_cash": ctx["current_cash"],
             "projected_cash": validated["projected_cash"],
             "is_solvent": validated["is_safe"],
@@ -595,6 +795,8 @@ class AutopilotRunner:
         plan: Dict[str, Any],
         blocked: List[Dict[str, Any]],
         pending: List[Dict[str, Any]],
+        posture: Optional[Dict[str, Any]] = None,
+        supervisor_res: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Calls TieredLLMRouter to synthesize a personalized, memory-aware executive briefing."""
         phase_ctx: RoundPhaseContext = ctx["phase_ctx"]
@@ -630,12 +832,19 @@ class AutopilotRunner:
             else "3. Operaciones de Alto Impacto (Cláusulas, Blindajes y Ventas Estructurales — 100% Autónomas)"
         )
 
+        sup_note = ""
+        if posture:
+            sup_note = (
+                f"- Postura Clasificatoria Dinámica: {posture.get('posture')} (#{posture.get('my_rank')}/{posture.get('total_managers')}, "
+                f"brecha {posture.get('gap_to_leader', 0):+.0f} pts | Supervisor {(supervisor_res or {}).get('trigger', 'CACHED')}): "
+                f"{posture.get('rationale', '')}\n"
+            )
         prompt = f"""
 Actúa como Director Deportivo Cuantitativo para '{ctx['team_name']}' en la liga Biwenger '{ctx['league_name']}'.
 Genera un briefing ejecutivo conciso en texto limpio (máximo 4 bloques cortos con viñetas) para la sesión `{self.trigger_phase}` ({ctx['date']}):
 
 - Modo: {self.mode} (Dry Run: {self.dry_run}) | Fase Calendario J{ctx['target_jornada_num']}: {phase_ctx.phase_name}
-- Inicio J{ctx['target_jornada_num']}: {phase_ctx.next_kickoff_ts} ({phase_ctx.hours_to_kickoff:.1f}h) | Cláusulas abiertas ({self.rules.clause_disabled_hours}h): {phase_ctx.clauses_open} | Parón FIFA: {phase_ctx.is_international_break}
+{sup_note}- Inicio J{ctx['target_jornada_num']}: {phase_ctx.next_kickoff_ts} ({phase_ctx.hours_to_kickoff:.1f}h) | Cláusulas abiertas ({self.rules.clause_disabled_hours}h): {phase_ctx.clauses_open} | Parón FIFA: {phase_ctx.is_international_break}
 - Caja Actual: {ctx['current_cash']:,} € -> Proyectada hoy tras ventas: {plan['post_sales_cash']:,} € (Nota Biwenger: las pujas son a sobre cerrado y solo descuentan caja mañana a las 06:00 si se ganan, respaldadas por nuestro Colateral Líquido Top-{self.rules.market_max_user_sales}: {plan.get('top_k_liquid_collateral', 0):,} €)
 - Pujas Autónomas Lanzadas: {bids_str}
 - Ventas Ejecutadas Hoy (NPV / Arbitraje / Solvencia): {sales_str}
@@ -673,6 +882,8 @@ Estructura:
         pending: List[Dict[str, Any]],
         projected_cash: float,
         is_solvent: bool,
+        posture: Optional[Dict[str, Any]] = None,
+        supervisor_res: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Generates a short, plain-language LLM summary of everything done in this run for the email footer."""
         lu = plan.get("lineup") or {}
@@ -692,6 +903,7 @@ Estructura:
 Resume en español muy claro, cercano y fácil de leer (máximo 5-6 puntos cortos con viñetas, SIN jerga técnica como NPV, MILP, xP, EFR o roles internos) todo lo que acaba de hacer hoy el bot de Biwenger para '{ctx['team_name']}':
 
 - Fecha / Fase: {ctx['date']} ({self.trigger_phase}) | Modo: {self.mode} (Simulacro={self.dry_run})
+- Enfoque estratégico hoy: {(posture or {}).get('posture', 'AUTO')} (#{(posture or {}).get('my_rank', '?')}/{(posture or {}).get('total_managers', '?')}, brecha {(posture or {}).get('gap_to_leader', 0):+.0f} pts) — {(posture or {}).get('extra', {}).get('llm_rationale') or (posture or {}).get('rationale', 'Equilibrado')}
 - Dinero en caja ahora: {int(ctx['current_cash']):,} € | Saldo proyectado tras ventas: {int(projected_cash):,} € | Solvente: {'Sí' if is_solvent else 'No'}
 - Alineación guardada para J{ctx['target_jornada_num']}: {lu.get('formation', '4-4-2')} ({xi_names})
 - Pujas realizadas en el mercado: {bids}

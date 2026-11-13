@@ -30,6 +30,7 @@ from src.tools.strategy_engine.strategy_memory import StrategyMemoryLedger
 from src.tools.strategy_engine.lifecycle_manager import LeagueLifecycleEngine, SeasonPhase
 from src.tools.strategy_engine.injury_tactician import InjuryTacticalDecisionEngine, InjuryAction
 from src.tools.strategy_engine.archetypes import StrategyArchetype, STRATEGY_ARCHETYPES
+from src.tools.strategy_engine.posture_controller import StandingsPostureController, PostureModifiers
 from src.utils.numeric import safe_num
 
 
@@ -77,12 +78,12 @@ class PortfolioOptimizer:
             self.clause_sniper = clause_sniper
         else:
             c_pol = StrategySettings.CLAUSE_POLICY
-            r_cap = 2.20
-            min_avg = 4.8
-            min_dx = 0.75
+            r_cap = StrategySettings.CLAUSE_RATIO_CAP
+            min_avg = StrategySettings.CLAUSE_MIN_AVG_PTS
+            min_dx = StrategySettings.CLAUSE_MIN_DELTA_XP
             res_pct = 0.80
             if self.archetype is not None:
-                c_pol = "COMPETITIVE_VORP"
+                c_pol = str(getattr(self.archetype, "clause_policy", c_pol) or c_pol)
                 r_cap = self.archetype.clause_ratio_cap
                 min_avg = self.archetype.clause_min_avg_pts
                 min_dx = self.archetype.clause_min_delta_xp
@@ -127,6 +128,7 @@ class PortfolioOptimizer:
         sell_locked_ids: Optional[Set[int]] = None,
         untouchable_ids: Optional[Set[int]] = None,
         core_pillar_ids: Optional[Set[int]] = None,
+        xp_idx_cache: Optional[Dict[int, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Solves the exact Mixed-Integer Linear Program choosing:
@@ -151,7 +153,7 @@ class PortfolioOptimizer:
         sq = sq[sq["player_id"] > 0].drop_duplicates(subset=["player_id"]).reset_index(drop=True)
         n = len(sq)
 
-        xp_idx = xp_table.set_index("player_id").to_dict("index") if (xp_table is not None and not xp_table.empty) else {}
+        xp_idx = xp_idx_cache if xp_idx_cache is not None else ClauseSniper._build_xp_idx(xp_table)
         offers = offer_map or {}
         locked_sell = sell_locked_ids or set()
         untouchables = untouchable_ids or set()
@@ -520,12 +522,14 @@ class PortfolioOptimizer:
         force_sell_ids: Optional[Set[int]] = None,
         blacklist_buy_ids: Optional[Set[int]] = None,
         priority_target_ids: Optional[Set[int]] = None,
+        causal_standings_ctx: Optional[Dict[str, Any]] = None,
+        llm_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Full daily autonomous decision cycle (v3):
-          Step 1: Scarcity & Multi-Round Hold-vs-Sell NPV + Offer-Roll Patience + Peak Offer Harvest
+        Full daily autonomous decision cycle:
+          Step 1: Scarcity & Multi-Round Hold-vs-Sell NPV + Offer-Roll Patience + Hold-Decay Rotation
           Step 2: Joint MILP Starting XI (+ Pre-Kickoff Debt Solvency when `must_be_solvent`)
-          Step 3: Top-5 Collateral-Backed Credit-Leveraged Acquisitions (Bids + Surgical Clauses)
+          Step 3: Posture- & Macro-Adapted Collateral-Backed Credit-Leveraged Acquisitions (Bids + Clauses)
           Step 4: 1:1 Defensive Shielding & Top-K (`<= 5`) Preventive Market Listings + Thesis Update
         """
         offers = dict(active_offers_map or {})
@@ -557,7 +561,7 @@ class PortfolioOptimizer:
             sq["player_id"] = pd.to_numeric(sq["player_id"], errors="coerce").fillna(0).astype(int)
             sq = sq.drop_duplicates(subset=["player_id"]).reset_index(drop=True)
 
-        xp_idx = xp_table.set_index("player_id").to_dict("index") if (xp_table is not None and not xp_table.empty) else {}
+        xp_idx = ClauseSniper._build_xp_idx(xp_table)
 
         # Build live MarketScarcityEngine
         scarcity_engine = MarketScarcityEngine(
@@ -568,7 +572,7 @@ class PortfolioOptimizer:
             clause_locked_ids=clause_locked_ids,
         )
 
-        # Macro Lifecycle Intelligence
+        # Macro Lifecycle Intelligence + Standings Posture Adaptation
         sc_summary = scarcity_engine.get_league_scarcity_summary()
         current_jn = int(phase_ctx.target_jornada_num if phase_ctx else 1)
         is_fifa = bool(phase_ctx.is_international_break if phase_ctx else False)
@@ -581,6 +585,49 @@ class PortfolioOptimizer:
             is_international_break=is_fifa,
         )
 
+        arch = self.archetype
+        posture_ctrl = StandingsPostureController(enabled=StrategySettings.POSTURE_ADAPTATION_ENABLED)
+        if arch is not None and not getattr(arch, "rank_adaptive", True):
+            posture_mods = PostureModifiers(posture="STATIC_ARCHETYPE")
+        elif isinstance(causal_standings_ctx, dict) and isinstance(causal_standings_ctx.get("posture_modifiers"), dict):
+            pm_raw = causal_standings_ctx["posture_modifiers"]
+            posture_mods = PostureModifiers(**{k: v for k, v in pm_raw.items() if k in PostureModifiers.__dataclass_fields__})
+        elif isinstance(causal_standings_ctx, dict) and "my_rank" in causal_standings_ctx:
+            posture_mods = posture_ctrl.compute_modifiers(
+                my_rank=int(causal_standings_ctx.get("my_rank", 1)),
+                total_managers=int(causal_standings_ctx.get("total_managers", 15)),
+                my_points=float(causal_standings_ctx.get("my_points", 0.0)),
+                leader_points=float(causal_standings_ctx.get("leader_points", 0.0)),
+                second_points=float(causal_standings_ctx.get("second_points", 0.0)),
+                podium_points=float(causal_standings_ctx.get("podium_points", 0.0)),
+                rounds_settled=int(causal_standings_ctx.get("rounds_settled", 0)),
+                my_net_worth=float(causal_standings_ctx.get("my_net_worth", 0.0)),
+                leader_net_worth=float(causal_standings_ctx.get("leader_net_worth", 0.0)),
+                llm_overrides=llm_overrides,
+            )
+        else:
+            posture_mods = PostureModifiers()
+
+        top_rivals: Set[str] = set()
+        if isinstance(causal_standings_ctx, dict) and causal_standings_ctx.get("top_rival_managers"):
+            top_rivals = {str(x) for x in causal_standings_ctx["top_rival_managers"] if str(x) != my_manager_name}
+
+        eff_points_w = float(macro_ctx.get("points_weight", 1.0)) * float(posture_mods.points_weight_mult)
+        eff_spec_w = float(macro_ctx.get("speculation_weight", 1.0)) * float(posture_mods.speculation_weight_mult)
+        eff_pt_val = float(macro_ctx.get("xp_point_value_eur", 60_000.0)) * float(posture_mods.points_weight_mult)
+        eff_core_aggr = float(getattr(arch, "core_bid_aggression", 1.0) if arch else 1.0) * float(posture_mods.bid_aggression_mult)
+        eff_spec_aggr = float(getattr(arch, "spec_bid_aggression", 1.0) if arch else 1.0) * float(posture_mods.spec_bid_aggression_mult)
+        eff_overbid_cap = float(getattr(arch, "auction_overbid_factor", 1.0) if arch else 1.0) * float(posture_mods.overbid_cap_mult)
+        eff_credit_aggr = float(getattr(arch, "credit_utilization_aggression", 1.0) if arch else 1.0) * float(posture_mods.credit_usage_mult)
+        eff_reserve_buf = int(getattr(arch, "reserve_buffer_eur", 0) if arch else 0)
+
+        eff_max_squad = self.max_squad_size
+        if arch is not None and arch.lifecycle_driven:
+            if macro_ctx["phase"] == SeasonPhase.EARLY_EXPANSION.value:
+                eff_max_squad = min(int(self.rules.team_max_size), max(self.max_squad_size, self.max_squad_size + 2))
+            elif macro_ctx["phase"] == SeasonPhase.ENDGAME_RUNIN.value:
+                eff_max_squad = max(12, min(self.max_squad_size, self.max_squad_size - 2))
+
         # Baseline MILP XI before sales to identify current XI starters & bench backup xP per line
         base_milp = self.solve_joint_lineup_and_solvency_milp(
             squad_df=sq,
@@ -588,22 +635,39 @@ class PortfolioOptimizer:
             efr_map=efr_map,
             current_cash=current_cash,
             must_be_solvent=False,
+            xp_idx_cache=xp_idx,
         )
         core_xi_ids = {s["player_id"] for s in base_milp["lineup_slots"]}
 
+        # Pre-extract squad column lists ONCE (avoids multiple O(N) df.iterrows() calls!)
+        sq_pids = sq["player_id"].tolist() if not sq.empty else []
+        sq_pos = sq["posicion"].tolist() if (not sq.empty and "posicion" in sq.columns) else [""] * len(sq_pids)
+        sq_nom = sq["nombre"].tolist() if (not sq.empty and "nombre" in sq.columns) else [""] * len(sq_pids)
+        sq_eq = sq["equipo"].tolist() if (not sq.empty and "equipo" in sq.columns) else [""] * len(sq_pids)
+        sq_est = sq["estado"].tolist() if (not sq.empty and "estado" in sq.columns) else ["ok"] * len(sq_pids)
+        sq_pr = sq["precio"].tolist() if (not sq.empty and "precio" in sq.columns) else [150_000] * len(sq_pids)
+        sq_sub = sq["subida_24h"].tolist() if (not sq.empty and "subida_24h" in sq.columns) else [0] * len(sq_pids)
+        sq_cl = sq["clausula_actual"].tolist() if (not sq.empty and "clausula_actual" in sq.columns) else [0] * len(sq_pids)
+        sq_acq = sq["acquired_date"].tolist() if (not sq.empty and "acquired_date" in sq.columns) else [""] * len(sq_pids)
+        sq_pc = (
+            sq["precio_compra"].tolist()
+            if (not sq.empty and "precio_compra" in sq.columns)
+            else (sq["purchase_price"].tolist() if (not sq.empty and "purchase_price" in sq.columns) else [0] * len(sq_pids))
+        )
+
         # Compute realistic bench backup xP per line (`GK`, `DF`, `MF`, `FW`)
         bench_xp_by_line: Dict[str, float] = {"GK": 0.0, "DF": 2.2, "MF": 2.4, "FW": 2.2}
-        if not sq.empty:
+        if sq_pids:
+            b_vals_map: Dict[str, List[float]] = {ln: [] for ln in LINES}
+            for pid, pos_s in zip(sq_pids, sq_pos):
+                if pid in core_xi_ids:
+                    continue
+                x_inf = xp_idx.get(pid, {})
+                if x_inf.get("is_available", True):
+                    for ln in self.xp_engine.get_valid_lines(pid, pos_s):
+                        b_vals_map[ln].append(float(x_inf.get(f"xp_{ln}", 0.0)))
             for ln in LINES:
-                b_vals = []
-                for _, r in sq.iterrows():
-                    pid = int(r["player_id"])
-                    if pid in core_xi_ids:
-                        continue
-                    x_inf = xp_idx.get(pid, {})
-                    if x_inf.get("is_available", True) and ln in self.xp_engine.get_valid_lines(pid, r.get("posicion", "")):
-                        b_vals.append(float(x_inf.get(f"xp_{ln}", 0.0)))
-                bench_xp_by_line[ln] = max(b_vals) if b_vals else (0.0 if ln == "GK" else 1.8)
+                bench_xp_by_line[ln] = max(b_vals_map[ln]) if b_vals_map[ln] else (0.0 if ln == "GK" else 1.8)
 
         prev_theses = memory_ledger.get_asset_theses_map() if memory_ledger is not None else {}
         role_by_pid: Dict[int, str] = {}
@@ -611,24 +675,25 @@ class PortfolioOptimizer:
         theses_rows: List[Dict[str, Any]] = []
 
         # Evaluate Asset Role & Multi-Round Hold-vs-Sell NPV for every owned player
-        if not sq.empty:
-            pt_shadow = max(65_000.0, float(self.rules.bonus_per_point_eur) * 1.7)
-            for _, r in sq.iterrows():
-                pid = int(r["player_id"])
-                price = safe_num(r.get("precio", 150_000), 150_000.0)
-                subida = safe_num(r.get("subida_24h", 0), 0.0)
+        if sq_pids:
+            pt_shadow = max(65_000.0, float(self.rules.bonus_per_point_eur) * 1.7, eff_pt_val)
+            for pid, pos_s, nom_s, eq_s, est_s, pr_raw, sub_raw, cl_raw, acq_s, pc_raw in zip(
+                sq_pids, sq_pos, sq_nom, sq_eq, sq_est, sq_pr, sq_sub, sq_cl, sq_acq, sq_pc
+            ):
+                price = safe_num(pr_raw, 150_000.0)
+                subida = safe_num(sub_raw, 0.0)
                 efr_72h = float(efr_map.get(pid, subida * 2.4))
                 xp_info = xp_idx.get(pid, {})
                 is_avail = bool(xp_info.get("is_available", True))
-                estado = str(xp_info.get("estado", r.get("estado", "ok")) or "ok")
+                estado = str(xp_info.get("estado", est_s) or "ok")
                 xp_best = float(xp_info.get("xp_best", 0.0))
                 xp_healthy = float(xp_info.get("xp_healthy", max(xp_best, 2.5)))
                 p_start_h = float(xp_info.get("p_start_healthy", xp_info.get("p_start", 0.5)))
-                valid_lines = self.xp_engine.get_valid_lines(pid, r.get("posicion", ""))
+                valid_lines = self.xp_engine.get_valid_lines(pid, pos_s)
                 best_ln = str(xp_info.get("best_line", sorted(valid_lines)[0] if valid_lines else "MF"))
 
                 offer_or_est = float(offers[pid]) if (pid in offers and offers[pid] > 0) else price * 0.99
-                purchase_p = safe_num(r.get("precio_compra", prev_theses.get(pid, {}).get("precio_compra", 0)), 0.0)
+                purchase_p = safe_num(pc_raw or prev_theses.get(pid, {}).get("precio_compra", 0), 0.0)
 
                 npv_res = evaluate_hold_vs_sell_npv(
                     player_id=pid,
@@ -645,7 +710,7 @@ class PortfolioOptimizer:
                     bench_backup_xp=bench_xp_by_line.get(best_ln, 2.2),
                     scarcity_engine=scarcity_engine,
                     df_calendar=df_calendar,
-                    team_name=str(r.get("equipo", xp_info.get("equipo", ""))),
+                    team_name=str(eq_s or xp_info.get("equipo", "")),
                     purchase_price=purchase_p if purchase_p > 0 else None,
                     point_shadow_value_eur=pt_shadow,
                     clauses_open=eff_clauses_open,
@@ -673,12 +738,12 @@ class PortfolioOptimizer:
 
                 theses_rows.append({
                     "player_id": pid,
-                    "nombre": str(r.get("nombre", "")),
+                    "nombre": str(nom_s or ""),
                     "rol": role,
-                    "fecha_compra": str(r.get("acquired_date", prev_theses.get(pid, {}).get("fecha_compra", "")) or ""),
+                    "fecha_compra": str(acq_s or prev_theses.get(pid, {}).get("fecha_compra", "") or ""),
                     "precio_compra": int(round(purchase_p if purchase_p > 0 else price)),
                     "precio_actual": int(round(price)),
-                    "clausula_actual": int(round(safe_num(r.get("clausula_actual", 0), 0.0) or self.rules.compute_official_clause(max(purchase_p, price)))),
+                    "clausula_actual": int(round(safe_num(cl_raw, 0.0) or self.rules.compute_official_clause(max(purchase_p, price)))),
                     "coste_reposicion": npv_res["replacement_cost_eur"],
                     "escasez_tier": npv_res["scarcity_tier"],
                     "npv_hold": npv_res["npv_hold_eur"],
@@ -694,13 +759,14 @@ class PortfolioOptimizer:
                     ),
                 })
 
-        # Step 1: Microeconomic NPV Disposals, Multi-Day Offer-Roll Patience & Peak Offer Arbitrage
+        # Step 1: Microeconomic NPV Disposals, Multi-Day Offer-Roll Patience & Hold-Decay Rotation
         routine_sales: List[Dict[str, Any]] = []
         sold_ids: Set[int] = set()
         working_cash = float(current_cash)
+        spec_max_days = int(getattr(arch, "speculative_hold_days_max", StrategySettings.SPECULATIVE_HOLD_DAYS_MAX) if arch else StrategySettings.SPECULATIVE_HOLD_DAYS_MAX)
+        hold_decay_eur = int(getattr(arch, "hold_decay_penalty_eur", 80_000) if arch else 80_000)
 
-        if not sq.empty:
-            # Measure actual upgrade ceiling available on TODAY's live market board (prevents blind liquidation into empty boards!)
+        if sq_pids:
             live_board_best_xp_by_line: Dict[str, float] = {ln: 0.0 for ln in LINES}
             if market_listings_df is not None and not market_listings_df.empty and "player_id" in market_listings_df.columns:
                 for raw_lpid in market_listings_df["player_id"].tolist():
@@ -715,33 +781,30 @@ class PortfolioOptimizer:
                             if v_ln > live_board_best_xp_by_line[ln]:
                                 live_board_best_xp_by_line[ln] = v_ln
 
-            fit_count = sum(
-                1 for _, r in sq.iterrows() if xp_idx.get(int(r["player_id"]), {}).get("is_available", True)
-            )
-            gk_count = sum(
-                1 for _, r in sq.iterrows()
-                if "GK" in self.xp_engine.get_valid_lines(int(r["player_id"]), r.get("posicion", ""))
-            )
+            fit_count = sum(1 for pid in sq_pids if xp_idx.get(pid, {}).get("is_available", True))
+            gk_count = sum(1 for pid, pos_s in zip(sq_pids, sq_pos) if "GK" in self.xp_engine.get_valid_lines(pid, pos_s))
 
-            for _, r in sq.iterrows():
-                pid = int(r["player_id"])
+            for pid, pos_s, nom_s, est_s, pr_raw, sub_raw, acq_s, pc_raw in zip(
+                sq_pids, sq_pos, sq_nom, sq_est, sq_pr, sq_sub, sq_acq, sq_pc
+            ):
                 if pid in locked_sell or pid in untouchables or pid not in offers:
                     continue
                 offer_amt = float(offers[pid])
                 if offer_amt <= 0:
                     continue
 
-                price = safe_num(r.get("precio", 150_000), 150_000.0)
-                subida = safe_num(r.get("subida_24h", 0), 0.0)
+                price = safe_num(pr_raw, 150_000.0)
+                subida = safe_num(sub_raw, 0.0)
                 efr_72h = float(efr_map.get(pid, subida * 2.4))
                 xp_info = xp_idx.get(pid, {})
                 is_avail = bool(xp_info.get("is_available", True))
                 xp_best = float(xp_info.get("xp_best", 0.0))
-                valid_lns_p = self.xp_engine.get_valid_lines(pid, r.get("posicion", ""))
+                xp_healthy = float(xp_info.get("xp_healthy", max(xp_best, 2.5)))
+                valid_lns_p = self.xp_engine.get_valid_lines(pid, pos_s)
                 is_gk = "GK" in valid_lns_p
                 role = role_by_pid.get(pid, "BENCH_PATCH")
                 npv_res = npv_by_pid.get(pid, {})
-                purchase_p = safe_num(r.get("precio_compra", prev_theses.get(pid, {}).get("precio_compra", 0)), 0.0)
+                purchase_p = safe_num(pc_raw or prev_theses.get(pid, {}).get("precio_compra", 0), 0.0)
 
                 if is_gk and gk_count <= 1:
                     continue
@@ -751,11 +814,10 @@ class PortfolioOptimizer:
                 offer_pct = (offer_amt - price) / max(price, 1.0)
                 prev_rolls = int(prev_theses.get(pid, {}).get("offer_rolls", 0) or 0)
 
-                acq_date = r.get("acquired_date", None)
                 held_days = 99
-                if acq_date is not None and str(acq_date) not in ("", "nan", "None"):
+                if acq_s is not None and str(acq_s) not in ("", "nan", "None"):
                     try:
-                        held_days = (pd.Timestamp(current_date) - pd.Timestamp(str(acq_date))).days
+                        held_days = (pd.Timestamp(current_date) - pd.Timestamp(str(acq_s))).days
                     except (ValueError, TypeError):
                         held_days = 99
 
@@ -764,15 +826,14 @@ class PortfolioOptimizer:
                 is_depreciating = (efr_72h <= -35_000.0) or (subida <= -15_000.0)
                 board_best_here = max((live_board_best_xp_by_line.get(ln, 0.0) for ln in valid_lns_p), default=0.0)
                 needs_slot_or_liquidity = (
-                    (len(sq) - len(sold_ids) >= self.max_squad_size - 1)
+                    (len(sq_pids) - len(sold_ids) >= eff_max_squad - 1)
                     or (working_cash < 2_500_000.0 and board_best_here > xp_best + 0.85)
                 )
 
-                # Tactical Injury Intelligence:
                 inj_decision = InjuryTacticalDecisionEngine.decide(
                     player_id=pid,
-                    nombre=str(r.get("nombre", "")),
-                    estado=str(r.get("estado", xp_info.get("estado", "ok"))),
+                    nombre=str(nom_s or ""),
+                    estado=str(est_s or xp_info.get("estado", "ok")),
                     absence_days_est=int(npv_res.get("absence_days_est", 0)),
                     missed_rounds_calendar=int(npv_res.get("missed_rounds_est", 0)),
                     is_fifa_break=bool(macro_ctx.get("is_fifa_break", False)),
@@ -783,13 +844,11 @@ class PortfolioOptimizer:
                     player_healthy_xp=float(xp_healthy),
                 )
 
-                # Pillar Lock: strict protection of franchise pillars against routine Computer liquidations
                 is_pillar = bool(
                     self.protect_pillars_absolute
                     and (role == "FRANCHISE_CORE" or (xp_healthy >= 5.8 and price >= 11_000_000.0))
                 )
 
-                # FIFA Break Hold Momentum: hold rising assets during international break (0 match points at risk)
                 if macro_ctx.get("fifa_break_hold_momentum", False) and efr_72h >= 20_000.0 and not is_forced:
                     continue
 
@@ -797,8 +856,20 @@ class PortfolioOptimizer:
                     if inj_decision["action"] != InjuryAction.SELL_CASH_OUT:
                         continue
 
-                # Rule 1A: Microeconomic NPV Disposal (`NPV_SELL > NPV_HOLD` across real calendar & replacement cost)
-                # Unavailable/injured players follow InjuryTacticalDecisionEngine recommendation!
+                # Stale speculative flip hold-decay tax (`speculative_hold_days_max` + `hold_decay_penalty_eur`)
+                is_hold_decay_sell = False
+                if (
+                    is_avail
+                    and role in ("SPECULATIVE_FLIP", "BENCH_PATCH")
+                    and pid not in core_xi_ids
+                    and not is_fifa
+                    and held_days > spec_max_days
+                    and efr_72h < 65_000.0
+                ):
+                    decay_tax = (held_days - spec_max_days) * hold_decay_eur
+                    if offer_amt >= (npv_res.get("npv_hold_eur", price) - decay_tax) and offer_pct >= -0.025:
+                        is_hold_decay_sell = True
+
                 min_hold_days = 8 if was_claused_premium else 2
                 can_proactively_rotate = (not is_avail) or is_depreciating or needs_slot_or_liquidity
 
@@ -809,12 +880,12 @@ class PortfolioOptimizer:
                         bool(npv_res.get("recommend_sell", False))
                         and can_proactively_rotate
                         and held_days >= min_hold_days
-                    )
+                    ) or is_hold_decay_sell
 
                 if is_npv_disposal and not is_forced:
-                    # Multi-Day Offer-Roll Patience: reject lowball Computer offers (<-1.8%) when >=2 days to kickoff!
                     if (
                         is_avail
+                        and not is_hold_decay_sell
                         and offer_pct < -0.018
                         and eff_days_to_kickoff >= 2
                         and prev_rolls < 2
@@ -822,7 +893,6 @@ class PortfolioOptimizer:
                     ):
                         is_npv_disposal = False
 
-                # Rule 1B: Peak Computer Offer Arbitrage (+3.2%..+5.0% instant risk-free premium on non-core flip)
                 is_peak_harvest = (
                     role in ("SPECULATIVE_FLIP", "BENCH_PATCH")
                     and pid not in core_xi_ids
@@ -840,11 +910,15 @@ class PortfolioOptimizer:
                     reason = (
                         "USER_DIRECTIVE_SELL"
                         if is_forced
-                        else ("NPV_OPTIMAL_DISPOSAL" if is_npv_disposal else "PEAK_OFFER_ARBITRAGE")
+                        else (
+                            "HOLD_DECAY_ROTATION"
+                            if (is_hold_decay_sell and not bool(npv_res.get("recommend_sell", False)))
+                            else ("NPV_OPTIMAL_DISPOSAL" if is_npv_disposal else "PEAK_OFFER_ARBITRAGE")
+                        )
                     )
                     routine_sales.append({
                         "player_id": pid,
-                        "nombre": str(r.get("nombre", "")),
+                        "nombre": str(nom_s or ""),
                         "sale_price": int(round(offer_amt)),
                         "market_price": int(round(price)),
                         "offer_premium_pct": round(offer_pct * 100.0, 2),
@@ -878,6 +952,7 @@ class PortfolioOptimizer:
             sell_locked_ids=locked_sell,
             untouchable_ids=untouchables,
             core_pillar_ids=core_pillar_ids,
+            xp_idx_cache=xp_idx,
         )
 
         solvency_sales = milp_sol["sales_to_execute"]
@@ -907,62 +982,84 @@ class PortfolioOptimizer:
             max_official_credit_bid = working_cash + self.credit_limit_ratio * rem_squad_value
 
         if not can_use_credit:
-            safe_acquisition_budget = max(0.0, working_cash)
+            safe_acquisition_budget = max(0.0, working_cash - eff_reserve_buf)
             top_k_liquid_collateral = 0.0
         else:
-            # Because Biwenger caps simultaneous market sales at `market_max_user_sales` (5),
-            # our pre-kickoff liquidation capacity is bounded by the TOP K non-core players at 0.95 * VM!
             k_slots = max(1, int(self.rules.market_max_user_sales))
             non_core_values: List[float] = []
             if not final_sq.empty:
-                for _, r in final_sq.iterrows():
-                    pid = int(r["player_id"])
-                    if eff_days_to_kickoff <= 1 and pid in locked_sell and int(self.rules.days_for_sale) > 1:
+                for pid, pr_raw in zip(final_sq["player_id"].tolist(), final_sq["precio"].tolist()):
+                    pid_i = int(pid)
+                    if eff_days_to_kickoff <= 1 and pid_i in locked_sell and int(self.rules.days_for_sale) > 1:
                         continue
-                    rl = role_by_pid.get(pid, "BENCH_PATCH")
-                    if rl != "FRANCHISE_CORE" and pid not in untouchables:
-                        # Prioritize bench/flips (95% worst-case Computer offer) and discount structural starters (55%)
+                    rl = role_by_pid.get(pid_i, "BENCH_PATCH")
+                    if rl != "FRANCHISE_CORE" and pid_i not in untouchables:
                         w = 0.95 if rl in ("SPECULATIVE_FLIP", "BENCH_PATCH") else 0.55
-                        non_core_values.append(safe_num(r.get("precio", 0), 0.0) * w)
+                        non_core_values.append(safe_num(pr_raw, 0.0) * w)
             non_core_values.sort(reverse=True)
             top_k_liquid_collateral = float(sum(non_core_values[:k_slots]))
-            leverage_factor = 0.84 if eff_days_to_kickoff >= 2 else 0.72
+            base_lev = 0.84 if eff_days_to_kickoff >= 2 else 0.72
+            leverage_factor = float(np.clip(base_lev * eff_credit_aggr, 0.50, 0.96))
             safe_debt_cap = top_k_liquid_collateral * leverage_factor
-            safe_acquisition_budget = min(max_official_credit_bid, working_cash + safe_debt_cap)
+            safe_acquisition_budget = min(max_official_credit_bid, working_cash + safe_debt_cap - eff_reserve_buf)
             safe_acquisition_budget = max(0.0, safe_acquisition_budget)
 
-        owned_ids = set(final_sq["player_id"].tolist()) if not final_sq.empty else set()
-        open_roster_slots = max(0, self.max_squad_size - len(owned_ids))
+        owned_ids = {int(x) for x in final_sq["player_id"].tolist()} if not final_sq.empty else set()
+        open_roster_slots = max(0, eff_max_squad - len(owned_ids))
 
         # 3A. Evaluate Market Auction Candidates (`AuctionBidModel`)
         bid_candidates: List[Dict[str, Any]] = []
+        prio_pos = {str(p).upper() for p in (posture_mods.extra.get("priority_positions") or [])}
         if open_roster_slots > 0 and safe_acquisition_budget >= 150_000 and market_listings_df is not None and not market_listings_df.empty:
-            mkt_all_idx = (
-                df_market_all.assign(pid_int=pd.to_numeric(df_market_all["player_id"], errors="coerce").fillna(0).astype(int))
-                .drop_duplicates(subset=["pid_int"], keep="last")
-                .set_index("pid_int")
-                .to_dict("index")
-            )
-            for _, lr in market_listings_df.iterrows():
+            # Fast market column lookup (avoids full df_market_all to_dict('index') & iterrows)
+            mkt_pids = df_market_all["player_id"].tolist()
+            mkt_nom = df_market_all["nombre"].tolist() if "nombre" in df_market_all.columns else [""] * len(mkt_pids)
+            mkt_pr = df_market_all["precio"].tolist() if "precio" in df_market_all.columns else [0] * len(mkt_pids)
+            mkt_sub = df_market_all["subida_24h"].tolist() if "subida_24h" in df_market_all.columns else [0] * len(mkt_pids)
+            mkt_fast: Dict[int, Tuple[str, float, float]] = {}
+            for mp, mn, mpr, msub in zip(mkt_pids, mkt_nom, mkt_pr, mkt_sub):
                 try:
-                    pid = int(float(lr["player_id"]))
-                except (KeyError, ValueError, TypeError):
+                    mpi = int(float(mp))
+                    if mpi > 0:
+                        mkt_fast[mpi] = (str(mn or ""), safe_num(mpr, 0.0), safe_num(msub, 0.0))
+                except (TypeError, ValueError):
+                    continue
+
+            l_pids = market_listings_df["player_id"].tolist()
+            l_pr = market_listings_df["precio_mercado_dia"].tolist() if "precio_mercado_dia" in market_listings_df.columns else [0] * len(l_pids)
+            l_ask = (
+                market_listings_df["ask_price"].tolist()
+                if "ask_price" in market_listings_df.columns
+                else (market_listings_df["precio_salida_o_oferta"].tolist() if "precio_salida_o_oferta" in market_listings_df.columns else [0] * len(l_pids))
+            )
+            l_sel = (
+                market_listings_df["seller_name"].tolist()
+                if "seller_name" in market_listings_df.columns
+                else (market_listings_df["vendedor_o_origen"].tolist() if "vendedor_o_origen" in market_listings_df.columns else ["Mercado"] * len(l_pids))
+            )
+            l_nom = market_listings_df["jugador"].tolist() if "jugador" in market_listings_df.columns else [""] * len(l_pids)
+
+            for raw_pid, raw_lpr, raw_lask, raw_lsel, raw_lnom in zip(l_pids, l_pr, l_ask, l_sel, l_nom):
+                try:
+                    pid = int(float(raw_pid))
+                except (ValueError, TypeError):
                     continue
                 if pid <= 0 or pid in owned_ids or pid in blacklist_buys:
                     continue
 
-                p_base = mkt_all_idx.get(pid, {})
                 xp_info = xp_idx.get(pid)
                 if not xp_info or not xp_info.get("is_available", False):
                     continue
 
-                vm = safe_num(p_base.get("precio", lr.get("precio_mercado_dia", 0)), 0.0)
-                ask = safe_num(lr.get("ask_price", lr.get("precio_salida_o_oferta", vm)), vm)
-                subida = safe_num(p_base.get("subida_24h", 0), 0.0)
+                fast_m = mkt_fast.get(pid)
+                vm = fast_m[1] if (fast_m and fast_m[1] > 0) else safe_num(raw_lpr, 0.0)
                 if vm <= 0:
                     continue
+                ask = safe_num(raw_lask, vm)
+                subida = fast_m[2] if fast_m else 0.0
+                nombre_b = fast_m[0] if (fast_m and fast_m[0]) else str(raw_lnom or f"ID {pid}")
 
-                seller = str(lr.get("seller_name", lr.get("vendedor_o_origen", "Mercado")) or "Mercado").strip()
+                seller = str(raw_lsel or "Mercado").strip()
                 if seller == my_manager_name:
                     continue
                 is_rival = seller not in ("Mercado", "Libre", "None", "nan", "")
@@ -970,7 +1067,9 @@ class PortfolioOptimizer:
                 best_ln = str(xp_info.get("best_line", xp_info.get("natural_pos", "MF")))
                 delta_xp = max(0.0, float(xp_info.get("xp_best", 0.0)) - xi_floor_by_pos.get(best_ln, 3.2))
                 if pid in priority_buys:
-                    delta_xp += 0.45  # User strategic priority boost
+                    delta_xp += 0.45
+                elif best_ln in prio_pos and delta_xp >= 0.20:
+                    delta_xp += 0.15
                 efr_72h = float(efr_map.get(pid, subida * 2.4))
 
                 bid_eval = self.auction_model.compute_optimal_bid(
@@ -984,7 +1083,17 @@ class PortfolioOptimizer:
                     seller_is_rival=is_rival,
                     rival_seller_in_debt=(seller in indebted_rivals),
                     league_median_max_bid=league_median_max_bid,
-                    idle_cash_eur=max(0.0, working_cash),
+                    idle_cash_eur=max(0.0, working_cash - eff_reserve_buf),
+                    xp_point_value_eur=eff_pt_val,
+                    points_weight=eff_points_w,
+                    speculation_weight=eff_spec_w,
+                    efr_weight=float(getattr(arch, "efr_weight", 1.0) if arch else 1.0),
+                    min_efr_trigger=float(getattr(arch, "min_efr_trigger", macro_ctx.get("min_efr_threshold", 40_000)) if arch else macro_ctx.get("min_efr_threshold", 40_000)),
+                    core_bid_aggression=eff_core_aggr,
+                    spec_bid_aggression=eff_spec_aggr,
+                    xp_horizon_rounds=float(getattr(arch, "xp_horizon_rounds", 7.5) if arch else 7.5),
+                    overbid_cap_mult=eff_overbid_cap,
+                    p_start_floor_delta=float(posture_mods.p_start_floor_delta),
                 )
 
                 if not bid_eval["should_bid"]:
@@ -996,7 +1105,7 @@ class PortfolioOptimizer:
                 bid_candidates.append({
                     "action_type": "MARKET_BID",
                     "player_id": pid,
-                    "nombre": str(p_base.get("nombre", lr.get("jugador", f"ID {pid}"))),
+                    "nombre": nombre_b,
                     "position": best_ln,
                     "seller": seller,
                     "market_price": int(round(vm)),
@@ -1009,14 +1118,20 @@ class PortfolioOptimizer:
                     "score_per_euro": float(bid_eval["expected_surplus"]) / max(b_amt, 250_000),
                     "regime": bid_eval["regime"],
                     "win_prob_est": bid_eval["win_prob_est"],
-                    "requires_human_approval": False,  # Autonomous in SEMI_AUTO (with user notification)
+                    "requires_human_approval": False,
                 })
 
-        # 3B. Evaluate Surgical Scarcity Clause Snipes (ONLY when `eff_clauses_open` & positive cash!)
-        clause_frac = float(macro_ctx.get("clause_budget_fraction", 0.0))
-        if self.archetype is not None:
-            clause_frac = min(clause_frac, max(0.0, 1.0 - float(self.archetype.clause_cash_reserve_pct)))
-        clause_budget = max(0.0, (working_cash - 300_000.0) * clause_frac) if eff_clauses_open else 0.0
+        # 3B. Evaluate Surgical Scarcity Clause Snipes (FIXED non-inverted `clause_cash_reserve_pct`!)
+        macro_cl_frac = float(macro_ctx.get("clause_budget_fraction", 0.30))
+        if arch is not None:
+            arch_cl_pct = float(arch.clause_cash_reserve_pct)
+            if arch.lifecycle_driven:
+                clause_frac = min(1.0, 0.45 * macro_cl_frac + 0.55 * arch_cl_pct)
+            else:
+                clause_frac = arch_cl_pct
+        else:
+            clause_frac = macro_cl_frac
+        clause_budget = max(0.0, (working_cash - 300_000.0 - eff_reserve_buf) * clause_frac) if eff_clauses_open else 0.0
         clause_targets = self.clause_sniper.scan_offensive_targets(
             df_market_today=df_market_all,
             xp_table=xp_table,
@@ -1026,10 +1141,15 @@ class PortfolioOptimizer:
             locked_player_ids=(clause_locked_ids or set()) | owned_ids,
             recent_match_shock_map=recent_match_shock_map,
             max_budget=min(max_official_credit_bid, max(0.0, clause_budget)),
-            idle_cash_eur=max(0.0, working_cash),
+            idle_cash_eur=max(0.0, working_cash - eff_reserve_buf),
             clauses_open=eff_clauses_open,
             scarcity_engine=scarcity_engine,
             blacklist_ids=blacklist_buys,
+            xp_idx=xp_idx,
+            xp_point_value_eur=eff_pt_val,
+            clause_alpha_floor_delta_eur=int(posture_mods.clause_alpha_floor_delta_eur),
+            priority_positions=posture_mods.extra.get("priority_positions"),
+            top_rival_managers=top_rivals,
         )
 
         clause_actions: List[Dict[str, Any]] = []
@@ -1050,7 +1170,7 @@ class PortfolioOptimizer:
                 "score_per_euro": float(ct["alpha_roi"]),
                 "regime": ct["snipe_type"],
                 "win_prob_est": 1.0,
-                "requires_human_approval": True,  # Always gated by human in SEMI_AUTO!
+                "requires_human_approval": True,
             })
 
         # 3C. Joint Hierarchical Allocation
@@ -1074,9 +1194,12 @@ class PortfolioOptimizer:
 
         combined_acqs = sorted(clause_actions + bid_candidates, key=_acq_tier_key, reverse=True)
 
-        max_bids_allowed = min(
-            self.archetype.max_simultaneous_bids if self.archetype else 5,
-            int(macro_ctx.get("max_simultaneous_bids", 5)),
+        arch_bids = int(arch.max_simultaneous_bids) if arch else 5
+        macro_bids = int(macro_ctx.get("max_simultaneous_bids", 5))
+        max_bids_allowed = (
+            arch_bids
+            if (arch is not None and not arch.lifecycle_driven)
+            else max(2, min(7, int(round(0.65 * arch_bids + 0.35 * macro_bids))))
         )
         selected_bids: List[Dict[str, Any]] = []
         selected_clauses: List[Dict[str, Any]] = []
@@ -1102,7 +1225,6 @@ class PortfolioOptimizer:
                 rem_slots -= 1
                 seen_acq_pids.add(pid)
             else:
-                # Day immediately before kickoff (`eff_days_to_kickoff <= 1`): use 1.0 worst-case fill so Friday solvency is 100% guaranteed!
                 reserve_weight = 1.0 if (not can_use_credit or eff_days_to_kickoff <= 1) else max(0.68, float(acq["win_prob_est"]))
                 eff_cost = amt * reserve_weight
                 if amt <= max_official_credit_bid and eff_cost <= rem_budget and len(selected_bids) < max_bids_allowed:
@@ -1120,10 +1242,13 @@ class PortfolioOptimizer:
             xp_table=xp_table,
             efr_map=efr_map,
             max_rival_purchasing_power=max_rival_purchasing_power,
-            available_cash_surplus=max(0.0, post_clause_cash - worst_case_bid_outflow),
+            available_cash_surplus=max(0.0, post_clause_cash - worst_case_bid_outflow - eff_reserve_buf),
             clauses_open=eff_clauses_open,
             scarcity_engine=scarcity_engine,
             clause_locked_ids=clause_locked_ids,
+            xp_idx=xp_idx,
+            shield_budget_pct=float(getattr(arch, "shield_rival_threat_pct", 0.18) if arch else 0.18),
+            shield_threshold_mult=float(posture_mods.shield_threshold_mult),
         )
         for sh in shields:
             sh["requires_human_approval"] = True
@@ -1159,7 +1284,9 @@ class PortfolioOptimizer:
             "defensive_shields": shields,
             "preventive_listings": preventive_listings,
             "asset_theses": [t for t in theses_rows if int(t["player_id"]) not in sold_ids],
-            "scarcity_summary": scarcity_engine.get_league_scarcity_summary(),
+            "scarcity_summary": sc_summary,
+            "posture_state": posture_mods.to_dict(),
+            "macro_context": macro_ctx,
             "lineup": {
                 "formation": milp_sol["formation"],
                 "player_ids": milp_sol["lineup_ids"],

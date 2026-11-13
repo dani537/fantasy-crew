@@ -219,7 +219,7 @@ PROVIDER_BASE_URLS = {
 }
 
 DEFAULT_PROVIDER_MODELS = {
-    "gemini": "gemini-3.8-flash",
+    "gemini": "gemini-4-hydrogen",
     "openrouter": "openai/gpt-6-luna-pro",
     "deepseek": "deepseek-chat",
     "openai": "gpt-6-luna-pro",
@@ -274,7 +274,7 @@ class _GeneralSettingsMeta(type):
     @property
     def LLM_MODEL_DAILY(cls) -> str:
         if cls.LLM_PROVIDER == "gemini":
-            return _get_config_var("GEMINI_MODEL_DAILY", "gemini-3.8-flash")
+            return _get_config_var("GEMINI_MODEL_DAILY", "gemini-4-hydrogen")
         return _get_config_var("LLM_MODEL_DAILY", cls.LLM_MODEL)
 
     @property
@@ -339,17 +339,52 @@ class _StrategySettingsMeta(type):
 
     @property
     def CLAUSE_POLICY(cls) -> str:
-        """COMPETITIVE_VORP (default), SURGICAL_SCARCITY, AGGRESSIVE, or DISABLED."""
-        pol = _get_config_var("CLAUSE_POLICY", "COMPETITIVE_VORP").upper()
-        return pol if pol in ("COMPETITIVE_VORP", "SURGICAL_SCARCITY", "AGGRESSIVE", "DISABLED") else "COMPETITIVE_VORP"
+        """COMPETITIVE_VORP (default), VALUE_COMPOUND_VORP, SURGICAL_SCARCITY, AGGRESSIVE, or DISABLED."""
+        pol = _get_config_var("CLAUSE_POLICY", "VALUE_COMPOUND_VORP").upper()
+        return pol if pol in ("COMPETITIVE_VORP", "VALUE_COMPOUND_VORP", "SURGICAL_SCARCITY", "AGGRESSIVE", "DISABLED") else "COMPETITIVE_VORP"
 
     @property
     def AUTONOMOUS_CLAUSE_MAX_EUR(cls) -> int:
-        """Maximum clause amount executed autonomously in FULL_AUTO when cash is 100% available."""
+        """Baseline flat clause threshold used when computing net-equity floor or SEMI_AUTO alerts."""
         try:
             return int(float(_get_config_var("AUTONOMOUS_CLAUSE_MAX_EUR", "6000000")))
         except ValueError:
             return 6_000_000
+
+    @property
+    def AUTONOMOUS_CLAUSE_MAX_PCT(cls) -> float:
+        """Maximum share of net equity allowed on a single FULL_AUTO clause snipe (default: 45%)."""
+        try:
+            return float(_get_config_var("AUTONOMOUS_CLAUSE_MAX_PCT", "0.45"))
+        except ValueError:
+            return 0.45
+
+    @property
+    def AUTONOMOUS_CLAUSE_HARD_CAP_EUR(cls) -> int:
+        """Absolute hard euro ceiling per autonomous clause snipe in FULL_AUTO (default: 25M €)."""
+        try:
+            return int(float(_get_config_var("AUTONOMOUS_CLAUSE_HARD_CAP_EUR", "25000000")))
+        except ValueError:
+            return 25_000_000
+
+    @property
+    def POSTURE_ADAPTATION_ENABLED(cls) -> bool:
+        """Enables causal standings-aware posture adaptation (PROTECT_LEAD / TACTICAL_PRESS / ASYMMETRIC_CHASER)."""
+        return _get_config_var("POSTURE_ADAPTATION_ENABLED", "true").lower() in ("1", "true", "yes")
+
+    @property
+    def CLAUSE_TIMING_MODE(cls) -> str:
+        """Preferred clause execution timing: IMMEDIATE, PRE_LOCK_SURGICAL, or HYBRID."""
+        mode = _get_config_var("CLAUSE_TIMING_MODE", "HYBRID").upper()
+        return mode if mode in ("IMMEDIATE", "PRE_LOCK_SURGICAL", "HYBRID") else "HYBRID"
+
+    @property
+    def SPECULATIVE_HOLD_DAYS_MAX(cls) -> int:
+        """Maximum idle holding days for stalled speculative flips before forced rotation."""
+        try:
+            return int(_get_config_var("SPECULATIVE_HOLD_DAYS_MAX", "3"))
+        except ValueError:
+            return 3
 
     @property
     def PREVENTIVE_MARKET_LISTING(cls) -> bool:
@@ -370,14 +405,14 @@ class _StrategySettingsMeta(type):
     @property
     def MAX_SQUAD_SIZE(cls) -> int:
         try:
-            return int(_get_config_var("MAX_SQUAD_SIZE", "22"))
+            return int(_get_config_var("MAX_SQUAD_SIZE", "18"))
         except ValueError:
             return 22
 
     @property
     def ACTIVE_ARCHETYPE(cls) -> str:
         """Active quantitative strategy archetype (e.g. ADAPTIVE_LIFECYCLE, GALACTICOS_CORE, etc.)."""
-        return _get_config_var("ACTIVE_ARCHETYPE", "ADAPTIVE_LIFECYCLE")
+        return _get_config_var("ACTIVE_ARCHETYPE", "LIQUIDITY_VULTURE_PRO")
 
     @property
     def PROTECT_PILLARS_ABSOLUTE(cls) -> bool:
@@ -388,7 +423,7 @@ class _StrategySettingsMeta(type):
     def CLAUSE_RATIO_CAP(cls) -> float:
         """Maximum buyout multiplier willing to pay for victim player."""
         try:
-            return float(_get_config_var("CLAUSE_RATIO_CAP", "2.20"))
+            return float(_get_config_var("CLAUSE_RATIO_CAP", "1.95"))
         except ValueError:
             return 2.20
 
@@ -396,7 +431,7 @@ class _StrategySettingsMeta(type):
     def CLAUSE_MIN_AVG_PTS(cls) -> float:
         """Minimum points average of target player in offensive clause snipes."""
         try:
-            return float(_get_config_var("CLAUSE_MIN_AVG_PTS", "4.8"))
+            return float(_get_config_var("CLAUSE_MIN_AVG_PTS", "4.40"))
         except ValueError:
             return 4.8
 
@@ -404,7 +439,7 @@ class _StrategySettingsMeta(type):
     def CLAUSE_MIN_DELTA_XP(cls) -> float:
         """Minimum xP gain over current XI starting floor."""
         try:
-            return float(_get_config_var("CLAUSE_MIN_DELTA_XP", "0.75"))
+            return float(_get_config_var("CLAUSE_MIN_DELTA_XP", "0.55"))
         except ValueError:
             return 0.75
 

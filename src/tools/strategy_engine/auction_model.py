@@ -107,25 +107,45 @@ class AuctionBidModel:
         rival_seller_in_debt: bool = False,
         league_median_max_bid: Optional[float] = None,
         idle_cash_eur: float = 0.0,
+        xp_point_value_eur: float = 60_000.0,
+        points_weight: float = 1.0,
+        speculation_weight: float = 1.0,
+        efr_weight: float = 1.0,
+        min_efr_trigger: float = 40_000.0,
+        core_bid_aggression: float = 1.0,
+        spec_bid_aggression: float = 1.0,
+        xp_horizon_rounds: float = 7.5,
+        overbid_cap_mult: float = 1.0,
+        p_start_floor_delta: float = 0.0,
     ) -> Dict[str, Any]:
         """
         Computes the exact optimal bid in EUR, intrinsic valuation, and win probability.
 
-        `idle_cash_eur`: surplus cash that would otherwise sit unused. Idle cash earns 0 points,
-        so the EUR value of an extra starting-XI point scales up (x1.0 .. x2.5) as it grows.
+        Wired across archetype weights (`efr_weight`, `min_efr_trigger`, `core_bid_aggression`,
+        `spec_bid_aggression`, `xp_horizon_rounds`), causal macro/lifecycle regimes (`xp_point_value_eur`,
+        `points_weight`, `speculation_weight`), and standings posture (`overbid_cap_mult`, `p_start_floor_delta`).
         """
         vm = float(max(150_000.0, market_price))
         ask = float(max(150_000.0, asking_price if asking_price > 0 else vm))
 
-        # 1. Compute Intrinsic Economic Valuation:
-        # Capital appreciation over ~4.5 days + Fantasy points bonus value (50k/pt + leaderboard edge)
-        expected_5d_gain = max(0.0, float(efr_72h) * 1.45)
+        # 1. Compute Intrinsic Economic Valuation (Capital EFR + Fantasy XI Points):
+        expected_5d_gain = max(0.0, float(efr_72h) * 1.45 * float(efr_weight) * float(speculation_weight))
         idle_boost = 1.0 + float(np.clip((float(idle_cash_eur) - 5_000_000.0) / 8_000_000.0, 0.0, 3.5))
+        eff_p_start_floor = float(np.clip(0.60 + float(p_start_floor_delta), 0.45, 0.80))
         min_delta = 0.40 if idle_boost <= 1.0 else 0.25
-        is_xi_upgrade = (delta_xp_xi >= min_delta) and (p_start >= 0.60)
-        horizon_rounds = 7.5 if p_start >= 0.80 else (5.0 if p_start >= 0.70 else 2.5)
+        is_xi_upgrade = (delta_xp_xi >= min_delta) and (p_start >= eff_p_start_floor)
+
+        base_h = float(xp_horizon_rounds)
+        horizon_rounds = base_h if p_start >= 0.80 else (base_h * 0.67 if p_start >= 0.70 else min(3.0, base_h * 0.35))
         points_eur_value = (
-            max(0.0, float(delta_xp_xi)) * horizon_rounds * 60_000.0 * idle_boost if is_xi_upgrade else 0.0
+            max(0.0, float(delta_xp_xi))
+            * horizon_rounds
+            * float(xp_point_value_eur)
+            * idle_boost
+            * float(points_weight)
+            * float(core_bid_aggression)
+            if is_xi_upgrade
+            else 0.0
         )
 
         intrinsic_value = vm + expected_5d_gain + points_eur_value
@@ -146,7 +166,6 @@ class AuctionBidModel:
                     "win_prob_est": 0.0,
                 }
             if rival_seller_in_debt:
-                # Distressed rival needs cash before kickoff: bid near VM (>= VM, never below Biwenger floor)
                 target_bid = max(vm, min(effective_floor, max(vm, ask * 0.95)) + jitter)
             else:
                 target_bid = max(vm, min(effective_floor, intrinsic_value * 0.95))
@@ -172,8 +191,8 @@ class AuctionBidModel:
 
         if not is_xi_upgrade:
             # REGIME S: Pure Speculative / Momentum Flip ("Birra München +0.44% Doctrine")
-            # Only bid if expected 72h gain clears safety hurdle (>= +45k € or >= +4.5% ROI)
-            if efr_72h < 40_000 and (efr_72h / vm) < 0.04:
+            eff_efr_hurdle = max(15_000.0, float(min_efr_trigger) / max(0.70, float(speculation_weight) * float(spec_bid_aggression)))
+            if efr_72h < eff_efr_hurdle and (efr_72h / vm) < 0.036:
                 return {
                     "should_bid": False,
                     "bid_amount": 0,
@@ -182,11 +201,12 @@ class AuctionBidModel:
                     "regime": "SKIP_LOW_EDGE",
                     "win_prob_est": 0.0,
                 }
-            # Minimal disciplined overbid: capture 85-92% of the projected 72h gain!
-            # Bid at VM + min(1.4% VM, 22% of EFR_72h), floored at ask + 10k + jitter
-            spec_premium = min(vm * 0.015 * liq_ratio, max(10_000.0, float(efr_72h) * 0.22))
+            spec_premium = min(
+                vm * 0.015 * liq_ratio * float(spec_bid_aggression),
+                max(10_000.0, float(efr_72h) * 0.22 * float(spec_bid_aggression)),
+            )
             bid_amt = int(round(max(ask + 5_000, vm + spec_premium) + jitter))
-            max_allowed = int(round(vm + float(efr_72h) * 0.65))
+            max_allowed = int(round(vm + float(efr_72h) * 0.65 * float(efr_weight) * float(overbid_cap_mult)))
             if bid_amt > max_allowed:
                 return {
                     "should_bid": False,
@@ -207,13 +227,13 @@ class AuctionBidModel:
             }
 
         # REGIME C: Structural Starting-XI Upgrade -> Grid search optimal bid shading b*
-        # Cap: never overpay blindly, but when cash is abundant and rival contention is high, allow up to +22%
         if delta_xp_xi >= 1.0 and p_start >= 0.80 and idle_boost >= 1.5:
             hard_cap_pct = 0.22
         elif (subida_24h >= 100_000 and p_start >= 0.80) or idle_boost >= 1.8:
             hard_cap_pct = 0.18
         else:
             hard_cap_pct = 0.14
+        hard_cap_pct = float(np.clip(hard_cap_pct * float(overbid_cap_mult) * float(core_bid_aggression), 0.08, 0.30))
         max_bid_cap = min(intrinsic_value - 40_000.0, vm * (1.0 + hard_cap_pct))
         if max_bid_cap < ask:
             return {

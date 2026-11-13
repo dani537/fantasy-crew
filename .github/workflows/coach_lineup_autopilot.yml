@@ -17,8 +17,10 @@ on:
         type: choice
         options:
           - 'MORNING_FULL'
-          - 'FINAL_LINEUP_GUARD'
+          - 'PRE_CLAUSE_LOCK'
           - 'PRE_KICKOFF_SOLVENCY'
+          - 'FINAL_LINEUP_GUARD'
+          - 'POST_ROUND_SETTLEMENT'
         required: false
         default: 'MORNING_FULL'
 
@@ -52,11 +54,13 @@ jobs:
       LLM_PROVIDER: ${{ vars.LLM_PROVIDER || secrets.LLM_PROVIDER }}
       LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
       LLM_BASE_URL: ${{ vars.LLM_BASE_URL || secrets.LLM_BASE_URL }}
+      GEMINI_MODEL_DAILY: ${{ vars.GEMINI_MODEL_DAILY || 'gemini-4-hydrogen' }}
+      ACTIVE_ARCHETYPE: ${{ vars.ACTIVE_ARCHETYPE || 'LIQUIDITY_VULTURE_PRO' }}
       SCORE_TYPE: ${{ vars.SCORE_TYPE || secrets.SCORE_TYPE || '5' }}
       LANGUAGE: ${{ vars.LANGUAGE || 'es' }}
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS || secrets.GMAIL_ADRESS || vars.GMAIL_ADDRESS || vars.GMAIL_ADRESS }}
       GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
-      NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO || vars.NOTIFY_EMAIL_TO || vars.GMAIL_ADRESS || secrets.GMAIL_ADRESS }}
+      NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO || vars.NOTIFY_EMAIL_TO || vars.GMAIL_ADDRESS || secrets.GMAIL_ADDRESS || vars.GMAIL_ADRESS || secrets.GMAIL_ADRESS }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
       AUTOPILOT_MODE: ${{ github.event.inputs.autopilot_mode || vars.AUTOPILOT_MODE || 'FULL_AUTO' }}

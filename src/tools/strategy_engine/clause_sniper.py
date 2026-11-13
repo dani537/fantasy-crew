@@ -47,6 +47,19 @@ class ClauseSniper:
         self.clause_min_delta_xp = float(clause_min_delta_xp)
         self.clause_budget_reserve_pct = float(clause_budget_reserve_pct)
 
+    @staticmethod
+    def _build_xp_idx(xp_table: Optional[pd.DataFrame]) -> Dict[int, Dict[str, Any]]:
+        if xp_table is None or xp_table.empty:
+            return {}
+        recs = xp_table.to_dict("records")
+        out: Dict[int, Dict[str, Any]] = {}
+        for r in recs:
+            try:
+                out[int(float(r["player_id"]))] = r
+            except Exception:
+                continue
+        return out
+
     def scan_offensive_targets(
         self,
         df_market_today: pd.DataFrame,
@@ -61,6 +74,11 @@ class ClauseSniper:
         clauses_open: bool = True,
         scarcity_engine: Optional[MarketScarcityEngine] = None,
         blacklist_ids: Optional[Set[int]] = None,
+        xp_idx: Optional[Dict[int, Dict[str, Any]]] = None,
+        xp_point_value_eur: Optional[float] = None,
+        clause_alpha_floor_delta_eur: int = 0,
+        priority_positions: Optional[List[str]] = None,
+        top_rival_managers: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Returns ranked rival players whose release clause offers positive net alpha,
@@ -79,38 +97,62 @@ class ClauseSniper:
 
         locked = (locked_player_ids or set()) | (blacklist_ids or set())
         shocks = recent_match_shock_map or {}
-        xp_idx = xp_table.set_index("player_id").to_dict("index") if (xp_table is not None and not xp_table.empty) else {}
+        xp_map = xp_idx if xp_idx is not None else self._build_xp_idx(xp_table)
+        prio_pos = {str(p).upper() for p in (priority_positions or [])}
+        top_rivals = top_rival_managers or set()
+
+        # Vectorized column extraction (eliminates slow df.iterrows() per day)
+        pid_col = df_market_today["player_id"].tolist()
+        own_col = df_market_today["propietario_liga"].tolist() if "propietario_liga" in df_market_today.columns else [""] * len(pid_col)
+        nom_col = df_market_today["nombre"].tolist() if "nombre" in df_market_today.columns else [""] * len(pid_col)
+        eq_col = df_market_today["equipo"].tolist() if "equipo" in df_market_today.columns else [""] * len(pid_col)
+        pr_col = df_market_today["precio"].tolist() if "precio" in df_market_today.columns else [0] * len(pid_col)
+        sub_col = df_market_today["subida_24h"].tolist() if "subida_24h" in df_market_today.columns else [0] * len(pid_col)
+        cl_col = df_market_today["clausula_actual"].tolist() if "clausula_actual" in df_market_today.columns else [0] * len(pid_col)
+        avg_col = df_market_today["media_puntos"].tolist() if "media_puntos" in df_market_today.columns else [0] * len(pid_col)
+
+        pt_val_base = float(xp_point_value_eur) if xp_point_value_eur is not None else max(50_000.0, float(self.rules.bonus_per_point_eur) * 1.2)
+        idle_boost = 1.0 + float(np.clip((float(idle_cash_eur) - 5_000_000.0) / 8_000_000.0, 0.0, 3.2))
+        cap = getattr(self, "league_ratio_cap", 2.20)
+        min_avg = getattr(self, "clause_min_avg_pts", 4.8)
+        min_dx = getattr(self, "clause_min_delta_xp", 0.75)
 
         candidates: List[Dict[str, Any]] = []
-        for _, r in df_market_today.iterrows():
+        for raw_pid, raw_own, raw_nom, raw_eq, raw_pr, raw_sub, raw_cl, raw_avg in zip(
+            pid_col, own_col, nom_col, eq_col, pr_col, sub_col, cl_col, avg_col
+        ):
             try:
-                pid = int(float(r["player_id"]))
-            except (KeyError, ValueError, TypeError):
+                pid = int(float(raw_pid))
+            except (ValueError, TypeError):
                 continue
 
-            if pid in locked:
+            if pid <= 0 or pid in locked:
                 continue
 
-            owner = str(r.get("propietario_liga", "") or "").strip()
+            owner = str(raw_own or "").strip()
             if not owner or owner in ("Libre", "Mercado", "nan", "None", my_manager_name):
                 continue
 
-            xp_info = xp_idx.get(pid)
+            xp_info = xp_map.get(pid)
             if not xp_info or not xp_info.get("is_available", False):
                 continue
 
-            price = safe_num(r.get("precio", 0), 0.0)
-            subida = safe_num(r.get("subida_24h", 0), 0.0)
-            raw_clause = safe_num(r.get("clausula_actual", 0), 0.0)
+            price = safe_num(raw_pr, 0.0)
+            if price <= 0:
+                continue
+            subida = safe_num(raw_sub, 0.0)
+            raw_clause = safe_num(raw_cl, 0.0)
             clause = raw_clause if raw_clause > 0 else float(self.rules.compute_official_clause(price))
-
-            if clause <= 0 or clause > max_budget or price <= 0:
+            if clause <= 0 or clause > max_budget:
                 continue
 
-            # Never snipe rapidly falling assets unless they are established elite starters
-            avg_pts_raw = safe_num(str(r.get("media_puntos", "0")).replace(",", "."))
+            avg_pts_raw = safe_num(str(raw_avg).replace(",", "."))
             efr_72h = float(efr_map.get(pid, subida * 2.4))
-            is_elite_rebound = (avg_pts_raw >= 5.0 and subida >= -20_000 and self.policy in ("COMPETITIVE_VORP", "AGGRESSIVE"))
+            is_elite_rebound = (
+                avg_pts_raw >= 5.0
+                and subida >= -20_000
+                and self.policy in ("COMPETITIVE_VORP", "VALUE_COMPOUND_VORP", "AGGRESSIVE")
+            )
             if (subida < 0 or efr_72h < 0) and not is_elite_rebound:
                 continue
 
@@ -122,7 +164,6 @@ class ClauseSniper:
             xi_floor = float(my_current_xi_floor_by_pos.get(best_line, 3.5))
             delta_xp = max(0.0, xp_best - xi_floor)
 
-            # Project 12-day Trajectory (Breakout wave + Match Shock impulse)
             shock_pts = float(shocks.get(pid, 0.0))
             shock_wave_eur = (
                 max(0.0, shock_pts - 6.0) * 145_000.0
@@ -132,16 +173,19 @@ class ClauseSniper:
             proj_12d_gain = float(efr_72h) * 2.85 + shock_wave_eur
             proj_12d_price = min(price + proj_12d_gain, price * 4.5 + 1_800_000.0)
 
-            idle_boost = 1.0 + float(np.clip((float(idle_cash_eur) - 5_000_000.0) / 8_000_000.0, 0.0, 3.2))
             horizon_matchdays = 8.0 if p_start >= 0.80 else (6.0 if p_start >= 0.70 else 3.5)
-            pt_val = max(50_000.0, float(self.rules.bonus_per_point_eur) * 1.2)
-            xi_points_eur = delta_xp * horizon_matchdays * pt_val * idle_boost if p_start >= 0.65 else 0.0
+            xi_points_eur = delta_xp * horizon_matchdays * pt_val_base * idle_boost if p_start >= 0.65 else 0.0
 
-            total_12d_valuation = proj_12d_price + xi_points_eur
-            net_alpha_eur = total_12d_valuation - clause
+            strategic_bonus_eur = 0.0
+            if owner in top_rivals:
+                strategic_bonus_eur += min(650_000.0, clause * 0.04)
+            if best_line in prio_pos:
+                strategic_bonus_eur += 350_000.0
+
+            total_12d_valuation = proj_12d_price + xi_points_eur + strategic_bonus_eur
+            net_alpha_eur = total_12d_valuation - clause - float(clause_alpha_floor_delta_eur)
             clause_ratio = clause / price
 
-            # Check free-market scarcity if engine provided
             scarcity_tier = "SCARCE"
             n_free_comp = 0
             if scarcity_engine is not None:
@@ -155,13 +199,30 @@ class ClauseSniper:
                 scarcity_tier = rep.scarcity_tier
                 n_free_comp = rep.n_free_comparable
 
-            if self.policy == "COMPETITIVE_VORP":
-                # In AZ Finance / standard Biwenger rules, minimum clauses are 1.70x to 2.25x.
-                # Allow official league ratios when cash is abundant and player delivers high VORP.
-                cap = getattr(self, "league_ratio_cap", 2.20)
+            is_micro_breakout = False
+            is_star_steal = False
+            if self.policy == "VALUE_COMPOUND_VORP":
+                # Synergy of EFR capital compounding + scarcity + genuine XI VORP delta
+                league_ratio_cap = cap if (float(idle_cash_eur) >= 4_000_000.0 or n_free_comp <= 1) else min(cap, 1.95)
+                is_micro_breakout = (
+                    clause <= 5_500_000
+                    and clause_ratio <= min(cap, 2.20)
+                    and p_start >= 0.65
+                    and efr_72h >= 90_000
+                    and (subida >= 45_000 or shock_pts >= 7.5)
+                    and proj_12d_price >= clause * 0.90
+                    and net_alpha_eur >= max(180_000.0, clause * 0.06)
+                )
+                is_star_steal = (
+                    p_start >= 0.70
+                    and (xp_best >= 4.2 or avg_pts_raw >= min_avg)
+                    and delta_xp >= max(0.35, min_dx * 0.85)
+                    and clause_ratio <= league_ratio_cap
+                    and (scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE") or delta_xp >= 0.85 or efr_72h >= 80_000)
+                    and net_alpha_eur >= max(280_000.0, clause * 0.05)
+                )
+            elif self.policy == "COMPETITIVE_VORP":
                 league_ratio_cap = cap if float(idle_cash_eur) >= 5_000_000.0 else min(cap, 1.95)
-                min_avg = getattr(self, "clause_min_avg_pts", 4.8)
-                min_dx = getattr(self, "clause_min_delta_xp", 0.75)
                 is_micro_breakout = (
                     clause <= 5_200_000
                     and clause_ratio <= 2.25
@@ -179,55 +240,55 @@ class ClauseSniper:
                     and net_alpha_eur >= max(350_000.0, clause * 0.06)
                 )
             elif self.policy == "SURGICAL_SCARCITY":
-                # Avoid >1.65x deadweight clause brackets (e.g. 225% sub-2M bench traps) and keep 1.5M auction buffer
                 has_surplus_buffer = float(idle_cash_eur) >= (clause + 1_500_000.0)
                 is_micro_breakout = (
                     has_surplus_buffer
                     and clause <= 4_200_000
-                    and clause_ratio <= 1.65
+                    and clause_ratio <= min(cap, 1.85)
                     and p_start >= 0.70
                     and (subida >= 95_000 or shock_pts >= 11.0)
-                    and net_alpha_eur >= max(380_000.0, clause * 0.18)
-                    and proj_12d_price >= clause * 1.08
+                    and net_alpha_eur >= max(380_000.0, clause * 0.16)
+                    and proj_12d_price >= clause * 1.05
                     and idle_cash_eur < 30_000_000.0
                 )
                 flush = idle_boost >= 1.6
                 ultra_flush = float(idle_cash_eur) >= 16_000_000.0
-                max_ratio = 1.38 if not ultra_flush else (1.46 if (subida >= 50_000 or n_free_comp <= 1) else 1.40)
-                scarcity_gate = (n_free_comp <= 1 and scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE")) or (clause_ratio <= 1.26)
+                max_ratio = min(cap, 1.55 if not ultra_flush else (1.75 if (subida >= 50_000 or n_free_comp <= 1) else 1.65))
+                scarcity_gate = (n_free_comp <= 1 and scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE")) or (clause_ratio <= 1.35)
                 is_star_steal = (
                     float(idle_cash_eur) >= (clause + 800_000.0)
                     and scarcity_gate
-                    and p_start >= 0.78
-                    and delta_xp >= (0.70 if ultra_flush else 0.85)
+                    and p_start >= 0.76
+                    and delta_xp >= max(0.50, min_dx if not ultra_flush else min_dx * 0.85)
                     and clause_ratio <= max_ratio
-                    and subida >= (0 if flush else 30_000)
-                    and net_alpha_eur >= max(750_000.0, clause * (0.09 if flush else 0.13))
+                    and subida >= (0 if flush else 25_000)
+                    and net_alpha_eur >= max(600_000.0, clause * (0.08 if flush else 0.12))
                 )
             else:  # AGGRESSIVE
                 is_micro_breakout = (
-                    clause <= 5_000_000
-                    and (subida >= 50_000 or shock_pts >= 8.0)
-                    and net_alpha_eur >= max(200_000.0, clause * 0.12)
-                    and proj_12d_price >= clause * 0.95
-                    and idle_cash_eur < 30_000_000.0
+                    clause <= 5_400_000
+                    and (subida >= 45_000 or shock_pts >= 7.5)
+                    and net_alpha_eur >= max(180_000.0, clause * 0.10)
+                    and proj_12d_price >= clause * 0.92
+                    and idle_cash_eur < 35_000_000.0
                 )
-                flush = idle_boost >= 1.6
-                ultra_flush = float(idle_cash_eur) >= 16_000_000.0
-                max_ratio = 1.85 if not ultra_flush else 2.10
+                flush = idle_boost >= 1.5
+                ultra_flush = float(idle_cash_eur) >= 14_000_000.0
+                max_ratio = min(cap, 2.00 if not ultra_flush else 2.25)
                 is_star_steal = (
-                    p_start >= 0.72
-                    and delta_xp >= 0.65
+                    p_start >= 0.70
+                    and (xp_best >= 4.0 or avg_pts_raw >= min_avg * 0.92)
+                    and delta_xp >= max(0.40, min_dx * 0.85)
                     and clause_ratio <= max_ratio
-                    and subida >= (0 if flush else 20_000)
-                    and net_alpha_eur >= max(500_000.0, clause * 0.08)
+                    and subida >= (-10_000 if flush else 15_000)
+                    and net_alpha_eur >= max(400_000.0, clause * 0.06)
                 )
 
             if is_micro_breakout or is_star_steal:
                 candidates.append({
                     "player_id": pid,
-                    "nombre": str(r.get("nombre", "")),
-                    "equipo": str(r.get("equipo", "")),
+                    "nombre": str(raw_nom or ""),
+                    "equipo": str(raw_eq or ""),
                     "victim_manager": owner,
                     "position": best_line,
                     "market_price": round(price),
@@ -258,6 +319,9 @@ class ClauseSniper:
         clauses_open: bool = True,
         scarcity_engine: Optional[MarketScarcityEngine] = None,
         clause_locked_ids: Optional[Set[int]] = None,
+        xp_idx: Optional[Dict[int, Dict[str, Any]]] = None,
+        shield_budget_pct: float = 0.18,
+        shield_threshold_mult: float = 1.0,
     ) -> List[Dict[str, Any]]:
         """
         Identifies our own unlocked core XI stars dangerously exposed to rival clause steals.
@@ -271,38 +335,44 @@ class ClauseSniper:
             or my_squad_df is None
             or my_squad_df.empty
             or available_cash_surplus < 2_000_000
+            or float(shield_budget_pct) <= 0.01
         ):
             return []
 
         locked = clause_locked_ids or set()
-        xp_idx = xp_table.set_index("player_id").to_dict("index") if (xp_table is not None and not xp_table.empty) else {}
+        xp_map = xp_idx if xp_idx is not None else self._build_xp_idx(xp_table)
         shields: List[Dict[str, Any]] = []
-        shield_budget = available_cash_surplus * 0.18
-        inc_ratio = max(0.25, float(self.rules.clause_increment_ratio))  # 1.0 => 1€ cash raises clause by 1€
-        deadweight_rate = max(0.10, 1.0 - float(self.rules.clause_decrement_refund_pct))  # 0.50 deadweight friction
+        shield_budget = available_cash_surplus * float(np.clip(shield_budget_pct, 0.02, 0.40))
+        inc_ratio = max(0.25, float(self.rules.clause_increment_ratio))
+        deadweight_rate = max(0.10, 1.0 - float(self.rules.clause_decrement_refund_pct))
+        thresh_mult = float(np.clip(shield_threshold_mult, 0.65, 1.35))
 
-        for _, r in my_squad_df.iterrows():
-            pid = int(r["player_id"])
+        pid_c = my_squad_df["player_id"].tolist()
+        nom_c = my_squad_df["nombre"].tolist() if "nombre" in my_squad_df.columns else [""] * len(pid_c)
+        pr_c = my_squad_df["precio"].tolist() if "precio" in my_squad_df.columns else [0] * len(pid_c)
+        sub_c = my_squad_df["subida_24h"].tolist() if "subida_24h" in my_squad_df.columns else [0] * len(pid_c)
+        cl_c = my_squad_df["clausula_actual"].tolist() if "clausula_actual" in my_squad_df.columns else [0] * len(pid_c)
+
+        for raw_pid, raw_nom, raw_pr, raw_sub, raw_cl in zip(pid_c, nom_c, pr_c, sub_c, cl_c):
+            pid = int(raw_pid)
             if pid in locked:
-                # Already immune (5-day post-purchase lock)! Zero need to spend cash shielding today.
                 continue
 
-            xp_info = xp_idx.get(pid, {})
+            xp_info = xp_map.get(pid, {})
             xp_best = float(xp_info.get("xp_best", 0.0))
             xp_healthy = float(xp_info.get("xp_healthy", xp_best))
             p_start = float(xp_info.get("p_start", 0.0))
             best_line = str(xp_info.get("best_line", xp_info.get("natural_pos", "MF")))
-            price = safe_num(r.get("precio", 0), 0.0)
-            subida = safe_num(r.get("subida_24h", 0), 0.0)
-            clause = safe_num(r.get("clausula_actual", 0), 0.0) or float(compute_official_clause(price))
+            price = safe_num(raw_pr, 0.0)
+            subida = safe_num(raw_sub, 0.0)
+            clause = safe_num(raw_cl, 0.0) or float(compute_official_clause(price))
             efr_72h = float(efr_map.get(pid, subida * 2.4))
 
-            if xp_best < 6.0 or p_start < 0.80 or subida < 70_000:
+            if xp_best < 5.6 * min(1.05, max(0.90, thresh_mult)) or p_start < 0.80 or subida < 70_000 * thresh_mult:
                 continue
             if clause > max_rival_purchasing_power * 0.95:
                 continue
 
-            # Check replacement cost spread: if easy to replace in free market, don't burn deadweight cash!
             replacement_spread = price * 0.25
             if scarcity_engine is not None:
                 rep = scarcity_engine.compute_replacement_profile(
@@ -323,12 +393,11 @@ class ClauseSniper:
                 increment_eur = int(min(shield_budget, max(250_000, cash_needed)))
                 deadweight_cost = increment_eur * deadweight_rate
 
-                # Expected loss if stolen (~30% steal risk on surging underclaused star) must exceed 2.2x deadweight cost
                 expected_steal_loss = 0.30 * max(replacement_spread, proj_10d - clause)
-                if increment_eur >= 250_000 and shield_budget >= increment_eur and expected_steal_loss >= 2.2 * deadweight_cost:
+                if increment_eur >= 250_000 and shield_budget >= increment_eur and expected_steal_loss >= (2.2 * thresh_mult) * deadweight_cost:
                     shields.append({
                         "player_id": pid,
-                        "nombre": str(r.get("nombre", "")),
+                        "nombre": str(raw_nom or ""),
                         "current_clause": int(round(clause)),
                         "new_clause_est": int(round(clause + increment_eur * inc_ratio)),
                         "market_price": int(round(price)),

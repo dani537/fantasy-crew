@@ -45,6 +45,8 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER || secrets.LLM_PROVIDER }}
           LLM_MODEL: ${{ vars.LLM_MODEL || secrets.LLM_MODEL }}
+          GEMINI_MODEL_DAILY: ${{ vars.GEMINI_MODEL_DAILY || 'gemini-4-hydrogen' }}
+          ACTIVE_ARCHETYPE: ${{ vars.ACTIVE_ARCHETYPE || 'LIQUIDITY_VULTURE_PRO' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_CHAT_ID: ${{ secrets.TELEGRAM_ALLOWED_CHAT_ID || vars.TELEGRAM_ALLOWED_CHAT_ID }}
           AUTOPILOT_MODE: ${{ vars.AUTOPILOT_MODE || 'FULL_AUTO' }}
