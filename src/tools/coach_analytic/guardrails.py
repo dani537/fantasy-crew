@@ -465,6 +465,7 @@ def validate_autopilot_plan_v2(
     p_start_map: dict = None,
     max_user_sales: int = 5,
     credit_limit_ratio: float = 0.25,
+    auto_execute_important_sales: bool = False,
 ) -> dict:
     """
     Validates a `PortfolioOptimizer.generate_daily_plan` output (v3 rules-compliant).
@@ -472,7 +473,9 @@ def validate_autopilot_plan_v2(
     Returns:
         {"approved_plan": plan_copy_with_blocked_items_removed,
          "blocked": [ {item..., "blocked_reason": str} ],
-         "projected_cash": float, "is_safe": bool}
+         "projected_cash": float,
+         "projected_cash_with_pending_sales": float,
+         "is_safe": bool}
     """
     untouchable_ids = set(untouchable_ids or set())
     efr_map = efr_map or {}
@@ -494,9 +497,15 @@ def validate_autopilot_plan_v2(
     approved["routine_sales"] = [s for s in plan.get("routine_sales", []) if int(s["player_id"]) in kept_sale_pids]
     approved["solvency_sales"] = [s for s in plan.get("solvency_sales", []) if int(s["player_id"]) in kept_sale_pids]
 
-    cash = float(plan.get("starting_cash", 0.0)) + sum(
-        float(s.get("sale_price", 0)) for s in kept_sales if not s.get("requires_human_approval", False)
+    pending_sales_eur = sum(
+        float(s.get("sale_price", 0)) for s in kept_sales if s.get("requires_human_approval", False)
     )
+    cash = float(plan.get("starting_cash", 0.0)) + sum(
+        float(s.get("sale_price", 0))
+        for s in kept_sales
+        if (auto_execute_important_sales or not s.get("requires_human_approval", False))
+    )
+    cash_with_pending = cash if auto_execute_important_sales else (cash + pending_sales_eur)
 
     # 2. Clause snipes (instant settlement): enforce 48h/in-round freeze + positive cash solvency
     kept_clauses = []
@@ -558,4 +567,10 @@ def validate_autopilot_plan_v2(
     approved["preventive_listings"] = filtered_listings
 
     is_safe = (cash >= -0.5) if plan.get("is_kickoff_day") else (cash + credit_line >= 0)
-    return {"approved_plan": approved, "blocked": blocked, "projected_cash": cash, "is_safe": is_safe}
+    return {
+        "approved_plan": approved,
+        "blocked": blocked,
+        "projected_cash": cash,
+        "projected_cash_with_pending_sales": cash_with_pending,
+        "is_safe": is_safe,
+    }

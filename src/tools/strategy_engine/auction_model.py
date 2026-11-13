@@ -154,9 +154,15 @@ class AuctionBidModel:
         jitter = 1_300 + (int(player_id) % 7) * 600  # +1,300 .. +4,900 €
 
         # 2. Rival Listing Negotiation Asymmetry
+        # Enforce the same disciplined VM overbid ceiling as Computer auctions (never bid 2x VM on
+        # a rival's "6.66M / 7.77M" showcase price, which would also lock Biwenger maxBid credit!)
         if seller_is_rival:
+            rival_overbid_cap = float(np.clip(0.18 * float(overbid_cap_mult) * float(core_bid_aggression), 0.12, 0.30))
+            max_rational_rival_bid = min(intrinsic_value * 0.96, vm * (1.0 + rival_overbid_cap))
             effective_floor = max(vm, ask)
-            if effective_floor > intrinsic_value * 0.98:
+
+            # Skip troll/showcase prices far above rational value, or bids too low for seller to consider
+            if ask > max_rational_rival_bid * 1.18 or max_rational_rival_bid < vm:
                 return {
                     "should_bid": False,
                     "bid_amount": 0,
@@ -166,10 +172,19 @@ class AuctionBidModel:
                     "win_prob_est": 0.0,
                 }
             if rival_seller_in_debt:
-                target_bid = max(vm, min(effective_floor, max(vm, ask * 0.95)) + jitter)
+                raw_target = min(effective_floor, max(vm, ask * 0.95)) + jitter
             else:
-                target_bid = max(vm, min(effective_floor, intrinsic_value * 0.95))
-            target_bid = max(int(round(vm)), int(round(target_bid)))
+                raw_target = min(effective_floor, max_rational_rival_bid)
+            target_bid = int(round(max(vm, min(raw_target, max_rational_rival_bid))))
+            if target_bid < ask * 0.85:
+                return {
+                    "should_bid": False,
+                    "bid_amount": 0,
+                    "intrinsic_value": round(intrinsic_value),
+                    "expected_surplus": 0.0,
+                    "regime": "SKIP_OVERPRICED_RIVAL",
+                    "win_prob_est": 0.0,
+                }
             surplus = intrinsic_value - target_bid
             return {
                 "should_bid": surplus >= 45_000,

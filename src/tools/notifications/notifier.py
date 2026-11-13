@@ -245,6 +245,30 @@ class NotificationHub:
         if plan.get("preventive_listings"):
             lst = ", ".join(f"{p['nombre']} ({int(p['asking_price']):,}€)" for p in plan["preventive_listings"])
             lines.append(f"\nEscaparate Top-{len(plan['preventive_listings'])} (+5% VM): {lst}")
+        rn = summary.get("rival_negotiations") or {}
+        if rn.get("incoming_rival_offers") or rn.get("counter_offers") or rn.get("outgoing_bids"):
+            lines.append("\nNegociaciones con Rivales:")
+            for ro in (rn.get("incoming_rival_offers") or []):
+                lines.append(f"  - Oferta recibida de {ro.get('from_name')} por tu {ro.get('nombre')}: {int(ro.get('amount', 0)):,} € ({ro.get('action_label', '')})")
+            for co in (rn.get("counter_offers") or []):
+                lines.append(f"  - Contraoferta de {co.get('from_name')} por {co.get('nombre')}: {int(co.get('amount', 0)):,} € ({co.get('action_label') or co.get('verdict_label', '')})")
+            for ob in (rn.get("outgoing_bids") or []):
+                lines.append(f"  - Puja abierta a {ob.get('to_name')} por {ob.get('nombre')}: {int(ob.get('amount', 0)):,} € ({ob.get('status_label', '')}) [ID {ob.get('offer_id')}]")
+            if rn.get("freed_credit_eur"):
+                lines.append(f"  - Crédito liberado hoy: +{int(rn.get('freed_credit_eur', 0)):,} € | Puja máx operativa: {int(rn.get('effective_available_max_bid', 0)):,} €")
+        blt = summary.get("league_bulletin") or {}
+        if blt.get("clauses") or blt.get("manager_deals") or blt.get("my_standings"):
+            lines.append("\nBoletín de Noticias de tu Liga:")
+            ms = blt.get("my_standings") or {}
+            if ms:
+                lines.append(
+                    f"  - Clasificación: #{ms.get('rank')}/{ms.get('total_managers')} ({ms.get('points')} pts, "
+                    f"a {ms.get('points_to_leader', 0)} pts de {ms.get('leader_name', '')})"
+                )
+            for c in (blt.get("clauses") or [])[:4]:
+                lines.append(f"  - Clausulazo: {c.get('to_name')} pagó {int(c.get('amount', 0)):,} € por {c.get('nombre')} ({c.get('from_name')})")
+            for d in (blt.get("manager_deals") or [])[:3]:
+                lines.append(f"  - Fichaje: {d.get('to_name')} -> {d.get('nombre')} desde {d.get('from_name')} ({int(d.get('amount', 0)):,} €)")
         if pending:
             lines.append("\n⚠️ REQUIERE TU CONFIRMACIÓN (Cláusulas / Ventas Importantes):")
             for p in pending:
@@ -333,7 +357,31 @@ class NotificationHub:
 
         if auto_sales:
             for s in auto_sales:
-                out.append(f"  💸 Venta ejecutada: <b>{esc(s['nombre'])}</b> → <code>{int(s['sale_price']):,} €</code> ({esc(s['reason'])})")
+                buyer_tag = f" → <i>{esc(str(s['buyer_name']))}</i>" if (s.get("is_rival_buyer") and s.get("buyer_name")) else ""
+                out.append(f"  💸 Venta ejecutada: <b>{esc(s['nombre'])}</b>{buyer_tag} → <code>{int(s['sale_price']):,} €</code> ({esc(s['reason'])})")
+
+        rn_tg = summary.get("rival_negotiations") or {}
+        if rn_tg.get("counter_offers") or rn_tg.get("incoming_rival_offers"):
+            for ro in (rn_tg.get("incoming_rival_offers") or []):
+                out.append(
+                    f"  🤝 Oferta de <b>{esc(str(ro.get('from_name', '')))}</b> por <b>{esc(str(ro.get('nombre', '')))}</b>: "
+                    f"<code>{int(ro.get('amount', 0)):,} €</code> ({esc(str(ro.get('action_label', '')))})"
+                )
+            for co in (rn_tg.get("counter_offers") or []):
+                out.append(
+                    f"  📩 Contraoferta de <b>{esc(str(co.get('from_name', '')))}</b> por <b>{esc(str(co.get('nombre', '')))}</b>: "
+                    f"<code>{int(co.get('amount', 0)):,} €</code> ({esc(str(co.get('action_label') or co.get('verdict_label', '')))})"
+                )
+            if rn_tg.get("freed_credit_eur"):
+                out.append(f"  🔓 Crédito liberado: <code>+{int(rn_tg.get('freed_credit_eur', 0)):,} €</code> (Puja máx: <code>{int(rn_tg.get('effective_available_max_bid', 0)):,} €</code>)")
+
+        blt_tg = summary.get("league_bulletin") or {}
+        if blt_tg.get("clauses") or blt_tg.get("manager_deals"):
+            out.append("\n📰 <b>Boletín de la Liga:</b>")
+            for c in (blt_tg.get("clauses") or [])[:3]:
+                out.append(f"  💥 Clausulazo: <b>{esc(str(c.get('to_name')))}</b> → {esc(str(c.get('nombre')))} ({esc(str(c.get('from_name')))}) <code>{int(c.get('amount', 0)):,} €</code>")
+            for d in (blt_tg.get("manager_deals") or [])[:2]:
+                out.append(f"  🔄 {esc(str(d.get('to_name')))} fichó a {esc(str(d.get('nombre')))} (<code>{int(d.get('amount', 0)):,} €</code>)")
 
         if is_full_auto:
             for c in (plan.get("clause_snipes") or []):
@@ -508,6 +556,151 @@ class NotificationHub:
         return "".join(blocks)
 
     @staticmethod
+    def _build_bulletin_html(bulletin: Dict[str, Any], league_name: str) -> str:
+        """Builds the 'Boletín de la Liga' newsletter card for email HTML."""
+        if not isinstance(bulletin, dict) or not any(bulletin.values()):
+            return ""
+        esc = html.escape
+        sections: List[str] = []
+
+        # 1. Standings & Last Round Pulse
+        st_top = bulletin.get("standings_top") or []
+        ms = bulletin.get("my_standings") or {}
+        rnd = bulletin.get("latest_round") or {}
+        if st_top or ms or rnd:
+            podium_medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+            chips = "".join(
+                f"<span style='display:inline-block;background:{'#ecfdf5' if r.get('is_me') else '#f8fafc'};"
+                f"border:1px solid {'#10b981' if r.get('is_me') else '#cbd5e1'};color:#0f172a;"
+                f"padding:4px 9px;border-radius:8px;font-size:11.5px;margin:0 5px 5px 0;'>"
+                f"{podium_medals.get(idx, '#' + str(r.get('rank')))} <b>{esc(str(r.get('name')))}</b> · {int(r.get('points', 0))} pts</span>"
+                for idx, r in enumerate(st_top[:3])
+            )
+            my_line = ""
+            if ms:
+                nxt = f" · Próximo rival: <b>{esc(str(ms.get('next_rival_above')))}</b> (-{int(ms.get('points_to_next', 0))} pts)" if ms.get("next_rival_above") else ""
+                my_line = (
+                    f"<div style='font-size:12px;color:#334155;margin-top:3px;'>"
+                    f"Tu posición: <b>#{int(ms.get('rank', 0))}/{int(ms.get('total_managers', 0))}</b> ({int(ms.get('points', 0))} pts"
+                    f" · a <b>-{int(ms.get('points_to_leader', 0))} pts</b> del líder {esc(str(ms.get('leader_name', '')))}){nxt}</div>"
+                )
+            rnd_line = ""
+            if rnd and rnd.get("round_name"):
+                my_rnd_part = f" · Tú: <b>{int(rnd.get('my_points', 0))} pts</b>" if rnd.get("my_points") else ""
+                rnd_line = (
+                    f"<div style='font-size:11.5px;color:#475569;margin-top:3px;'>"
+                    f"🏅 <b>{esc(str(rnd.get('round_name')))}:</b> MVP <b>{esc(str(rnd.get('top_scorer_name', '')))}</b> "
+                    f"({int(rnd.get('top_points', 0))} pts · +{int(rnd.get('top_bonus', 0))/1e6:.2f}M bonus){my_rnd_part}</div>"
+                )
+            sections.append(
+                "<div style='margin-bottom:11px;'>"
+                "<div style='font-size:11.5px;font-weight:800;color:#4c1d95;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:5px;'>🏁 Pulso de la Clasificación</div>"
+                f"<div>{chips}</div>{my_line}{rnd_line}"
+                "</div>"
+            )
+
+        # 2. Recent Release Clauses in the League
+        clauses = bulletin.get("clauses") or []
+        if clauses:
+            cl_rows = "".join(
+                f"<tr style='background:{'#fff1f2' if c.get('involves_me') else 'transparent'};'>"
+                f"<td style='padding:6px;border-bottom:1px solid #f1f5f9;'>"
+                f"<span style='background:{'#ffe4e6' if c.get('involves_me') else '#fef3c7'};color:{'#be123c' if c.get('involves_me') else '#92400e'};padding:1px 6px;border-radius:999px;font-size:10px;font-weight:800;'>"
+                f"{'TE AFECTA' if c.get('involves_me') else 'CLAUSULAZO'}</span> "
+                f"<b>{esc(str(c.get('nombre')))}</b>"
+                f" <span style='color:#64748b;font-size:11.5px;'>({esc(str(c.get('pos', '')))} · {esc(str(c.get('from_name', '')))} → <b>{esc(str(c.get('to_name', '')))}</b>)</span></td>"
+                f"<td align='right' style='padding:6px;border-bottom:1px solid #f1f5f9;font-weight:800;color:#be123c;white-space:nowrap;'>{int(c.get('amount', 0)):,} €</td>"
+                f"</tr>"
+                for c in clauses[:5]
+            )
+            sections.append(
+                "<div style='margin-bottom:11px;'>"
+                "<div style='font-size:11.5px;font-weight:800;color:#be123c;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;'>💥 Clausulazos Recientes</div>"
+                f"<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='font-size:12.5px;'>{cl_rows}</table>"
+                "</div>"
+            )
+
+        # 3. Rival Deals, Competitive Auctions, Defensive Shields & Position Updates
+        deals = bulletin.get("manager_deals") or []
+        shields = bulletin.get("clause_shields") or []
+        pos_chg = bulletin.get("position_changes") or []
+        if deals or shields or pos_chg:
+            deal_items: List[str] = []
+            for d in deals[:5]:
+                dtp = str(d.get("deal_type") or "")
+                badge = "🤝 TRASPASO" if dtp == "MANAGER_TRADE" else ("💸 VENTA" if dtp == "RIVAL_SALE" else "🏷️ SUBASTA")
+                b_cnt = int(d.get("bid_count", 1) or 1)
+                extra = f" · superó {b_cnt - 1} puja{'s' if b_cnt > 2 else ''}" if b_cnt > 1 else ""
+                deal_items.append(
+                    f"<tr>"
+                    f"<td style='padding:5px 6px;border-bottom:1px dashed #e2e8f0;font-size:12px;'>"
+                    f"<span style='color:#4f46e5;font-weight:800;font-size:10.5px;'>{badge}</span> "
+                    f"<b>{esc(str(d.get('to_name')))}</b> · {esc(str(d.get('nombre')))} "
+                    f"<span style='color:#64748b;'>(desde {esc(str(d.get('from_name')))}{extra})</span></td>"
+                    f"<td align='right' style='padding:5px 6px;border-bottom:1px dashed #e2e8f0;font-weight:700;color:#0f172a;font-size:12px;white-space:nowrap;'>{int(d.get('amount', 0)):,} €</td>"
+                    f"</tr>"
+                )
+            for sh in shields[:2]:
+                deal_items.append(
+                    f"<tr>"
+                    f"<td style='padding:5px 6px;border-bottom:1px dashed #e2e8f0;font-size:12px;'>"
+                    f"<span style='color:#0284c7;font-weight:800;font-size:10.5px;'>🛡️ BLINDAJE</span> "
+                    f"<b>{esc(str(sh.get('user_name')))}</b> subió cláusula de {esc(str(sh.get('nombre')))}</td>"
+                    f"<td align='right' style='padding:5px 6px;border-bottom:1px dashed #e2e8f0;font-weight:700;color:#0284c7;font-size:12px;white-space:nowrap;'>→ {int(sh.get('release_clause', 0)):,} €</td>"
+                    f"</tr>"
+                )
+            pos_note = ""
+            if pos_chg:
+                pos_txt = ", ".join(f"{esc(str(p.get('nombre')))} ({esc(str(p.get('from_pos')))}→{esc(str(p.get('to_pos')))})" for p in pos_chg[:4])
+                pos_note = f"<div style='font-size:11.5px;color:#475569;margin-top:5px;'>🔁 <b>Cambios oficiales de posición:</b> {pos_txt}</div>"
+            sections.append(
+                "<div style='margin-bottom:11px;'>"
+                "<div style='font-size:11.5px;font-weight:800;color:#4338ca;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;'>🔄 Fichajes, Subastas y Blindajes</div>"
+                f"<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0'>{''.join(deal_items)}</table>"
+                f"{pos_note}</div>"
+            )
+
+        # 4. LaLiga Medical Radar & Top 24h Movers
+        inj = bulletin.get("injury_alerts") or []
+        risers = bulletin.get("market_risers") or []
+        fallers = bulletin.get("market_fallers") or []
+        if inj or risers or fallers:
+            st_lbl = {"injured": "Lesionado", "suspended": "Sancionado", "sanctioned": "Sancionado", "doubtful": "Duda"}
+            inj_chips = "".join(
+                f"<span style='display:inline-block;background:#fef2f2;color:#991b1b;border:1px solid #fecaca;"
+                f"padding:3px 7px;border-radius:7px;font-size:11px;margin:0 4px 4px 0;'>"
+                f"🏥 <b>{esc(str(x.get('nombre')))}</b> ({esc(str(x.get('team')))}) · {esc(st_lbl.get(str(x.get('status')), str(x.get('status'))))}</span>"
+                for x in inj[:4]
+            )
+            risers_txt = ", ".join(f"<b>{esc(str(m.get('nombre')))}</b> (+{int(m.get('subida_24h', 0))//1000}k)" for m in risers[:3]) or "—"
+            fallers_txt = ", ".join(f"<b>{esc(str(m.get('nombre')))}</b> ({int(m.get('subida_24h', 0))//1000}k)" for m in fallers[:3]) or "—"
+            inj_block = f"<div style='margin-bottom:5px;'>{inj_chips}</div>" if inj_chips else ""
+            sections.append(
+                "<div>"
+                "<div style='font-size:11.5px;font-weight:800;color:#0f766e;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;'>📡 Radar LaLiga — Parte Médico y Mercado 24h</div>"
+                f"{inj_block}"
+                "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='font-size:11.5px;'>"
+                f"<tr><td width='50%' style='padding:4px 6px;background:#ecfdf5;border-radius:8px 0 0 8px;color:#065f46;'>📈 <b>Suben:</b> {risers_txt}</td>"
+                f"<td width='50%' style='padding:4px 6px;background:#fff1f2;border-radius:0 8px 8px 0;color:#9f1239;'>📉 <b>Bajan:</b> {fallers_txt}</td></tr>"
+                "</table>"
+                "</div>"
+            )
+
+        if not sections:
+            return ""
+        return f"""
+        <div class="fc-card" style="background:#ffffff;border:1px solid #ddd6fe;border-left:4px solid #7c3aed;border-radius:14px;padding:16px 18px;margin-top:14px;box-shadow:0 2px 10px rgba(124,58,237,0.06);">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-bottom:1px solid #f3e8ff;padding-bottom:8px;margin-bottom:10px;">
+            <tr>
+              <td style="font-size:15px;font-weight:800;color:#4c1d95;">📰 Boletín de la Liga — Últimas Noticias</td>
+              <td align="right"><span style="background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:800;">{esc(league_name.upper())}</span></td>
+            </tr>
+          </table>
+          {''.join(sections)}
+        </div>
+        """
+
+    @staticmethod
     def _build_email_html(
         summary: Dict[str, Any],
         pending: List[Dict[str, Any]],
@@ -534,6 +727,8 @@ class NotificationHub:
         expected_xp = float(lu.get("expected_points", 0.0) or 0.0)
         start_cash = int(summary.get("starting_cash", 0) or 0)
         proj_cash = int(summary.get("projected_cash", 0) or 0)
+        proj_pend_cash = int(summary.get("projected_cash_with_pending_sales", proj_cash) or proj_cash)
+        eff_max_bid = int(summary.get("available_max_bid_effective", 0) or 0)
         cap_eur = int(summary.get("autonomous_clause_cap_eur", 0) or StrategySettings.AUTONOMOUS_CLAUSE_HARD_CAP_EUR)
         archetype_id = StrategySettings.ACTIVE_ARCHETYPE
 
@@ -614,7 +809,8 @@ class NotificationHub:
             <td class="kpi-col" width="32%" valign="top" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:13px 14px;">
               <div style="font-size:10.5px;font-weight:700;letter-spacing:0.06em;color:#64748b;text-transform:uppercase;">💰 Tesorería</div>
               <div style="font-size:16px;font-weight:800;color:#0f172a;margin:5px 0 3px 0;">{start_cash:,} €</div>
-              <div style="font-size:12px;color:#475569;margin-bottom:6px;">Proy: <b>{proj_cash:,} €</b></div>
+              <div style="font-size:12px;color:#475569;margin-bottom:3px;">Proy: <b>{proj_cash:,} €</b>{f' <span style="color:#0284c7;font-size:11px;">({proj_pend_cash:,} € tras OK)</span>' if proj_pend_cash > proj_cash + 10_000 else ''}</div>
+              {f'<div style="font-size:11px;color:#475569;margin-bottom:5px;">Puja máx: <b>{eff_max_bid:,} €</b></div>' if eff_max_bid > 0 else ''}
               {solvency_pill}
             </td>
             <td width="2%" style="font-size:0;">&nbsp;</td>
@@ -741,18 +937,40 @@ class NotificationHub:
         exec_ops_items: List[str] = []
         for s in (plan.get("all_sales") or []):
             if is_full_auto or is_dry_run or not s.get("requires_human_approval"):
+                buyer_badge = ""
+                if s.get("is_rival_buyer") and s.get("buyer_name"):
+                    prem_s = (
+                        f" (+{int(s['rival_premium_eur']):,} € vs Máquina)"
+                        if int(s.get("rival_premium_eur", 0) or 0) > 0
+                        else ""
+                    )
+                    buyer_badge = (
+                        f" <span style='background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;"
+                        f"padding:1px 6px;border-radius:999px;font-size:11px;font-weight:700;'>"
+                        f"→ {esc(str(s['buyer_name']))}{esc(prem_s)}</span>"
+                    )
                 exec_ops_items.append(
                     f"<tr><td style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;color:#1e293b;'>"
-                    f"💸 <b>Venta:</b> {esc(s['nombre'])} <span style='color:#64748b;'>({esc(s['reason'])})</span>{dry_tag}</td>"
+                    f"💸 <b>Venta:</b> {esc(s['nombre'])}{buyer_badge} <span style='color:#64748b;'>({esc(s['reason'])})</span>{dry_tag}</td>"
                     f"<td align='right' style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;font-weight:800;color:#059669;'>+{int(s['sale_price']):,} €</td></tr>"
                 )
+        clause_exec_map: Dict[str, str] = {}
+        for _ex in (summary.get("executions") or []):
+            _tp = str(_ex.get("type") or "")
+            _tg = str(_ex.get("target") or "")
+            if _tp in ("CLAUSE_DEFERRED", "CLAUSE_SNIPE") and _tg:
+                clause_exec_map[_tg] = str((_ex.get("res") or {}).get("status") or "")
         if is_full_auto or is_dry_run:
             for c in (plan.get("clause_snipes") or []):
+                _cst = clause_exec_map.get(str(c.get("nombre") or ""), "")
+                _is_def = (_cst == "DEFERRED_TO_PRE_LOCK")
+                _tag = " <span style='background:#fef3c7;color:#92400e;border:1px solid #f59e0b;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:800;'>DIFERIDA PRE-CIERRE</span>" if _is_def else dry_tag
+                _amt_col = f"<span style='color:#92400e;'>{int(c['amount']):,} € (en espera)</span>" if _is_def else f"-{int(c['amount']):,} €"
                 exec_ops_items.append(
                     f"<tr><td style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;color:#1e293b;'>"
-                    f"⚡ <b>Cláusula:</b> {esc(c['nombre'])} a {esc(str(c.get('seller', '')))}{dry_tag} "
+                    f"⚡ <b>Cláusula:</b> {esc(c['nombre'])} a {esc(str(c.get('seller', '')))}{_tag} "
                     f"<span style='color:#0284c7;font-weight:700;'>(+{c['delta_xp_xi']:.2f} xP)</span></td>"
-                    f"<td align='right' style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;font-weight:800;color:#dc2626;'>-{int(c['amount']):,} €</td></tr>"
+                    f"<td align='right' style='padding:6px 0;border-bottom:1px dashed #e2e8f0;font-size:13px;font-weight:800;color:#dc2626;'>{_amt_col}</td></tr>"
                 )
             for sh in (plan.get("defensive_shields") or []):
                 exec_ops_items.append(
@@ -770,9 +988,15 @@ class NotificationHub:
         def _bid_row(b: Dict[str, Any]) -> str:
             p_win = max(0, min(100, int(round(float(b.get("win_prob_est", 0.5) or 0.5) * 100))))
             bar_col = "#10b981" if p_win >= 65 else ("#f59e0b" if p_win >= 40 else "#ef4444")
+            seller_b = str(b.get("seller", "Mercado") or "Mercado").strip()
+            seller_pill = (
+                f" <span style='color:#2563eb;font-size:11px;font-weight:600;'>→ {esc(seller_b)}</span>"
+                if seller_b not in ("Mercado", "Libre", "None", "")
+                else ""
+            )
             return (
                 f"<tr>"
-                f"<td style='padding:8px 6px;border-bottom:1px solid #f1f5f9;'><b>{esc(b['nombre'])}</b> <span style='color:#64748b;font-size:11.5px;'>({esc(str(b.get('position', '')))})</span></td>"
+                f"<td style='padding:8px 6px;border-bottom:1px solid #f1f5f9;'><b>{esc(b['nombre'])}</b> <span style='color:#64748b;font-size:11.5px;'>({esc(str(b.get('position', '')))})</span>{seller_pill}</td>"
                 f"<td align='right' style='padding:8px 6px;border-bottom:1px solid #f1f5f9;color:#64748b;font-size:12.5px;'>{int(b['market_price']):,} €</td>"
                 f"<td align='right' style='padding:8px 6px;border-bottom:1px solid #f1f5f9;font-weight:800;color:#0f172a;'>{int(b['amount']):,} €</td>"
                 f"<td style='padding:8px 6px;border-bottom:1px solid #f1f5f9;'>"
@@ -819,6 +1043,87 @@ class NotificationHub:
           <div>{listings_chips}</div>
         </div>
         """
+
+        # Rival Negotiations Card (Incoming rival bids, counter-offers, open outgoing bids locking credit)
+        rn = summary.get("rival_negotiations") or {}
+        rn_inc = rn.get("incoming_rival_offers") or []
+        rn_co = rn.get("counter_offers") or []
+        rn_out = rn.get("outgoing_bids") or []
+        rival_card_html = ""
+        if rn_inc or rn_co or rn_out:
+            rn_sections: List[str] = []
+            if rn_inc:
+                ro_rows = "".join(
+                    f"<tr>"
+                    f"<td style='padding:7px 6px;border-bottom:1px solid #f1f5f9;'><b>{esc(str(r.get('nombre')))}</b>"
+                    f" <span style='color:#2563eb;font-size:11.5px;font-weight:700;'>← {esc(str(r.get('from_name')))}</span></td>"
+                    f"<td align='right' style='padding:7px 6px;border-bottom:1px solid #f1f5f9;font-weight:800;color:#059669;'>{int(r.get('amount', 0)):,} €</td>"
+                    f"<td style='padding:7px 6px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#475569;'>"
+                    f"{'<b>+' + format(int(r.get('rival_premium_eur', 0)), ',') + ' € vs Máquina</b> · ' if int(r.get('rival_premium_eur', 0) or 0) > 0 else ''}"
+                    f"{r.get('over_vm_pct', 0):+.1f}% vs VM · <span style='color:#0f172a;font-weight:600;'>{esc(str(r.get('action_label', '')))}</span></td>"
+                    f"</tr>"
+                    for r in rn_inc
+                )
+                rn_sections.append(
+                    "<div style='font-size:11.5px;font-weight:800;color:#065f46;text-transform:uppercase;letter-spacing:0.05em;margin:4px 0 4px 0;'>📥 Ofertas de Rivales por Tus Jugadores</div>"
+                    f"<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='font-size:12.5px;margin-bottom:10px;'>{ro_rows}</table>"
+                )
+            if rn_co:
+                co_rows = "".join(
+                    f"<tr>"
+                    f"<td style='padding:7px 6px;border-bottom:1px solid #f1f5f9;'><b>{esc(str(c.get('nombre')))}</b>"
+                    f" <span style='color:#9a3412;font-size:11.5px;font-weight:700;'>← {esc(str(c.get('from_name')))}</span></td>"
+                    f"<td align='right' style='padding:7px 6px;border-bottom:1px solid #f1f5f9;font-weight:800;color:#b45309;'>{int(c.get('amount', 0)):,} €</td>"
+                    f"<td style='padding:7px 6px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#475569;'>"
+                    f"VM {int(c.get('market_price', 0)):,} € ({c.get('over_vm_pct', 0):+.1f}% · {int(c.get('subida_24h', 0)):+,}€/d)<br/>"
+                    f"<span style='font-weight:700;color:#991b1b;'>{esc(str(c.get('action_label') or c.get('verdict_label', '')))}</span></td>"
+                    f"</tr>"
+                    for c in rn_co
+                )
+                rn_sections.append(
+                    "<div style='font-size:11.5px;font-weight:800;color:#9a3412;text-transform:uppercase;letter-spacing:0.05em;margin:6px 0 4px 0;'>📩 Contraofertas Recibidas</div>"
+                    f"<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='font-size:12.5px;margin-bottom:10px;'>{co_rows}</table>"
+                )
+            if rn_out:
+                out_rows = "".join(
+                    f"<tr>"
+                    f"<td style='padding:7px 6px;border-bottom:1px solid #f1f5f9;'><b>{esc(str(o.get('nombre')))}</b>"
+                    f" <span style='color:#475569;font-size:11.5px;'>→ {esc(str(o.get('to_name')))}</span></td>"
+                    f"<td align='right' style='padding:7px 6px;border-bottom:1px solid #f1f5f9;font-weight:700;color:#0f172a;'>{int(o.get('amount', 0)):,} €</td>"
+                    f"<td style='padding:7px 6px;border-bottom:1px solid #f1f5f9;font-size:12px;color:#475569;'>"
+                    f"{esc(str(o.get('status_label', '')))} · <code>/cancelar_puja {esc(str(o.get('offer_id', '')))}</code></td>"
+                    f"</tr>"
+                    for o in rn_out
+                )
+                locked_eur = int(rn.get("remaining_locked_credit_eur", rn.get("total_locked_credit_eur", 0)) or 0)
+                freed_eur = int(rn.get("freed_credit_eur", 0) or 0)
+                eff_mb = int(rn.get("effective_available_max_bid", eff_max_bid) or 0)
+                credit_banner = (
+                    f"🔓 Crédito liberado: +{freed_eur:,} € · Bloqueado restante: {locked_eur:,} €"
+                    if freed_eur > 0
+                    else f"Crédito bloqueado: {locked_eur:,} €"
+                )
+                if eff_mb > 0:
+                    credit_banner += f" · Puja máx efectiva: {eff_mb:,} €"
+                rn_sections.append(
+                    f"<div style='font-size:11.5px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin:6px 0 4px 0;'>"
+                    f"📤 Pujas Abiertas a Rivales ({esc(credit_banner)})</div>"
+                    f"<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' style='font-size:12.5px;'>{out_rows}</table>"
+                )
+
+            rival_card_html = f"""
+            <div class="fc-card" style="background:#ffffff;border:1px solid #bfdbfe;border-left:4px solid #2563eb;border-radius:14px;padding:16px 18px;margin-top:14px;box-shadow:0 2px 10px rgba(37,99,235,0.06);">
+              <div style="font-size:15px;font-weight:800;color:#1e3a8a;border-bottom:1px solid #eff6ff;padding-bottom:8px;margin-bottom:10px;">
+                🤝 Negociaciones y Ofertas con Rivales
+              </div>
+              {''.join(rn_sections)}
+            </div>
+            """
+
+        bulletin_card_html = NotificationHub._build_bulletin_html(
+            summary.get("league_bulletin") or {},
+            league_name=league_name,
+        )
 
         # Executive Briefing Card (Formatted Markdown)
         brief_raw = str(summary.get("briefing") or "").strip()
@@ -895,6 +1200,8 @@ class NotificationHub:
               {alerts_html}
               {lineup_card_html}
               {operations_card_html}
+              {rival_card_html}
+              {bulletin_card_html}
               {briefing_card_html}
               {easy_summary_html}
               <div style="text-align:center;font-size:11.5px;color:#64748b;margin-top:18px;padding:0 12px;">

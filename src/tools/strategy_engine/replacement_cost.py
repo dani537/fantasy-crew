@@ -341,9 +341,18 @@ class MarketScarcityEngine:
             merged["xp_best"] = 3.0
             merged["xp_healthy"] = 3.0
 
-        merged["natural_pos"] = merged["natural_pos"].fillna(merged["fallback_pos"])
-        merged["valid_lines"] = merged["valid_lines"].fillna(merged["natural_pos"])
-        merged["is_available"] = merged["is_available"].where(merged["is_available"].notna(), True).astype(bool)
+        if "natural_pos" not in merged.columns:
+            merged["natural_pos"] = merged["fallback_pos"]
+        else:
+            merged["natural_pos"] = merged["natural_pos"].fillna(merged["fallback_pos"])
+        if "valid_lines" not in merged.columns:
+            merged["valid_lines"] = merged["natural_pos"]
+        else:
+            merged["valid_lines"] = merged["valid_lines"].fillna(merged["natural_pos"])
+        if "is_available" not in merged.columns:
+            merged["is_available"] = True
+        else:
+            merged["is_available"] = merged["is_available"].where(merged["is_available"].notna(), True).astype(bool)
         if "xp_best" not in merged.columns:
             merged["xp_best"] = 3.0
         merged["xp_best"] = pd.to_numeric(merged["xp_best"], errors="coerce").fillna(2.5)

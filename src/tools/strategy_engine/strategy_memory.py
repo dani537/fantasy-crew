@@ -474,7 +474,12 @@ class StrategyMemoryLedger:
         Enqueues a high-stakes decision (`CLAUSE_SNIPE`, `DEFENSIVE_SHIELD`, `IMPORTANT_SALE`)
         requiring explicit user approval in `SEMI_AUTO`. Idempotent for identical open player+action.
         """
-        prefix = {"CLAUSE_SNIPE": "CL", "DEFENSIVE_SHIELD": "BL", "IMPORTANT_SALE": "VT"}.get(action_type, "OP")
+        prefix = {
+            "CLAUSE_SNIPE": "CL",
+            "DEFENSIVE_SHIELD": "BL",
+            "IMPORTANT_SALE": "VT",
+            "RIVAL_COUNTER_OFFER": "CO",
+        }.get(action_type, "OP")
         now = datetime.datetime.now()
         exp = now + datetime.timedelta(hours=int(expires_hours))
 

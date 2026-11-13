@@ -174,12 +174,14 @@ class AutopilotRunner:
         # Active waiting offers (with real `offer_id` when live!)
         offers_map: Dict[int, float] = {}
         offer_id_by_pid: Dict[int, int] = {}
+        offers_meta_by_pid: Dict[int, Dict[str, Any]] = {}
         live_offers = delta_state.get("waiting_offers_by_pid") or {}
         if delta_state.get("is_live"):
             for pid_s, of_obj in live_offers.items():
                 pid_i = int(pid_s)
                 offers_map[pid_i] = float(of_obj["amount"])
                 offer_id_by_pid[pid_i] = int(of_obj["offer_id"])
+                offers_meta_by_pid[pid_i] = dict(of_obj)
         else:
             try:
                 import sqlite3
@@ -259,6 +261,13 @@ class AutopilotRunner:
             "listings_df": listings_df,
             "offers_map": offers_map,
             "offer_id_by_pid": offer_id_by_pid,
+            "offers_meta_by_pid": offers_meta_by_pid,
+            "rival_incoming_offers": list(delta_state.get("rival_incoming_offers") or []),
+            "incoming_counter_offers": list(delta_state.get("incoming_counter_offers") or []),
+            "outgoing_bids": list(delta_state.get("outgoing_bids") or []),
+            "available_max_bid": int(delta_state.get("available_max_bid") or 0),
+            "committed_bids_eur": int(delta_state.get("committed_bids_eur") or 0),
+            "league_bulletin": dict(delta_state.get("league_bulletin") or {}),
             "currently_listed_pids": set(delta_state.get("currently_listed_pids") or []),
             "manager_id_by_name": delta_state.get("manager_id_by_name") or {},
             "sell_locked_ids": sell_locked_ids,
@@ -482,18 +491,67 @@ class AutopilotRunner:
             p_start_map=p_start_map,
             max_user_sales=self.rules.market_max_user_sales,
             credit_limit_ratio=self.rules.credit_limit_ratio,
+            auto_execute_important_sales=(self.mode != "SEMI_AUTO"),
         )
         approved_plan = validated["approved_plan"]
+        offers_meta_map: Dict[int, Dict[str, Any]] = ctx.get("offers_meta_by_pid") or {}
+        for _sk in ("solvency_sales", "routine_sales", "all_sales"):
+            for _sale in approved_plan.get(_sk, []):
+                _om = offers_meta_map.get(int(_sale.get("player_id", 0) or 0), {})
+                if _om:
+                    _sale["buyer_name"] = str(_om.get("from_name") or "Mercado")
+                    _sale["is_rival_buyer"] = bool(_om.get("is_rival", False))
+                    _sale["machine_offer_amount"] = int(round(float(_om.get("machine_amount", 0) or 0)))
+                    _sale["rival_premium_eur"] = int(_om.get("rival_premium_eur", 0) or 0)
 
         # 5. Phase-Aware Execution & SEMI_AUTO Human-Gate Queue
         execution_results: List[Dict[str, Any]] = []
         queued_decisions: List[str] = []
         offer_id_map: Dict[int, int] = ctx["offer_id_by_pid"]
         mgr_id_map: Dict[str, int] = ctx["manager_id_by_name"]
+        mgr_id_map_ci: Dict[str, int] = {str(k).strip().lower(): int(v) for k, v in mgr_id_map.items() if k and v}
 
         is_lineup_only_phase = (self.trigger_phase == "FINAL_LINEUP_GUARD")
         is_solvency_only_phase = (self.trigger_phase == "PRE_KICKOFF_SOLVENCY")
         is_clause_window_phase = (self.trigger_phase == "PRE_CLAUSE_LOCK")
+
+        # 5.0 Evaluate & Handle Rival Negotiations (reject overpriced counterOffers, free stale bid credit)
+        rival_negotiations = self._evaluate_rival_negotiations(
+            ctx=ctx,
+            approved_plan=approved_plan,
+            xp_table=xp_table,
+        )
+        base_max_bid = float(ctx.get("available_max_bid") or 0.0)
+        if base_max_bid <= 0 and not ctx.get("is_live_api"):
+            base_max_bid = max(
+                0.0,
+                float(ctx["current_cash"]) + squad_val * float(self.rules.credit_limit_ratio)
+                - float(rival_negotiations.get("total_locked_credit_eur", 0) or 0),
+            )
+        freed_credit_eur = 0.0
+        spent_cash_neg = 0.0
+        spent_credit_neg = 0.0
+        cancelled_outgoing_ids: Set[int] = set()
+        acquired_pids_now: Set[int] = set()
+
+        if self.trigger_phase in ("MORNING_FULL", "POST_ROUND_SETTLEMENT", "PRE_CLAUSE_LOCK"):
+            neg_res = self._execute_rival_negotiations_cleanup(
+                rival_negotiations=rival_negotiations,
+                ctx=ctx,
+                approved_plan=approved_plan,
+                market_actions=market_actions,
+                phase_ctx=phase_ctx,
+                base_max_bid=base_max_bid,
+                execution_results=execution_results,
+                queued_decisions=queued_decisions,
+            )
+            freed_credit_eur = float(neg_res["freed_credit_eur"])
+            spent_cash_neg = float(neg_res["spent_cash"])
+            spent_credit_neg = float(neg_res["spent_credit"])
+            cancelled_outgoing_ids = set(neg_res["cancelled_outgoing_ids"])
+            acquired_pids_now = set(neg_res["acquired_pids"])
+
+        executed_sales_cash_gain = 0.0
 
         # 5A. Pre-Kickoff Solvency Sales
         is_solvency_emergency = (
@@ -509,6 +567,8 @@ class AutopilotRunner:
                         oid = int(offer_id_map.get(pid, pid if self.dry_run else 0))
                         if oid > 0:
                             res = market_actions.accept_offer(oid)
+                            if not isinstance(res, dict) or res.get("status") != "ERROR":
+                                executed_sales_cash_gain += float(s.get("sale_price", 0) or 0)
                             execution_results.append({"type": "SOLVENCY_SALE", "target": s["nombre"], "res": res})
                     except Exception as e:
                         execution_results.append({"type": "SOLVENCY_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
@@ -528,6 +588,7 @@ class AutopilotRunner:
                             nombre=s["nombre"],
                             amount_eur=int(s["sale_price"]),
                             market_price_eur=int(s.get("market_price", s["sale_price"])),
+                            counterparty=str(s.get("buyer_name") or "Mercado"),
                             offer_id=oid,
                             rationale=(
                                 f"Rol={s.get('asset_role')} | {s['reason']} | "
@@ -539,6 +600,8 @@ class AutopilotRunner:
                     elif self.mode == "FULL_AUTO" or (self.mode == "SEMI_AUTO" and StrategySettings.AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO) or self.dry_run:
                         if oid > 0:
                             res = market_actions.accept_offer(oid)
+                            if not isinstance(res, dict) or res.get("status") != "ERROR":
+                                executed_sales_cash_gain += float(s.get("sale_price", 0) or 0)
                             execution_results.append({"type": "ROUTINE_SALE", "target": s["nombre"], "res": res})
                 except Exception as e:
                     execution_results.append({"type": "ROUTINE_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
@@ -554,12 +617,19 @@ class AutopilotRunner:
             StrategySettings.AUTONOMOUS_CLAUSE_HARD_CAP_EUR,
             max(StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR, int(net_equity * StrategySettings.AUTONOMOUS_CLAUSE_MAX_PCT)),
         )
-        running_cash_for_clauses = float(ctx["current_cash"])
+        running_cash_for_clauses = float(ctx["current_cash"]) + float(executed_sales_cash_gain) - float(spent_cash_neg)
+        live_available_max_bid = max(
+            0.0,
+            float(base_max_bid) + float(freed_credit_eur) + float(executed_sales_cash_gain) - float(spent_credit_neg),
+        )
         if self.trigger_phase in ("MORNING_FULL", "POST_ROUND_SETTLEMENT", "PRE_CLAUSE_LOCK"):
             for c in approved_plan.get("clause_snipes", []):
                 try:
                     pid = int(c["player_id"])
-                    owner_uid = int(mgr_id_map.get(str(c.get("seller", "")), 0))
+                    if pid in acquired_pids_now:
+                        continue
+                    seller_s = str(c.get("seller", "") or "")
+                    owner_uid = int(mgr_id_map.get(seller_s, 0) or mgr_id_map_ci.get(seller_s.strip().lower(), 0))
                     amt = int(c["amount"])
 
                     # Strategy-driven clause cadence gate before PRE_CLAUSE_LOCK
@@ -572,6 +642,7 @@ class AutopilotRunner:
                             execution_results.append({
                                 "type": "CLAUSE_DEFERRED",
                                 "target": c["nombre"],
+                                "amount": amt,
                                 "res": {"status": "DEFERRED_TO_PRE_LOCK", "timing": eff_timing, "hours_to_lock": round(phase_ctx.hours_to_clause_lock, 1)},
                             })
                             continue
@@ -579,13 +650,12 @@ class AutopilotRunner:
                             execution_results.append({
                                 "type": "CLAUSE_DEFERRED",
                                 "target": c["nombre"],
+                                "amount": amt,
                                 "res": {"status": "DEFERRED_TO_PRE_LOCK", "timing": eff_timing, "hours_to_lock": round(phase_ctx.hours_to_clause_lock, 1)},
                             })
                             continue
 
-                    is_solvent_clause = bool(ctx.get("is_solvent", True)) and (
-                        (not phase_ctx.must_be_solvent_now) or ((running_cash_for_clauses - amt) >= 0.0)
-                    )
+                    is_solvent_clause = bool(ctx.get("is_solvent", True)) and ((running_cash_for_clauses - amt) >= 0.0)
                     requires_approval = (
                         self.mode == "SEMI_AUTO"
                         or amt > dyn_clause_cap
@@ -598,10 +668,10 @@ class AutopilotRunner:
                             nombre=c["nombre"],
                             amount_eur=amt,
                             market_price_eur=int(c["market_price"]),
-                            counterparty=str(c.get("seller", "")),
+                            counterparty=seller_s,
                             owner_user_id=owner_uid,
                             rationale=(
-                                f"Cláusula a {c.get('seller')} (+{c['delta_xp_xi']:.2f} xP, {c.get('scarcity_tier', 'SCARCE')}, "
+                                f"Cláusula a {seller_s} (+{c['delta_xp_xi']:.2f} xP, {c.get('scarcity_tier', 'SCARCE')}, "
                                 f"Alpha neto +{int(c['expected_surplus']):,} €)"
                             ),
                             expires_hours=max(1, int(max(1.0, phase_ctx.hours_to_clause_lock))),
@@ -609,19 +679,32 @@ class AutopilotRunner:
                         )
                         queued_decisions.append(dec_id)
                     elif self.mode == "FULL_AUTO" or self.dry_run:
+                        if owner_uid <= 0 and not self.dry_run:
+                            execution_results.append({
+                                "type": "CLAUSE_SNIPE",
+                                "target": c["nombre"],
+                                "amount": amt,
+                                "res": {"status": "ERROR", "detail": f"OWNER_USER_ID_NOT_FOUND ({seller_s})"},
+                            })
+                            continue
                         res = market_actions.pay_clause(player_id=pid, amount=amt, owner_user_id=owner_uid)
-                        running_cash_for_clauses -= amt
+                        if not isinstance(res, dict) or res.get("status") != "ERROR":
+                            running_cash_for_clauses -= amt
+                            live_available_max_bid = max(0.0, live_available_max_bid - amt)
+                            acquired_pids_now.add(pid)
                         is_hi_val = amt > StrategySettings.AUTONOMOUS_CLAUSE_MAX_EUR
                         if is_hi_val:
                             high_value_clause_alerts.append({
                                 "nombre": c["nombre"],
                                 "amount": amt,
-                                "seller": str(c.get("seller", "")),
+                                "seller": seller_s,
                                 "delta_xp_xi": float(c.get("delta_xp_xi", 0.0)),
                             })
                         execution_results.append({
                             "type": "CLAUSE_SNIPE",
                             "target": c["nombre"],
+                            "amount": amt,
+                            "seller": seller_s,
                             "high_value_alert": is_hi_val,
                             "res": res,
                         })
@@ -646,11 +729,14 @@ class AutopilotRunner:
                         queued_decisions.append(dec_id)
                     elif self.mode == "FULL_AUTO" or self.dry_run:
                         res = market_actions.raise_clause(player_id=pid, increment_eur=spend)
+                        if not isinstance(res, dict) or res.get("status") != "ERROR":
+                            running_cash_for_clauses -= spend
+                            live_available_max_bid = max(0.0, live_available_max_bid - spend)
                         execution_results.append({"type": "DEFENSIVE_SHIELD", "target": sh["nombre"], "res": res})
                 except Exception as e:
                     execution_results.append({"type": "DEFENSIVE_SHIELD", "target": sh.get("nombre", str(sh)), "res": {"status": "ERROR", "detail": str(e)}})
 
-        # 5D. Autonomous Market Bids (Executed in SEMI_AUTO when AUTONOMOUS_BIDS_IN_SEMI_AUTO=True!)
+        # 5D. Autonomous Market Bids (Guarded against duplicate outgoing bids & live available_max_bid!)
         if self.trigger_phase in ("MORNING_FULL", "POST_ROUND_SETTLEMENT"):
             can_bid = (
                 self.mode == "FULL_AUTO"
@@ -658,18 +744,50 @@ class AutopilotRunner:
                 or self.dry_run
             )
             if can_bid:
+                remaining_outgoing_by_pid = {
+                    int(ob.get("player_id", 0) or 0): int(ob.get("amount", 0) or 0)
+                    for ob in (ctx.get("outgoing_bids") or [])
+                    if int(ob.get("offer_id", 0) or 0) not in cancelled_outgoing_ids
+                }
                 for b in approved_plan.get("market_bids", []):
                     try:
+                        b_pid = int(b["player_id"])
+                        b_amt = int(b["amount"])
+                        if b_pid in acquired_pids_now:
+                            continue
+                        prev_bid = remaining_outgoing_by_pid.get(b_pid, 0)
+                        if prev_bid > 0 and prev_bid >= int(b_amt * 0.90):
+                            execution_results.append({
+                                "type": "MARKET_BID",
+                                "target": b["nombre"],
+                                "res": {"status": "SKIPPED_DUPLICATE_OUTGOING_BID", "existing_amount": prev_bid},
+                            })
+                            continue
+                        if b_amt > live_available_max_bid:
+                            execution_results.append({
+                                "type": "MARKET_BID",
+                                "target": b["nombre"],
+                                "res": {
+                                    "status": "BLOCKED_AVAILABLE_MAX_BID",
+                                    "amount": b_amt,
+                                    "available_max_bid": int(live_available_max_bid),
+                                },
+                            })
+                            continue
                         seller_name = str(b.get("seller", "Mercado"))
                         seller_uid = mgr_id_map.get(seller_name) if seller_name not in ("Mercado", "Libre", "") else None
                         res = market_actions.place_bid(
-                            player_id=int(b["player_id"]),
-                            amount=int(b["amount"]),
+                            player_id=b_pid,
+                            amount=b_amt,
                             seller_user_id=seller_uid,
                         )
+                        if not isinstance(res, dict) or res.get("status") != "ERROR":
+                            live_available_max_bid = max(0.0, live_available_max_bid - b_amt)
                         execution_results.append({"type": "MARKET_BID", "target": b["nombre"], "res": res})
                     except Exception as e:
                         execution_results.append({"type": "MARKET_BID", "target": b.get("nombre", str(b)), "res": {"status": "ERROR", "detail": str(e)}})
+
+        rival_negotiations["effective_available_max_bid"] = int(max(0.0, live_available_max_bid))
 
         # 5E. Optimal MILP Starting XI Sync (Daily morning + Pre-kickoff Solvency + Final 30m Anti-Injury Guard!)
         lineup_info = approved_plan.get("lineup", {})
@@ -726,6 +844,7 @@ class AutopilotRunner:
             )
 
         pending_all = self.memory.get_pending_decisions("PENDING")
+        league_bulletin = ctx.get("league_bulletin") or {}
 
         # 7. Executive Briefing & Plain-Language Summary via TieredLLMRouter
         briefing_text = ""
@@ -738,6 +857,7 @@ class AutopilotRunner:
                 pending=pending_all,
                 posture=final_mods.to_dict(),
                 supervisor_res=supervisor_res,
+                rival_negotiations=rival_negotiations,
             )
             easy_summary_text = self._generate_plain_execution_summary(
                 ctx=ctx,
@@ -745,9 +865,11 @@ class AutopilotRunner:
                 execution_results=execution_results,
                 pending=pending_all,
                 projected_cash=validated["projected_cash"],
+                projected_cash_with_pending=validated.get("projected_cash_with_pending_sales", validated["projected_cash"]),
                 is_solvent=validated["is_safe"],
                 posture=final_mods.to_dict(),
                 supervisor_res=supervisor_res,
+                rival_negotiations=rival_negotiations,
             )
 
         cycle_summary = {
@@ -763,10 +885,15 @@ class AutopilotRunner:
             "phase_context": phase_ctx.to_dict(),
             "strategy_posture": final_mods.to_dict(),
             "supervisor_report": supervisor_res,
+            "rival_negotiations": rival_negotiations,
+            "league_bulletin": league_bulletin,
+            "available_max_bid_initial": int(base_max_bid),
+            "available_max_bid_effective": int(max(0.0, live_available_max_bid)),
             "high_value_clause_alerts": high_value_clause_alerts,
             "autonomous_clause_cap_eur": int(dyn_clause_cap),
             "starting_cash": ctx["current_cash"],
             "projected_cash": validated["projected_cash"],
+            "projected_cash_with_pending_sales": validated.get("projected_cash_with_pending_sales", validated["projected_cash"]),
             "is_solvent": validated["is_safe"],
             "plan": approved_plan,
             "pending_decisions": pending_all,
@@ -789,6 +916,363 @@ class AutopilotRunner:
 
         return cycle_summary
 
+    def _evaluate_rival_negotiations(
+        self,
+        ctx: Dict[str, Any],
+        approved_plan: Dict[str, Any],
+        xp_table: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """Summarizes rival incoming offers, counter-offers, and outgoing bids with quantitative verdicts."""
+        xp_idx = ClauseSniper._build_xp_idx(xp_table) if (xp_table is not None and not xp_table.empty) else {}
+        sold_pids = {int(s.get("player_id", 0) or 0) for s in (approved_plan.get("all_sales") or [])}
+        pending_sale_pids = {
+            int(s.get("player_id", 0) or 0)
+            for s in (approved_plan.get("routine_sales") or [])
+            if self.mode == "SEMI_AUTO" and s.get("requires_human_approval")
+        }
+        xi_floor_by_pos: Dict[str, float] = {"GK": 2.5, "DF": 3.0, "MF": 3.2, "FW": 3.2}
+        slots_by_line: Dict[str, List[float]] = {"GK": [], "DF": [], "MF": [], "FW": []}
+        for sl in ((approved_plan.get("lineup") or {}).get("slots") or []):
+            slots_by_line.setdefault(str(sl.get("linea", "MF")), []).append(float(sl.get("xp", 0.0)))
+        for ln, vals in slots_by_line.items():
+            if vals:
+                xi_floor_by_pos[ln] = min(vals)
+
+        outgoing_by_pid: Dict[int, Dict[str, Any]] = {}
+        for ob in (ctx.get("outgoing_bids") or []):
+            opid = int(ob.get("player_id", 0) or 0)
+            if opid > 0:
+                outgoing_by_pid[opid] = ob
+
+        incoming_rival: List[Dict[str, Any]] = []
+        for ro in (ctx.get("rival_incoming_offers") or []):
+            pid = int(ro.get("player_id", 0) or 0)
+            amt = int(ro.get("amount", 0) or 0)
+            vm = int(ro.get("market_price", 0) or 0)
+            m_amt = int(ro.get("machine_amount", 0) or 0)
+            prem = int(ro.get("rival_premium_eur", 0) or 0)
+            over_vm_pct = round(((amt - vm) / vm) * 100.0, 1) if vm > 0 else 0.0
+            if pid in pending_sale_pids:
+                bot_action = "PENDIENTE_OK"
+                action_label = "⏳ Venta importante en espera de /aprobar"
+            elif pid in sold_pids:
+                bot_action = "ACEPTADA_SIMULACRO" if self.dry_run else "ACEPTADA"
+                action_label = "🤝 Venta asignada al rival [Simulacro]" if self.dry_run else "✅ Oferta aceptada (NPV_SELL > NPV_HOLD)"
+            else:
+                bot_action = "RECHAZADA_SE_CONSERVA"
+                action_label = "🛡️ Descartada — NPV_HOLD superior, se conserva"
+
+            incoming_rival.append({
+                "offer_id": int(ro.get("offer_id", 0) or 0),
+                "player_id": pid,
+                "nombre": str(ro.get("nombre") or f"ID {pid}"),
+                "from_name": str(ro.get("from_name") or "Rival"),
+                "amount": amt,
+                "market_price": vm,
+                "machine_amount": m_amt,
+                "rival_premium_eur": prem,
+                "over_vm_pct": over_vm_pct,
+                "age_hours": ro.get("age_hours"),
+                "bot_action": bot_action,
+                "action_label": action_label,
+            })
+
+        counter_pids: Set[int] = set()
+        counter_offers: List[Dict[str, Any]] = []
+        for co in (ctx.get("incoming_counter_offers") or []):
+            pid = int(co.get("player_id", 0) or 0)
+            counter_pids.add(pid)
+            amt = int(co.get("amount", 0) or 0)
+            vm = int(co.get("market_price", 0) or 0)
+            sub24 = int(co.get("subida_24h", 0) or 0)
+            over_vm_pct = round(((amt - vm) / vm) * 100.0, 1) if vm > 0 else 0.0
+            xp_row = xp_idx.get(pid, {})
+            xp_best = float(xp_row.get("xp_best", 0.0))
+            best_ln = str(xp_row.get("best_line", "MF"))
+            delta_xp_xi = round(xp_best - float(xi_floor_by_pos.get(best_ln, 3.2)), 2) if xp_row else 0.0
+            is_avail = bool(xp_row.get("is_available", True)) if xp_row else True
+            paired_ob = outgoing_by_pid.get(pid, {})
+
+            if (vm > 0 and (over_vm_pct >= 20.0 or (over_vm_pct >= 12.0 and sub24 < 0))) or not is_avail:
+                verdict = "SOBREPRECIO_RECHAZAR"
+                verdict_label = f"⛔ Sobreprecio ({over_vm_pct:+.1f}% vs VM) — Conviene rechazar"
+            elif xp_best >= 4.0 and delta_xp_xi >= 0.45 and over_vm_pct <= 12.0 and sub24 >= -25_000:
+                verdict = "ACEPTABLE_SI_MEJORA_XI"
+                verdict_label = f"✅ Contraoferta competitiva (+{delta_xp_xi:.2f} xP XI, {over_vm_pct:+.1f}% vs VM)"
+            elif xp_best >= 3.2 and over_vm_pct <= 12.0 and sub24 >= -40_000:
+                verdict = "RAZONABLE_VALORAR"
+                verdict_label = f"👀 Precio competitivo ({over_vm_pct:+.1f}% vs VM · {xp_best:.1f} xP)"
+            else:
+                verdict = "CARO_DESCARTAR"
+                verdict_label = f"⚠️ Poco margen ({over_vm_pct:+.1f}% vs VM) — Descartar"
+
+            counter_offers.append({
+                "offer_id": int(co.get("offer_id", 0) or 0),
+                "player_id": pid,
+                "nombre": str(co.get("nombre") or f"ID {pid}"),
+                "from_name": str(co.get("from_name") or "Rival"),
+                "amount": amt,
+                "market_price": vm,
+                "subida_24h": sub24,
+                "over_vm_pct": over_vm_pct,
+                "xp_best": round(xp_best, 2),
+                "delta_xp_xi": delta_xp_xi,
+                "age_hours": co.get("age_hours"),
+                "matching_outgoing_offer_id": int(paired_ob.get("offer_id", 0) or 0),
+                "matching_outgoing_amount": int(paired_ob.get("amount", 0) or 0),
+                "verdict": verdict,
+                "verdict_label": verdict_label,
+                "bot_action": "EVALUADA",
+                "action_label": verdict_label,
+            })
+
+        outgoing_list: List[Dict[str, Any]] = []
+        total_locked = 0
+        for ob in (ctx.get("outgoing_bids") or []):
+            pid = int(ob.get("player_id", 0) or 0)
+            amt = int(ob.get("amount", 0) or 0)
+            total_locked += amt
+            vm = int(ob.get("market_price", 0) or 0)
+            over_vm_pct = round(((amt - vm) / vm) * 100.0, 1) if vm > 0 else 0.0
+            age_h = ob.get("age_hours")
+            has_co = pid in counter_pids
+            if has_co:
+                st_lbl = "Con contraoferta rival"
+            elif age_h is not None and float(age_h) >= 48.0:
+                st_lbl = f"Estancada ({int(float(age_h) // 24)}d · bloquea margen)"
+            else:
+                st_lbl = "Esperando respuesta"
+            outgoing_list.append({
+                "offer_id": int(ob.get("offer_id", 0) or 0),
+                "player_id": pid,
+                "nombre": str(ob.get("nombre") or f"ID {pid}"),
+                "to_name": str(ob.get("to_name") or "Mercado"),
+                "amount": amt,
+                "market_price": vm,
+                "over_vm_pct": over_vm_pct,
+                "age_hours": age_h,
+                "has_counter_offer": has_co,
+                "bot_action": "ACTIVA",
+                "status_label": st_lbl,
+            })
+
+        return {
+            "incoming_rival_offers": incoming_rival,
+            "counter_offers": counter_offers,
+            "outgoing_bids": outgoing_list,
+            "total_locked_credit_eur": int(total_locked),
+            "freed_credit_eur": 0,
+            "remaining_locked_credit_eur": int(total_locked),
+        }
+
+    def _execute_rival_negotiations_cleanup(
+        self,
+        rival_negotiations: Dict[str, Any],
+        ctx: Dict[str, Any],
+        approved_plan: Dict[str, Any],
+        market_actions: BiwengerMarketActions,
+        phase_ctx: RoundPhaseContext,
+        base_max_bid: float,
+        execution_results: List[Dict[str, Any]],
+        queued_decisions: List[str],
+    ) -> Dict[str, Any]:
+        """Executes safe negotiation actions: reject overpriced counterOffers, accept high-alpha deals, cancel stale bids."""
+        can_clean_bids = (
+            self.mode == "FULL_AUTO"
+            or (self.mode == "SEMI_AUTO" and StrategySettings.AUTONOMOUS_BIDS_IN_SEMI_AUTO)
+            or self.dry_run
+        )
+        freed_credit_eur = 0.0
+        spent_cash = 0.0
+        spent_credit = 0.0
+        cancelled_outgoing_ids: Set[int] = set()
+        acquired_pids: Set[int] = set()
+        net_squad_size = (
+            len(ctx.get("squad_df", pd.DataFrame()))
+            - len(approved_plan.get("all_sales") or [])
+        )
+        max_squad = int(getattr(self.rules, "team_max_size", 22) or 22)
+
+        # 1. Process incoming counterOffers from rivals
+        for co in (rival_negotiations.get("counter_offers") or []):
+            co_oid = int(co.get("offer_id", 0) or 0)
+            co_pid = int(co.get("player_id", 0) or 0)
+            co_amt = int(co.get("amount", 0) or 0)
+            orig_oid = int(co.get("matching_outgoing_offer_id", 0) or 0)
+            orig_amt = int(co.get("matching_outgoing_amount", 0) or 0)
+            verdict = str(co.get("verdict") or "")
+
+            if verdict == "SOBREPRECIO_RECHAZAR" and can_clean_bids and co_oid > 0:
+                try:
+                    res = market_actions.reject_offer(co_oid)
+                    execution_results.append({
+                        "type": "RIVAL_COUNTER_REJECT",
+                        "target": co["nombre"],
+                        "amount": co_amt,
+                        "res": res,
+                    })
+                except Exception as e:
+                    execution_results.append({"type": "RIVAL_COUNTER_REJECT", "target": co["nombre"], "res": {"status": "ERROR", "detail": str(e)}})
+                if orig_oid > 0 and orig_oid not in cancelled_outgoing_ids:
+                    try:
+                        c_res = market_actions.cancel_offer(orig_oid)
+                        if not isinstance(c_res, dict) or c_res.get("status") != "ERROR":
+                            cancelled_outgoing_ids.add(orig_oid)
+                            freed_credit_eur += float(orig_amt)
+                        execution_results.append({
+                            "type": "RIVAL_BID_CANCEL",
+                            "target": co["nombre"],
+                            "amount": orig_amt,
+                            "res": c_res,
+                        })
+                    except Exception as e:
+                        execution_results.append({"type": "RIVAL_BID_CANCEL", "target": co["nombre"], "res": {"status": "ERROR", "detail": str(e)}})
+                co["bot_action"] = "RECHAZADA_SIMULACRO" if self.dry_run else "RECHAZADA_AUTO"
+                co["action_label"] = (
+                    "⛔ Contraoferta rechazada y puja cancelada [Simulacro]"
+                    if self.dry_run
+                    else "⛔ Contraoferta rechazada y puja cancelada (+crédito liberado)"
+                )
+
+            elif verdict == "ACEPTABLE_SI_MEJORA_XI" and co_oid > 0:
+                avail_now = float(base_max_bid) + freed_credit_eur - spent_credit
+                has_slot = (net_squad_size + len(acquired_pids)) < max_squad
+                if has_slot and co_amt <= avail_now:
+                    if self.mode == "SEMI_AUTO" and not self.dry_run:
+                        dec_id = self.memory.queue_pending_decision(
+                            action_type="RIVAL_COUNTER_OFFER",
+                            player_id=co_pid,
+                            nombre=co["nombre"],
+                            amount_eur=co_amt,
+                            market_price_eur=int(co.get("market_price", co_amt)),
+                            counterparty=str(co.get("from_name", "Rival")),
+                            offer_id=co_oid,
+                            rationale=co.get("verdict_label", "Contraoferta rival competitiva"),
+                            expires_hours=max(4, min(24, int(max(4.0, phase_ctx.hours_to_kickoff)))),
+                            payload=co,
+                        )
+                        queued_decisions.append(dec_id)
+                        co["bot_action"] = "PENDIENTE_OK"
+                        co["action_label"] = "⏳ Contraoferta favorable en espera de /aprobar"
+                    elif self.mode == "FULL_AUTO" or self.dry_run:
+                        try:
+                            a_res = market_actions.accept_offer(co_oid)
+                            if not isinstance(a_res, dict) or a_res.get("status") != "ERROR":
+                                spent_cash += float(co_amt)
+                                spent_credit += float(co_amt)
+                                acquired_pids.add(co_pid)
+                                if orig_oid > 0 and orig_oid not in cancelled_outgoing_ids:
+                                    cancelled_outgoing_ids.add(orig_oid)
+                                    freed_credit_eur += float(orig_amt)
+                            execution_results.append({
+                                "type": "RIVAL_COUNTER_ACCEPT",
+                                "target": co["nombre"],
+                                "amount": co_amt,
+                                "res": a_res,
+                            })
+                            co["bot_action"] = "ACEPTADA_SIMULACRO" if self.dry_run else "ACEPTADA_AUTO"
+                            co["action_label"] = "✅ Contraoferta aceptada [Simulacro]" if self.dry_run else "✅ Contraoferta aceptada automáticamente"
+                        except Exception as e:
+                            execution_results.append({"type": "RIVAL_COUNTER_ACCEPT", "target": co["nombre"], "res": {"status": "ERROR", "detail": str(e)}})
+
+        # 2. Cancel stale unanswered outgoing bids (>= 48h) that lock available_max_bid
+        for ob in (rival_negotiations.get("outgoing_bids") or []):
+            ob_oid = int(ob.get("offer_id", 0) or 0)
+            ob_amt = int(ob.get("amount", 0) or 0)
+            if ob_oid in cancelled_outgoing_ids:
+                ob["bot_action"] = "CANCELADA_SIMULACRO" if self.dry_run else "CANCELADA_AUTO"
+                ob["status_label"] = "🧹 Puja cancelada tras contraoferta cara [Simulacro]" if self.dry_run else "🧹 Puja cancelada tras contraoferta cara"
+                continue
+            age_h = ob.get("age_hours")
+            if can_clean_bids and ob_oid > 0 and not ob.get("has_counter_offer") and age_h is not None and float(age_h) >= 48.0:
+                try:
+                    c_res = market_actions.cancel_offer(ob_oid)
+                    if not isinstance(c_res, dict) or c_res.get("status") != "ERROR":
+                        cancelled_outgoing_ids.add(ob_oid)
+                        freed_credit_eur += float(ob_amt)
+                    execution_results.append({
+                        "type": "RIVAL_BID_CANCEL",
+                        "target": ob["nombre"],
+                        "amount": ob_amt,
+                        "res": c_res,
+                    })
+                    ob["bot_action"] = "CANCELADA_STALE_SIMULACRO" if self.dry_run else "CANCELADA_STALE"
+                    ob["status_label"] = (
+                        f"🧹 Puja estancada ({int(float(age_h) // 24)}d) cancelada [Simulacro · +{ob_amt/1e6:.2f}M margen]"
+                        if self.dry_run
+                        else f"🧹 Puja estancada ({int(float(age_h) // 24)}d) cancelada (+{ob_amt/1e6:.2f}M margen)"
+                    )
+                except Exception as e:
+                    execution_results.append({"type": "RIVAL_BID_CANCEL", "target": ob["nombre"], "res": {"status": "ERROR", "detail": str(e)}})
+
+        rival_negotiations["freed_credit_eur"] = int(freed_credit_eur)
+        rival_negotiations["remaining_locked_credit_eur"] = max(
+            0, int(rival_negotiations.get("total_locked_credit_eur", 0) or 0) - int(freed_credit_eur)
+        )
+        return {
+            "freed_credit_eur": freed_credit_eur,
+            "spent_cash": spent_cash,
+            "spent_credit": spent_credit,
+            "cancelled_outgoing_ids": cancelled_outgoing_ids,
+            "acquired_pids": acquired_pids,
+        }
+
+    @staticmethod
+    def _format_bulletin_prompt_lines(league_bulletin: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(league_bulletin, dict) or not any(league_bulletin.values()):
+            return "Sin novedades recientes registradas en el muro de la liga."
+        lines: List[str] = []
+        ms = league_bulletin.get("my_standings") or {}
+        if ms:
+            lines.append(
+                f"Clasificación: #{ms.get('rank')}/{ms.get('total_managers')} ({ms.get('points')} pts, "
+                f"a {ms.get('points_to_leader', 0)} pts del líder {ms.get('leader_name', '')})."
+            )
+        for c in (league_bulletin.get("clauses") or [])[:4]:
+            tag = " [TE AFECTA]" if c.get("involves_me") else ""
+            lines.append(
+                f"Clausulazo{tag}: {c.get('to_name')} fichó a {c.get('nombre')} ({c.get('from_name')}) por {int(c.get('amount', 0)):,}€ ({c.get('date_iso', '')})."
+            )
+        for d in (league_bulletin.get("manager_deals") or [])[:4]:
+            tag = " [TUYO]" if d.get("involves_me") else ""
+            bids_txt = f" ({d.get('bid_count')} pujas)" if int(d.get("bid_count", 1) or 1) > 1 else ""
+            lines.append(
+                f"Fichaje{tag}: {d.get('to_name')} -> {d.get('nombre')} desde {d.get('from_name')} por {int(d.get('amount', 0)):,}€{bids_txt}."
+            )
+        for sh in (league_bulletin.get("clause_shields") or [])[:2]:
+            lines.append(f"Blindaje rival: {sh.get('user_name')} subió cláusula de {sh.get('nombre')} hasta {int(sh.get('release_clause', 0)):,}€.")
+        for inj in (league_bulletin.get("injury_alerts") or [])[:3]:
+            lines.append(f"Parte médico LaLiga: {inj.get('nombre')} ({inj.get('team')}, {int(inj.get('price', 0))//1000}k€) -> {inj.get('status')}.")
+        return " | ".join(lines) or "Sin novedades destacadas."
+
+    @staticmethod
+    def _format_rival_neg_prompt_lines(rival_negotiations: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(rival_negotiations, dict):
+            return "Ninguna negociación activa con rivales."
+        parts: List[str] = []
+        for ro in (rival_negotiations.get("incoming_rival_offers") or []):
+            extra = f" (+{ro['rival_premium_eur']:,}€ vs Máquina)" if ro.get("rival_premium_eur") else ""
+            parts.append(
+                f"Oferta de {ro['from_name']} por tu {ro['nombre']}: {ro['amount']:,}€{extra} -> {ro.get('action_label', '')}"
+            )
+        for co in (rival_negotiations.get("counter_offers") or []):
+            parts.append(
+                f"Contraoferta de {co['from_name']} por {co['nombre']}: pide {co['amount']:,}€ "
+                f"(VM {co['market_price']:,}€, {co['over_vm_pct']:+.1f}%) -> {co.get('action_label') or co.get('verdict_label', '')}"
+            )
+        for ob in (rival_negotiations.get("outgoing_bids") or []):
+            parts.append(
+                f"Puja tuya hacia {ob['to_name']} por {ob['nombre']}: {ob['amount']:,}€ ({ob.get('status_label', '')})"
+            )
+        if rival_negotiations.get("freed_credit_eur"):
+            parts.append(
+                f"Crédito liberado al limpiar pujas/contraofertas: +{rival_negotiations['freed_credit_eur']:,}€ "
+                f"(Puja máxima efectiva restante: {rival_negotiations.get('effective_available_max_bid', 0):,}€)"
+            )
+        elif rival_negotiations.get("total_locked_credit_eur"):
+            parts.append(f"Crédito total comprometido en pujas abiertas: {rival_negotiations['total_locked_credit_eur']:,}€")
+        return " | ".join(parts) if parts else "Ninguna negociación activa con rivales."
+
     def _generate_executive_briefing(
         self,
         ctx: Dict[str, Any],
@@ -797,6 +1281,7 @@ class AutopilotRunner:
         pending: List[Dict[str, Any]],
         posture: Optional[Dict[str, Any]] = None,
         supervisor_res: Optional[Dict[str, Any]] = None,
+        rival_negotiations: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Calls TieredLLMRouter to synthesize a personalized, memory-aware executive briefing."""
         phase_ctx: RoundPhaseContext = ctx["phase_ctx"]
@@ -804,7 +1289,9 @@ class AutopilotRunner:
 
         is_semi = (self.mode == "SEMI_AUTO")
         sales_str = ", ".join(
-            f"{s['nombre']} ({s['sale_price']:,}€ · {s['reason']}"
+            f"{s['nombre']} ({s['sale_price']:,}€"
+            f"{' a ' + str(s['buyer_name']) if s.get('is_rival_buyer') and s.get('buyer_name') else ''}"
+            f" · {s['reason']}"
             f"{' [Requiere OK]' if (is_semi and s.get('requires_human_approval')) else ''})"
             for s in plan.get("all_sales", [])
         ) or "Ninguna"
@@ -824,6 +1311,8 @@ class AutopilotRunner:
         listings_str = ", ".join(
             f"{p['nombre']} ({p['asking_price']:,}€)" for p in plan.get("preventive_listings", [])
         ) or "Ninguno"
+        rival_str = self._format_rival_neg_prompt_lines(rival_negotiations)
+        bulletin_str = self._format_bulletin_prompt_lines(ctx.get("league_bulletin"))
         lineup_str = f"Formación {plan['lineup']['formation']} (xP esperados: {plan['lineup']['expected_points']:.1f} pts)"
         mem_brief = self.memory.build_context_brief_for_llm()
         sec3_title = (
@@ -845,10 +1334,12 @@ Genera un briefing ejecutivo conciso en texto limpio (máximo 4 bloques cortos c
 
 - Modo: {self.mode} (Dry Run: {self.dry_run}) | Fase Calendario J{ctx['target_jornada_num']}: {phase_ctx.phase_name}
 {sup_note}- Inicio J{ctx['target_jornada_num']}: {phase_ctx.next_kickoff_ts} ({phase_ctx.hours_to_kickoff:.1f}h) | Cláusulas abiertas ({self.rules.clause_disabled_hours}h): {phase_ctx.clauses_open} | Parón FIFA: {phase_ctx.is_international_break}
-- Caja Actual: {ctx['current_cash']:,} € -> Proyectada hoy tras ventas: {plan['post_sales_cash']:,} € (Nota Biwenger: las pujas son a sobre cerrado y solo descuentan caja mañana a las 06:00 si se ganan, respaldadas por nuestro Colateral Líquido Top-{self.rules.market_max_user_sales}: {plan.get('top_k_liquid_collateral', 0):,} €)
+- Caja Actual: {ctx['current_cash']:,} € -> Proyectada hoy tras todas las ventas del plan: {plan['post_sales_cash']:,} € | Puja máx operativa hoy: {int((rival_negotiations or {}).get('effective_available_max_bid', ctx.get('available_max_bid', 0))):,} € (Nota Biwenger: las pujas son a sobre cerrado respaldadas por nuestro Colateral Líquido Top-{self.rules.market_max_user_sales}: {plan.get('top_k_liquid_collateral', 0):,} €)
 - Pujas Autónomas Lanzadas: {bids_str}
 - Ventas Ejecutadas Hoy (NPV / Arbitraje / Solvencia): {sales_str}
+- Negociaciones Directas con Rivales (Ofertas recibidas / Contraofertas / Pujas abiertas y crédito liberado): {rival_str}
 - Cláusulas Quirúrgicas Evaluadas: {clauses_str} | Blindajes Defensivos: {shields_str}
+- Últimas Noticias de la Liga (Clausulazos, fichajes rivales y bajas LaLiga): {bulletin_str}
 - Escaparate Preventivo Top-{len(plan.get('preventive_listings', []))} (+5% VM, máx oficial {self.rules.market_max_user_sales}): {listings_str} (Nota: listar flips/parches en el escaparate cuesta 0€ y es intencional para recibir ofertas diarias ±5% de la Máquina como colateral y opción de venta gratis; NO implica venderlos salvo oferta pico o necesidad de solvencia)
 - Once Titular Óptimo MILP: {lineup_str}
 - Decisiones Esperando Confirmación Humana (`/aprobar`): {len(pending)}
@@ -856,10 +1347,10 @@ Genera un briefing ejecutivo conciso en texto limpio (máximo 4 bloques cortos c
 {mem_brief}
 
 Estructura:
-1. Diagnóstico Financiero, Fase de Jornada y Escasez
-2. Operaciones Autónomas Ejecutadas (Pujas, Escaparate Top-5 y Once MILP)
+1. Diagnóstico Financiero, Noticias de la Liga y Escasez
+2. Operaciones Autónomas Ejecutadas (Pujas, Limpieza con Rivales, Escaparate y Once)
 {sec3_title}
-4. Continuidad Estratégica de Medio Plazo
+4. Continuidad Estratégica y Próximos Movimientos
 """
         try:
             client = TieredLLMRouter.get_client(tier=tier)
@@ -871,7 +1362,7 @@ Estructura:
                 f"• Estado J{ctx['target_jornada_num']} ({phase_ctx.phase_name}): Caja {ctx['current_cash']:,} € | Cláusulas abiertas: {phase_ctx.clauses_open}.\n"
                 f"• Once MILP: {lineup_str}.\n"
                 f"• Pujas autónomas: {bids_str} | Escaparate Top-{len(plan.get('preventive_listings', []))}: {listings_str}.\n"
-                f"• Ventas: {sales_str} | Cláusulas en cola humana: {clauses_str}."
+                f"• Ventas: {sales_str} | Rivales: {rival_str} | Cláusulas: {clauses_str}."
             )
 
     def _generate_plain_execution_summary(
@@ -884,15 +1375,44 @@ Estructura:
         is_solvent: bool,
         posture: Optional[Dict[str, Any]] = None,
         supervisor_res: Optional[Dict[str, Any]] = None,
+        rival_negotiations: Optional[Dict[str, Any]] = None,
+        projected_cash_with_pending: Optional[float] = None,
     ) -> str:
         """Generates a short, plain-language LLM summary of everything done in this run for the email footer."""
         lu = plan.get("lineup") or {}
         xi_names = ", ".join(s["nombre"] for s in (lu.get("slots") or [])) or "Sin cambios"
         bids = ", ".join(f"{b['nombre']} ({int(b['amount']):,} €)" for b in (plan.get("market_bids") or [])) or "Ninguna"
-        sales = ", ".join(f"{s['nombre']} ({int(s['sale_price']):,} €)" for s in (plan.get("all_sales") or [])) or "Ninguna"
-        clauses = ", ".join(f"{c['nombre']} ({int(c['amount']):,} € a {c.get('seller', '')})" for c in (plan.get("clause_snipes") or [])) or "Ninguna"
+        sales = ", ".join(
+            f"{s['nombre']} ({int(s['sale_price']):,} €"
+            f"{' a ' + str(s['buyer_name']) if s.get('is_rival_buyer') and s.get('buyer_name') else ''})"
+            for s in (plan.get("all_sales") or [])
+        ) or "Ninguna"
+        clause_status_by_target: Dict[str, str] = {}
+        for ex in execution_results:
+            tp = str(ex.get("type") or "")
+            tgt = str(ex.get("target") or "")
+            if tp in ("CLAUSE_DEFERRED", "CLAUSE_SNIPE") and tgt:
+                st = str((ex.get("res") or {}).get("status") or "")
+                if st == "DEFERRED_TO_PRE_LOCK":
+                    clause_status_by_target[tgt] = "DIFERIDO A VENTANA PRE-CIERRE"
+                elif st == "ERROR":
+                    clause_status_by_target[tgt] = "ERROR AL EJECUTAR"
+                elif st in ("DRY_RUN", "DRY_RUN_SIMULATED"):
+                    clause_status_by_target[tgt] = "SIMULADO"
+                else:
+                    clause_status_by_target[tgt] = "EJECUTADO"
+        clauses = ", ".join(
+            f"{c['nombre']} ({int(c['amount']):,} € a {c.get('seller', '')} · "
+            f"{clause_status_by_target.get(str(c['nombre']), 'EN COLA /aprobar' if self.mode == 'SEMI_AUTO' else 'PLANIFICADO')})"
+            for c in (plan.get("clause_snipes") or [])
+        ) or "Ninguno"
         shields = ", ".join(f"{sh['nombre']} (+{int(sh['recommended_cash_spend']):,} €)" for sh in (plan.get("defensive_shields") or [])) or "Ninguno"
         listings = ", ".join(f"{p['nombre']} ({int(p['asking_price']):,} €)" for p in (plan.get("preventive_listings") or [])) or "Ninguno"
+        rival_str = self._format_rival_neg_prompt_lines(rival_negotiations)
+        bulletin_str = self._format_bulletin_prompt_lines(ctx.get("league_bulletin"))
+        cash_pend_txt = ""
+        if projected_cash_with_pending is not None and abs(float(projected_cash_with_pending) - float(projected_cash)) > 10_000:
+            cash_pend_txt = f" (o {int(projected_cash_with_pending):,} € si apruebas las ventas importantes)"
         errors = [
             f"{ex.get('type')}: {ex.get('target', '')} -> {ex.get('res', {}).get('detail', '')}"
             for ex in execution_results
@@ -904,17 +1424,19 @@ Resume en español muy claro, cercano y fácil de leer (máximo 5-6 puntos corto
 
 - Fecha / Fase: {ctx['date']} ({self.trigger_phase}) | Modo: {self.mode} (Simulacro={self.dry_run})
 - Enfoque estratégico hoy: {(posture or {}).get('posture', 'AUTO')} (#{(posture or {}).get('my_rank', '?')}/{(posture or {}).get('total_managers', '?')}, brecha {(posture or {}).get('gap_to_leader', 0):+.0f} pts) — {(posture or {}).get('extra', {}).get('llm_rationale') or (posture or {}).get('rationale', 'Equilibrado')}
-- Dinero en caja ahora: {int(ctx['current_cash']):,} € | Saldo proyectado tras ventas: {int(projected_cash):,} € | Solvente: {'Sí' if is_solvent else 'No'}
+- Dinero en caja ahora: {int(ctx['current_cash']):,} € | Saldo proyectado tras ventas: {int(projected_cash):,} €{cash_pend_txt} | Puja máx operativa actual: {int((rival_negotiations or {}).get('effective_available_max_bid', ctx.get('available_max_bid', 0))):,} € | Solvente: {'Sí' if is_solvent else 'No'}
 - Alineación guardada para J{ctx['target_jornada_num']}: {lu.get('formation', '4-4-2')} ({xi_names})
 - Pujas realizadas en el mercado: {bids}
 - Jugadores vendidos: {sales}
+- Ofertas y negociaciones con rivales (ofertas recibidas, contraofertas y pujas abiertas): {rival_str}
 - Clausulazos: {clauses}
 - Blindajes de cláusula propia: {shields}
 - Jugadores puestos en venta en el escaparate (solo para recibir ofertas de la Máquina, sin obligación de vender): {listings}
+- Últimas noticias destacadas de tu liga (clausulazos entre rivales, fichajes y parte médico): {bulletin_str}
 - Decisiones esperando tu aprobación manual: {len(pending)}
 - Errores durante la ejecución: {', '.join(errors) if errors else 'Ninguno'}
 
-Redacta directamente el resumen final para el usuario: qué se ha hecho hoy paso a paso, cómo queda el equipo y el dinero, y si tiene que hacer algo manualmente o está todo listo.
+Redacta directamente el resumen final para el usuario: incluye en 1-2 viñetas lo más sonado del boletín de la liga (clausulazos y movimientos de rivales), qué se ha hecho hoy con tu equipo (incluyendo contraofertas o limpieza de pujas bloqueadas), cómo queda tu saldo y si tienes que aprobar algo manualmente.
 """
         try:
             client = TieredLLMRouter.get_client(tier="daily")
@@ -926,9 +1448,10 @@ Redacta directamente el resumen final para el usuario: qué se ha hecho hoy paso
         except Exception:
             return (
                 f"• Alineación J{ctx['target_jornada_num']}: {lu.get('formation', '4-4-2')} ({xi_names}).\n"
-                f"• Caja: {int(ctx['current_cash']):,} € (proyectado {int(projected_cash):,} €).\n"
-                f"• Pujas: {bids} | Ventas: {sales} | Cláusulas: {clauses}.\n"
-                f"• Escaparate (+5% VM): {listings}.\n"
+                f"• Caja: {int(ctx['current_cash']):,} € (proyectado {int(projected_cash):,} €{cash_pend_txt}).\n"
+                f"• Pujas: {bids} | Ventas: {sales} | Cláusulas: {clauses} | Escaparate: {listings}.\n"
+                f"• Negociaciones con rivales: {rival_str}\n"
+                f"• Noticias de la liga: {bulletin_str}\n"
                 f"• Pendientes de tu aprobación: {len(pending)}."
             )
 

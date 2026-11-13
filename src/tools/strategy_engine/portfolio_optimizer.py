@@ -760,6 +760,7 @@ class PortfolioOptimizer:
                 })
 
         # Step 1: Microeconomic NPV Disposals, Multi-Day Offer-Roll Patience & Hold-Decay Rotation
+        original_owned_ids: Set[int] = set(sq_pids)
         routine_sales: List[Dict[str, Any]] = []
         sold_ids: Set[int] = set()
         working_cash = float(current_cash)
@@ -773,6 +774,8 @@ class PortfolioOptimizer:
                     try:
                         lpid = int(float(raw_lpid))
                     except (TypeError, ValueError):
+                        continue
+                    if lpid in original_owned_ids:
                         continue
                     lx = xp_idx.get(lpid)
                     if lx and lx.get("is_available", False):
@@ -1016,12 +1019,13 @@ class PortfolioOptimizer:
             mkt_nom = df_market_all["nombre"].tolist() if "nombre" in df_market_all.columns else [""] * len(mkt_pids)
             mkt_pr = df_market_all["precio"].tolist() if "precio" in df_market_all.columns else [0] * len(mkt_pids)
             mkt_sub = df_market_all["subida_24h"].tolist() if "subida_24h" in df_market_all.columns else [0] * len(mkt_pids)
-            mkt_fast: Dict[int, Tuple[str, float, float]] = {}
-            for mp, mn, mpr, msub in zip(mkt_pids, mkt_nom, mkt_pr, mkt_sub):
+            mkt_cl = df_market_all["clausula_actual"].tolist() if "clausula_actual" in df_market_all.columns else [0] * len(mkt_pids)
+            mkt_fast: Dict[int, Tuple[str, float, float, float]] = {}
+            for mp, mn, mpr, msub, mcl in zip(mkt_pids, mkt_nom, mkt_pr, mkt_sub, mkt_cl):
                 try:
                     mpi = int(float(mp))
                     if mpi > 0:
-                        mkt_fast[mpi] = (str(mn or ""), safe_num(mpr, 0.0), safe_num(msub, 0.0))
+                        mkt_fast[mpi] = (str(mn or ""), safe_num(mpr, 0.0), safe_num(msub, 0.0), safe_num(mcl, 0.0))
                 except (TypeError, ValueError):
                     continue
 
@@ -1044,7 +1048,7 @@ class PortfolioOptimizer:
                     pid = int(float(raw_pid))
                 except (ValueError, TypeError):
                     continue
-                if pid <= 0 or pid in owned_ids or pid in blacklist_buys:
+                if pid <= 0 or pid in owned_ids or pid in original_owned_ids or pid in blacklist_buys:
                     continue
 
                 xp_info = xp_idx.get(pid)
@@ -1099,6 +1103,10 @@ class PortfolioOptimizer:
                 if not bid_eval["should_bid"]:
                     continue
                 b_amt = int(bid_eval["bid_amount"])
+                cl_val = fast_m[3] if (fast_m and len(fast_m) >= 4) else 0.0
+                if is_rival and eff_clauses_open and cl_val > 0 and b_amt >= cl_val * 0.98 and cl_val <= max(0.0, clause_budget):
+                    # Prefer instant cheaper release clause via ClauseSniper over slow transfer-market overbidding
+                    continue
                 if b_amt > max_official_credit_bid or b_amt > safe_acquisition_budget:
                     continue
 

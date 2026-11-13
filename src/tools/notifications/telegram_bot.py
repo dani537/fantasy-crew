@@ -352,11 +352,12 @@ class TelegramDirectorBot:
             res = actions.pay_clause(player_id=pid, amount=amt, owner_user_id=owner_uid)
         elif act_type == "DEFENSIVE_SHIELD":
             res = actions.raise_clause(player_id=pid, increment_eur=amt)
-        elif act_type == "IMPORTANT_SALE":
+        elif act_type in ("IMPORTANT_SALE", "RIVAL_COUNTER_OFFER"):
             oid = int(target.get("offer_id") or 0)
-            live_of = (delta.get("waiting_offers_by_pid") or {}).get(str(pid))
-            if live_of and int(live_of.get("offer_id", 0)) > 0:
-                oid = int(live_of["offer_id"])
+            if act_type == "IMPORTANT_SALE":
+                live_of = (delta.get("waiting_offers_by_pid") or {}).get(str(pid))
+                if live_of and int(live_of.get("offer_id", 0)) > 0:
+                    oid = int(live_of["offer_id"])
             if oid <= 0 and not is_dry:
                 return f"⚠️ No hay una oferta activa en Biwenger ahora mismo para <b>{html.escape(target['nombre'])}</b>."
             res = actions.accept_offer(offer_id=oid)
