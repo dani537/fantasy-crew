@@ -191,8 +191,10 @@ class FastDeltaRefresh:
 
                     outgoing_bids: List[Dict[str, Any]] = []
                     for off in (u_data.get("offers") or []):
+                        from_obj = off.get("from") or {}
+                        from_id = from_obj.get("id") if isinstance(from_obj, dict) else from_obj
                         if (
-                            str(off.get("from", {}).get("id")) == str(team_id)
+                            str(from_id) == str(team_id)
                             and str(off.get("status", "")).lower() == "waiting"
                             and off.get("type") in ("purchase", "clause")
                         ):

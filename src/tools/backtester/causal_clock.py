@@ -39,48 +39,89 @@ class StrictCausalDataView:
     prevents any strategy component from reading future prices, bids, or matches.
     """
 
+    @staticmethod
+    def _read_table_safe(conn: sqlite3.Connection, table_name: str, default_cols: List[str]) -> pd.DataFrame:
+        """Reads a SQLite table if it exists, returning an empty typed DataFrame otherwise."""
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if not exists:
+            return pd.DataFrame(columns=default_cols)
+        df = pd.read_sql(f'SELECT * FROM "{table_name}"', conn)
+        return df if not df.empty else pd.DataFrame(columns=list(df.columns) or default_cols)
+
     def __init__(self, db_path: str = "./data/warehouse/biwenger_history.db"):
         self.db_path = db_path
         conn = sqlite3.connect(db_path)
         try:
-            self._df_market = pd.read_sql("SELECT * FROM Historico_Continuo", conn)
-            self._df_managers = pd.read_sql("SELECT * FROM Historico_Equipos_Diario", conn)
-            self._df_bids = pd.read_sql("SELECT * FROM Pujas_Historico", conn)
-            self._df_reports = pd.read_sql("SELECT * FROM Rendimiento_Jornadas", conn)
-            self._df_calendar = pd.read_sql("SELECT * FROM Partidos_Calendario", conn)
-            self._df_comuniate = pd.read_sql("SELECT * FROM Comuniate_Historico", conn)
+            self._df_market = self._read_table_safe(
+                conn, "Historico_Continuo", ["fecha", "player_id", "precio", "subida_24h", "diff_7d"]
+            )
+            self._df_managers = self._read_table_safe(
+                conn, "Historico_Equipos_Diario", ["fecha", "user_id", "manager"]
+            )
+            self._df_bids = self._read_table_safe(conn, "Pujas_Historico", ["fecha"])
+            self._df_reports = self._read_table_safe(
+                conn, "Rendimiento_Jornadas", ["fecha_partido", "jornada_num"]
+            )
+            self._df_calendar = self._read_table_safe(
+                conn, "Partidos_Calendario", ["fecha_hora", "jornada_num", "part"]
+            )
+            self._df_comuniate = self._read_table_safe(
+                conn, "Comuniate_Historico", ["id_jornada", "equipo", "nombre"]
+            )
         finally:
             conn.close()
 
         # Pre-normalize types & date keys once for fast O(1) slicing across 91 days
-        self._df_market["fecha"] = self._df_market["fecha"].astype(str).str.slice(0, 10)
-        self._df_market["player_id"] = pd.to_numeric(self._df_market["player_id"], errors="coerce").fillna(0).astype(int)
-        for num_col in ("precio", "subida_24h", "diff_7d", "pct_compras_24h", "pct_ventas_24h", "presion_neta", "clausula_actual"):
-            if num_col in self._df_market.columns:
-                self._df_market[num_col] = pd.to_numeric(self._df_market[num_col], errors="coerce").fillna(0.0)
-
-        self._market_by_date: Dict[str, pd.DataFrame] = {
-            d: grp.copy() for d, grp in self._df_market.groupby("fecha", sort=True)
-        }
+        if not self._df_market.empty:
+            self._df_market["fecha"] = self._df_market["fecha"].astype(str).str.slice(0, 10)
+            self._df_market["player_id"] = pd.to_numeric(self._df_market["player_id"], errors="coerce").fillna(0).astype(int)
+            for num_col in ("precio", "subida_24h", "diff_7d", "pct_compras_24h", "pct_ventas_24h", "presion_neta", "clausula_actual"):
+                if num_col in self._df_market.columns:
+                    self._df_market[num_col] = pd.to_numeric(self._df_market[num_col], errors="coerce").fillna(0.0)
+            self._market_by_date: Dict[str, pd.DataFrame] = {
+                d: grp.copy() for d, grp in self._df_market.groupby("fecha", sort=True)
+            }
+        else:
+            self._market_by_date = {}
         self.all_dates: List[str] = sorted(self._market_by_date.keys())
 
-        self._df_managers["fecha"] = self._df_managers["fecha"].astype(str).str.slice(0, 10)
-        self._managers_by_date: Dict[str, pd.DataFrame] = {
-            d: grp.copy() for d, grp in self._df_managers.groupby("fecha", sort=True)
-        }
+        if not self._df_managers.empty:
+            self._df_managers["fecha"] = self._df_managers["fecha"].astype(str).str.slice(0, 10)
+            self._managers_by_date: Dict[str, pd.DataFrame] = {
+                d: grp.copy() for d, grp in self._df_managers.groupby("fecha", sort=True)
+            }
+        else:
+            self._managers_by_date = {}
 
-        self._df_bids["bid_day"] = self._df_bids["fecha"].astype(str).str.slice(0, 10)
-        self._df_reports["fecha_partido"] = self._df_reports["fecha_partido"].astype(str)
-        self._df_reports["jornada_num_int"] = pd.to_numeric(self._df_reports["jornada_num"], errors="coerce").fillna(0).astype(int)
+        if not self._df_bids.empty:
+            self._df_bids["bid_day"] = self._df_bids["fecha"].astype(str).str.slice(0, 10)
+        else:
+            self._df_bids["bid_day"] = pd.Series(dtype=str)
 
-        self._df_calendar["fecha_hora"] = self._df_calendar["fecha_hora"].astype(str)
-        self._df_calendar["jornada_num_int"] = pd.to_numeric(self._df_calendar["jornada_num"], errors="coerce").fillna(0).astype(int)
-        self._df_calendar["part_int"] = pd.to_numeric(self._df_calendar["part"], errors="coerce").fillna(1).astype(int)
+        if not self._df_reports.empty:
+            self._df_reports["fecha_partido"] = self._df_reports["fecha_partido"].astype(str)
+            self._df_reports["jornada_num_int"] = pd.to_numeric(self._df_reports["jornada_num"], errors="coerce").fillna(0).astype(int)
+        else:
+            self._df_reports["jornada_num_int"] = pd.Series(dtype=int)
 
-        self._df_comuniate["id_jornada_int"] = pd.to_numeric(self._df_comuniate["id_jornada"], errors="coerce").fillna(0).astype(int)
-        self._comuniate_by_round: Dict[int, pd.DataFrame] = {
-            int(jn): grp.copy() for jn, grp in self._df_comuniate.groupby("id_jornada_int")
-        }
+        if not self._df_calendar.empty:
+            self._df_calendar["fecha_hora"] = self._df_calendar["fecha_hora"].astype(str)
+            self._df_calendar["jornada_num_int"] = pd.to_numeric(self._df_calendar["jornada_num"], errors="coerce").fillna(0).astype(int)
+            self._df_calendar["part_int"] = pd.to_numeric(self._df_calendar["part"], errors="coerce").fillna(1).astype(int)
+        else:
+            self._df_calendar["jornada_num_int"] = pd.Series(dtype=int)
+            self._df_calendar["part_int"] = pd.Series(dtype=int)
+
+        if not self._df_comuniate.empty:
+            self._df_comuniate["id_jornada_int"] = pd.to_numeric(self._df_comuniate["id_jornada"], errors="coerce").fillna(0).astype(int)
+            self._comuniate_by_round: Dict[int, pd.DataFrame] = {
+                int(jn): grp.copy() for jn, grp in self._df_comuniate.groupby("id_jornada_int")
+            }
+        else:
+            self._comuniate_by_round = {}
 
         # Map each jornada_num -> earliest match kickoff date so Comuniate probable XIs
         # are only exposed within the 6-day lead-up window before that round's kickoff!

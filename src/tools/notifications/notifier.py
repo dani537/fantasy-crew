@@ -9,6 +9,7 @@ simultaneously via:
 """
 
 import os
+import re
 import html
 import json
 import smtplib
@@ -193,6 +194,8 @@ class NotificationHub:
                 )
         if summary.get("briefing"):
             lines.append("\n--- BRIEFING DIRECTOR DEPORTIVO ---\n" + str(summary["briefing"]))
+        if summary.get("easy_summary"):
+            lines.append("\n--- RESUMEN FÁCIL DE LO QUE SE HA HECHO HOY ---\n" + str(summary["easy_summary"]))
         return "\n".join(lines)
 
     @staticmethod
@@ -403,6 +406,21 @@ class NotificationHub:
         </div>
         """
 
+        easy_raw = str(summary.get("easy_summary") or "").strip()
+        easy_summary_html = ""
+        if easy_raw:
+            easy_fmt = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", esc(easy_raw)).replace("\n", "<br/>")
+            easy_summary_html = f"""
+            <div style="margin-top:20px;background:#f8fafc;border:2px solid #cbd5e1;border-radius:8px;padding:16px;">
+              <h3 style="margin:0 0 8px 0;color:#1e293b;font-size:15px;">
+                💬 En resumen: ¿qué se ha hecho hoy?
+              </h3>
+              <div style="font-size:13.5px;line-height:1.6;color:#334155;">
+                {easy_fmt}
+              </div>
+            </div>
+            """
+
         return f"""
         <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#111827;max-width:740px;margin:0 auto;padding:16px;">
           <div style="background:linear-gradient(135deg,#064e3b,#047857);color:white;padding:18px 22px;border-radius:10px;">
@@ -458,5 +476,6 @@ class NotificationHub:
           </div>
 
           {decisions_summary_html}
+          {easy_summary_html}
         </body></html>
         """

@@ -535,14 +535,23 @@ class AutopilotRunner:
 
         pending_all = self.memory.get_pending_decisions("PENDING")
 
-        # 7. Executive Briefing via TieredLLMRouter
+        # 7. Executive Briefing & Plain-Language Summary via TieredLLMRouter
         briefing_text = ""
+        easy_summary_text = ""
         if generate_briefing:
             briefing_text = self._generate_executive_briefing(
                 ctx=ctx,
                 plan=approved_plan,
                 blocked=validated["blocked"],
                 pending=pending_all,
+            )
+            easy_summary_text = self._generate_plain_execution_summary(
+                ctx=ctx,
+                plan=approved_plan,
+                execution_results=execution_results,
+                pending=pending_all,
+                projected_cash=validated["projected_cash"],
+                is_solvent=validated["is_safe"],
             )
 
         cycle_summary = {
@@ -564,6 +573,7 @@ class AutopilotRunner:
             "blocked_actions": validated["blocked"],
             "executions": execution_results,
             "briefing": briefing_text,
+            "easy_summary": easy_summary_text,
         }
 
         os.makedirs("./data/autopilot", exist_ok=True)
@@ -653,6 +663,61 @@ Estructura:
                 f"• Once MILP: {lineup_str}.\n"
                 f"• Pujas autónomas: {bids_str} | Escaparate Top-{len(plan.get('preventive_listings', []))}: {listings_str}.\n"
                 f"• Ventas: {sales_str} | Cláusulas en cola humana: {clauses_str}."
+            )
+
+    def _generate_plain_execution_summary(
+        self,
+        ctx: Dict[str, Any],
+        plan: Dict[str, Any],
+        execution_results: List[Dict[str, Any]],
+        pending: List[Dict[str, Any]],
+        projected_cash: float,
+        is_solvent: bool,
+    ) -> str:
+        """Generates a short, plain-language LLM summary of everything done in this run for the email footer."""
+        lu = plan.get("lineup") or {}
+        xi_names = ", ".join(s["nombre"] for s in (lu.get("slots") or [])) or "Sin cambios"
+        bids = ", ".join(f"{b['nombre']} ({int(b['amount']):,} €)" for b in (plan.get("market_bids") or [])) or "Ninguna"
+        sales = ", ".join(f"{s['nombre']} ({int(s['sale_price']):,} €)" for s in (plan.get("all_sales") or [])) or "Ninguna"
+        clauses = ", ".join(f"{c['nombre']} ({int(c['amount']):,} € a {c.get('seller', '')})" for c in (plan.get("clause_snipes") or [])) or "Ninguna"
+        shields = ", ".join(f"{sh['nombre']} (+{int(sh['recommended_cash_spend']):,} €)" for sh in (plan.get("defensive_shields") or [])) or "Ninguno"
+        listings = ", ".join(f"{p['nombre']} ({int(p['asking_price']):,} €)" for p in (plan.get("preventive_listings") or [])) or "Ninguno"
+        errors = [
+            f"{ex.get('type')}: {ex.get('target', '')} -> {ex.get('res', {}).get('detail', '')}"
+            for ex in execution_results
+            if isinstance(ex.get("res"), dict) and ex["res"].get("status") == "ERROR"
+        ]
+
+        prompt = f"""
+Resume en español muy claro, cercano y fácil de leer (máximo 5-6 puntos cortos con viñetas, SIN jerga técnica como NPV, MILP, xP, EFR o roles internos) todo lo que acaba de hacer hoy el bot de Biwenger para '{ctx['team_name']}':
+
+- Fecha / Fase: {ctx['date']} ({self.trigger_phase}) | Modo: {self.mode} (Simulacro={self.dry_run})
+- Dinero en caja ahora: {int(ctx['current_cash']):,} € | Saldo proyectado tras ventas: {int(projected_cash):,} € | Solvente: {'Sí' if is_solvent else 'No'}
+- Alineación guardada para J{ctx['target_jornada_num']}: {lu.get('formation', '4-4-2')} ({xi_names})
+- Pujas realizadas en el mercado: {bids}
+- Jugadores vendidos: {sales}
+- Clausulazos: {clauses}
+- Blindajes de cláusula propia: {shields}
+- Jugadores puestos en venta en el escaparate (solo para recibir ofertas de la Máquina, sin obligación de vender): {listings}
+- Decisiones esperando tu aprobación manual: {len(pending)}
+- Errores durante la ejecución: {', '.join(errors) if errors else 'Ninguno'}
+
+Redacta directamente el resumen final para el usuario: qué se ha hecho hoy paso a paso, cómo queda el equipo y el dinero, y si tiene que hacer algo manualmente o está todo listo.
+"""
+        try:
+            client = TieredLLMRouter.get_client(tier="daily")
+            resp = client.call(
+                prompt=prompt,
+                system_prompt="Eres un asistente claro y directo que explica en lenguaje cotidiano lo que ha hecho hoy el gestor automático de Biwenger.",
+            )
+            return str(resp).strip()
+        except Exception:
+            return (
+                f"• Alineación J{ctx['target_jornada_num']}: {lu.get('formation', '4-4-2')} ({xi_names}).\n"
+                f"• Caja: {int(ctx['current_cash']):,} € (proyectado {int(projected_cash):,} €).\n"
+                f"• Pujas: {bids} | Ventas: {sales} | Cláusulas: {clauses}.\n"
+                f"• Escaparate (+5% VM): {listings}.\n"
+                f"• Pendientes de tu aprobación: {len(pending)}."
             )
 
 

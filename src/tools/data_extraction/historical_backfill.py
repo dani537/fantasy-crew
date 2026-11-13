@@ -1946,6 +1946,19 @@ def run_historical_pipeline(
             df_existing_com_h = warehouse.read_table("Comuniate_Historico")
             if len(df_existing_com_h) >= 2500:
                 print(f"⚡ Reutilizando 'Comuniate_Historico' desde el Data Warehouse ({len(df_existing_com_h):,} filas).")
+                # Persist into local SQLite when hydrated from Google Sheets fallback on fresh CI runners
+                with warehouse.get_connection() as conn:
+                    has_local_tbl = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Comuniate_Historico'"
+                    ).fetchone() is not None
+                if not has_local_tbl:
+                    warehouse.upsert_table(
+                        "Comuniate_Historico",
+                        df_existing_com_h,
+                        pk_cols=["id_jornada", "equipo", "nombre"],
+                        sort_cols=["id_jornada", "equipo", "posicion"],
+                        replace_all=True,
+                    )
             else:
                 com_hist_df = ComuniateData().extract_historical_lineups()
                 if not com_hist_df.empty:
