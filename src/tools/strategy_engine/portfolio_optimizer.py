@@ -159,7 +159,7 @@ class PortfolioOptimizer:
         untouchables = untouchable_ids or set()
         core_pillars = core_pillar_ids or set()
 
-        debt_to_clear = max(0.0, -float(current_cash)) if must_be_solvent else 0.0
+        debt_to_clear = max(0.0, -float(current_cash) + 1.0) if (must_be_solvent and float(current_cash) < -0.5) else 0.0
 
         # Check if non-untouchable firm offers alone can clear 100% of Friday debt;
         # if yes, hard-lock untouchables (`ub = 0`) so user untouchables are NEVER sold!
@@ -175,7 +175,7 @@ class PortfolioOptimizer:
                     non_untouch_liquidity += safe_num(r.get("precio", 0), 0.0) * 0.98
         hard_lock_untouchables = (non_untouch_liquidity >= debt_to_clear)
 
-        n_vars = 5 * n + 12
+        n_vars = 5 * n + 13
         c = np.zeros(n_vars, dtype=float)
         lb = np.zeros(n_vars, dtype=float)
         ub = np.ones(n_vars, dtype=float)
@@ -185,6 +185,8 @@ class PortfolioOptimizer:
             ub[5 * n + 7 + l_idx] = 5.0
         ub[5 * n + 11] = 1e9
         integrality[5 * n + 11] = 0
+        ub[5 * n + 12] = 1.0
+        integrality[5 * n + 12] = 1
 
         sale_proceeds = np.zeros(n, dtype=float)
 
@@ -242,6 +244,9 @@ class PortfolioOptimizer:
             c[5 * n + 7 + l_idx] = 650.0
 
         c[5 * n + 11] = 0.05
+        # Any positive insolvency shortfall (>= 1 EUR) triggers binary y_insolv = 1 (+50,000 penalty)
+        # so MILP never chooses a small cash deficit (e.g. -417 EUR) over selling an asset!
+        c[5 * n + 12] = 50_000.0
 
         rows_A = []
         rows_lb = []
@@ -284,7 +289,7 @@ class PortfolioOptimizer:
             rows_lb.append(0.0)
             rows_ub.append(0.0)
 
-        # 4. Solvency Constraint
+        # 4. Solvency Constraint + Binary Insolvency Indicator
         if debt_to_clear > 0:
             row_solv = np.zeros(n_vars)
             for i in range(n):
@@ -293,6 +298,13 @@ class PortfolioOptimizer:
             rows_A.append(row_solv)
             rows_lb.append(debt_to_clear)
             rows_ub.append(1e12)
+
+            row_ins = np.zeros(n_vars)
+            row_ins[5 * n + 11] = 1.0
+            row_ins[5 * n + 12] = -1e8
+            rows_A.append(row_ins)
+            rows_lb.append(-1e9)
+            rows_ub.append(0.0)
 
         c = np.nan_to_num(c, nan=0.0, posinf=1e6, neginf=-1e6)
         sale_proceeds = np.nan_to_num(sale_proceeds, nan=0.0)
@@ -394,6 +406,7 @@ class PortfolioOptimizer:
 
         forced = force_sell_ids or set()
         candidates: List[Dict[str, Any]] = []
+        core_emergency_candidates: List[Dict[str, Any]] = []
 
         for _, r in final_sq.iterrows():
             pid = int(r["player_id"])
@@ -403,8 +416,6 @@ class PortfolioOptimizer:
             if pid in sell_locked_ids and int(self.rules.days_for_sale) > 1:
                 continue
             role = role_by_pid.get(pid, "BENCH_PATCH")
-            if role == "FRANCHISE_CORE" and pid not in forced:
-                continue
 
             price = safe_num(r.get("precio", 150_000), 150_000.0)
             subida = safe_num(r.get("subida_24h", 0), 0.0)
@@ -419,7 +430,7 @@ class PortfolioOptimizer:
             collateral_score = (price * 0.955) / (1.0 + 2.5 * role_penalty)
 
             ask_target = int(round(price * 1.05, -4))
-            candidates.append({
+            entry = {
                 "player_id": pid,
                 "nombre": str(r.get("nombre", "")),
                 "asking_price": max(150_000, ask_target),
@@ -429,31 +440,90 @@ class PortfolioOptimizer:
                 "option_score": option_score,
                 "collateral_score": collateral_score,
                 "conservative_proceeds": price * 0.955,
-            })
+            }
+            if role == "FRANCHISE_CORE" and pid not in forced:
+                core_emergency_candidates.append(entry)
+            else:
+                candidates.append(entry)
 
-        if not candidates:
+        if not candidates and not (projected_max_debt_eur > 0 and core_emergency_candidates):
             return []
 
         selected: List[Dict[str, Any]] = []
         selected_pids: Set[int] = set()
         covered_collateral = 0.0
-        target_collateral = max(0.0, float(projected_max_debt_eur) * 1.25)
+        min_debt_needed = max(0.0, float(projected_max_debt_eur) * 1.05)
+        target_collateral = max(0.0, float(projected_max_debt_eur) * 1.30)
 
-        # Priority 1 (WHEN IN DEBT / PENDING BIDS): Solvency collateral MUST cover >= 1.25x worst-case debt FIRST
-        # (prevents five 150k€ micro-disposals from crowding out 5 slots and leaving Friday debt uncovered!)
+        # Priority 1 (WHEN IN DEBT / PENDING BIDS): Solvency collateral MUST cover >= 1.30x worst-case debt
+        # within <= k_limit Biwenger sale slots using feasibility lookahead:
+        # 1) Exhaust flips/bench/want_sell if top-k capacity suffices;
+        # 2) Otherwise unlock STRUCTURAL_STARTER (and extreme emergency FRANCHISE_CORE only if non-core < debt)
+        #    while avoiding wasting scarce slots on micro-dust when starters are needed.
         if target_collateral > 0 and len(selected) < k_limit:
-            coll_pool = sorted(
-                candidates,
-                key=lambda x: (x["want_sell"] and x["conservative_proceeds"] >= target_collateral / max(1, k_limit), x["collateral_score"]),
+            flips_only = [
+                c for c in candidates
+                if c["role"] in ("SPECULATIVE_FLIP", "BENCH_PATCH") or c["want_sell"]
+            ]
+            max_flips_k = sum(sorted([c["conservative_proceeds"] for c in flips_only], reverse=True)[:k_limit])
+            max_noncore_k = sum(sorted([c["conservative_proceeds"] for c in candidates], reverse=True)[:k_limit])
+
+            if max_flips_k >= target_collateral - 1.0:
+                pool = flips_only
+                eff_target = target_collateral
+            elif max_noncore_k >= min_debt_needed - 1.0:
+                pool = list(candidates)
+                eff_target = min(target_collateral, max_noncore_k)
+            else:
+                pool = list(candidates) + list(core_emergency_candidates)
+                max_all_k = sum(sorted([c["conservative_proceeds"] for c in pool], reverse=True)[:k_limit])
+                eff_target = min(target_collateral, max_all_k)
+
+            rem_pool = sorted(
+                pool,
+                key=lambda x: (
+                    x["role"] != "FRANCHISE_CORE",
+                    x["role"] in ("SPECULATIVE_FLIP", "BENCH_PATCH") or x["want_sell"],
+                    x["want_sell"],
+                    x["collateral_score"],
+                ),
                 reverse=True,
             )
-            for c in coll_pool:
-                if len(selected) >= k_limit or covered_collateral >= target_collateral:
-                    break
-                c["listing_reason"] = "SOLVENCY_COLLATERAL"
-                selected.append(c)
-                selected_pids.add(c["player_id"])
-                covered_collateral += c["conservative_proceeds"]
+            min_slot_worth_eur = (
+                0.25 * (float(projected_max_debt_eur) / max(1, k_limit))
+                if max_flips_k < target_collateral - 1.0
+                else 0.0
+            )
+
+            while len(selected) < k_limit and covered_collateral < eff_target - 1.0 and rem_pool:
+                rem_slots_after = k_limit - 1 - len(selected)
+                need_rem = eff_target - covered_collateral
+                picked = None
+                for cand in rem_pool:
+                    if min_slot_worth_eur > 0 and not cand["want_sell"] and cand["conservative_proceeds"] < min_slot_worth_eur:
+                        viable_alt = [
+                            x["conservative_proceeds"] for x in rem_pool
+                            if x["player_id"] != cand["player_id"]
+                            and (x["want_sell"] or x["conservative_proceeds"] >= min_slot_worth_eur)
+                        ]
+                        if sum(sorted(viable_alt, reverse=True)[:k_limit - len(selected)]) >= need_rem - 1.0:
+                            continue
+                    rest_procs = sorted(
+                        (x["conservative_proceeds"] for x in rem_pool if x["player_id"] != cand["player_id"]),
+                        reverse=True,
+                    )
+                    if cand["conservative_proceeds"] + sum(rest_procs[:rem_slots_after]) >= need_rem - 1.0:
+                        picked = cand
+                        break
+                if picked is None:
+                    picked = max(rem_pool, key=lambda x: x["conservative_proceeds"])
+                picked["listing_reason"] = (
+                    "SOLVENCY_EMERGENCY_CORE" if picked["role"] == "FRANCHISE_CORE" else "SOLVENCY_COLLATERAL"
+                )
+                selected.append(picked)
+                selected_pids.add(picked["player_id"])
+                covered_collateral += picked["conservative_proceeds"]
+                rem_pool = [x for x in rem_pool if x["player_id"] != picked["player_id"]]
 
         # Priority 2: Active disposals (`want_sell`) in remaining slots
         disposals = sorted(
@@ -592,15 +662,22 @@ class PortfolioOptimizer:
         elif isinstance(causal_standings_ctx, dict) and isinstance(causal_standings_ctx.get("posture_modifiers"), dict):
             pm_raw = causal_standings_ctx["posture_modifiers"]
             posture_mods = PostureModifiers(**{k: v for k, v in pm_raw.items() if k in PostureModifiers.__dataclass_fields__})
-        elif isinstance(causal_standings_ctx, dict) and "my_rank" in causal_standings_ctx:
+        elif isinstance(causal_standings_ctx, dict) and ("my_rank" in causal_standings_ctx or "rank" in causal_standings_ctx):
+            raw_rank = causal_standings_ctx.get("my_rank", causal_standings_ctx.get("rank", 1))
+            raw_tot = causal_standings_ctx.get("total_managers", causal_standings_ctx.get("n_managers", 15))
+            raw_rnd = causal_standings_ctx.get("rounds_settled", causal_standings_ctx.get("settled_rounds_count", 0))
+            raw_lead = float(causal_standings_ctx.get("leader_points", 0.0))
+            raw_my = float(causal_standings_ctx.get("my_points", 0.0))
+            raw_pod = float(causal_standings_ctx.get("podium_points", max(0.0, raw_lead - float(causal_standings_ctx.get("gap_to_podium", 0.0)))))
+            raw_sec = float(causal_standings_ctx.get("second_points", raw_lead))
             posture_mods = posture_ctrl.compute_modifiers(
-                my_rank=int(causal_standings_ctx.get("my_rank", 1)),
-                total_managers=int(causal_standings_ctx.get("total_managers", 15)),
-                my_points=float(causal_standings_ctx.get("my_points", 0.0)),
-                leader_points=float(causal_standings_ctx.get("leader_points", 0.0)),
-                second_points=float(causal_standings_ctx.get("second_points", 0.0)),
-                podium_points=float(causal_standings_ctx.get("podium_points", 0.0)),
-                rounds_settled=int(causal_standings_ctx.get("rounds_settled", 0)),
+                my_rank=int(raw_rank),
+                total_managers=int(raw_tot),
+                my_points=raw_my,
+                leader_points=raw_lead,
+                second_points=raw_sec,
+                podium_points=raw_pod,
+                rounds_settled=int(raw_rnd),
                 my_net_worth=float(causal_standings_ctx.get("my_net_worth", 0.0)),
                 leader_net_worth=float(causal_standings_ctx.get("leader_net_worth", 0.0)),
                 llm_overrides=llm_overrides,
@@ -683,12 +760,20 @@ class PortfolioOptimizer:
                 price = safe_num(pr_raw, 150_000.0)
                 subida = safe_num(sub_raw, 0.0)
                 efr_72h = float(efr_map.get(pid, subida * 2.4))
-                xp_info = xp_idx.get(pid, {})
-                is_avail = bool(xp_info.get("is_available", True))
-                estado = str(xp_info.get("estado", est_s) or "ok")
-                xp_best = float(xp_info.get("xp_best", 0.0))
-                xp_healthy = float(xp_info.get("xp_healthy", max(xp_best, 2.5)))
-                p_start_h = float(xp_info.get("p_start_healthy", xp_info.get("p_start", 0.5)))
+                xp_info = xp_idx.get(pid) or {}
+                if not xp_info:
+                    # Player absent from active market pool (delisted / coach / left league) -> non-scoring deadwood
+                    is_avail = False
+                    estado = str(est_s or "injured")
+                    xp_best = 0.0
+                    xp_healthy = 0.0
+                    p_start_h = 0.0
+                else:
+                    is_avail = bool(xp_info.get("is_available", False))
+                    estado = str(xp_info.get("estado", est_s) or "ok")
+                    xp_best = float(xp_info.get("xp_best", 0.0))
+                    xp_healthy = float(xp_info.get("xp_healthy", xp_best))
+                    p_start_h = float(xp_info.get("p_start_healthy", xp_info.get("p_start", 0.5)))
                 valid_lines = self.xp_engine.get_valid_lines(pid, pos_s)
                 best_ln = str(xp_info.get("best_line", sorted(valid_lines)[0] if valid_lines else "MF"))
 
@@ -784,8 +869,26 @@ class PortfolioOptimizer:
                             if v_ln > live_board_best_xp_by_line[ln]:
                                 live_board_best_xp_by_line[ln] = v_ln
 
-            fit_count = sum(1 for pid in sq_pids if xp_idx.get(pid, {}).get("is_available", True))
+            fit_count = sum(1 for pid in sq_pids if xp_idx.get(pid, {}).get("is_available", False))
             gk_count = sum(1 for pid, pos_s in zip(sq_pids, sq_pos) if "GK" in self.xp_engine.get_valid_lines(pid, pos_s))
+            fit_gk_count = sum(
+                1
+                for pid, pos_s in zip(sq_pids, sq_pos)
+                if xp_idx.get(pid, {}).get("is_available", False) and "GK" in self.xp_engine.get_valid_lines(pid, pos_s)
+            )
+            fit_outfield_count = sum(
+                1
+                for pid, pos_s in zip(sq_pids, sq_pos)
+                if xp_idx.get(pid, {}).get("is_available", False) and self.xp_engine.get_valid_lines(pid, pos_s) != {"GK"}
+            )
+            fit_by_line = {
+                ln: sum(
+                    1
+                    for pid, pos_s in zip(sq_pids, sq_pos)
+                    if xp_idx.get(pid, {}).get("is_available", False) and ln in self.xp_engine.get_valid_lines(pid, pos_s)
+                )
+                for ln in LINES
+            }
 
             for pid, pos_s, nom_s, est_s, pr_raw, sub_raw, acq_s, pc_raw in zip(
                 sq_pids, sq_pos, sq_nom, sq_est, sq_pr, sq_sub, sq_acq, sq_pc
@@ -799,20 +902,42 @@ class PortfolioOptimizer:
                 price = safe_num(pr_raw, 150_000.0)
                 subida = safe_num(sub_raw, 0.0)
                 efr_72h = float(efr_map.get(pid, subida * 2.4))
-                xp_info = xp_idx.get(pid, {})
-                is_avail = bool(xp_info.get("is_available", True))
-                xp_best = float(xp_info.get("xp_best", 0.0))
-                xp_healthy = float(xp_info.get("xp_healthy", max(xp_best, 2.5)))
+                xp_info = xp_idx.get(pid) or {}
+                if not xp_info:
+                    is_avail = False
+                    xp_best = 0.0
+                    xp_healthy = 0.0
+                else:
+                    is_avail = bool(xp_info.get("is_available", False))
+                    xp_best = float(xp_info.get("xp_best", 0.0))
+                    xp_healthy = float(xp_info.get("xp_healthy", xp_best))
                 valid_lns_p = self.xp_engine.get_valid_lines(pid, pos_s)
                 is_gk = "GK" in valid_lns_p
+                is_pure_gk = (valid_lns_p == {"GK"})
                 role = role_by_pid.get(pid, "BENCH_PATCH")
                 npv_res = npv_by_pid.get(pid, {})
                 purchase_p = safe_num(pc_raw or prev_theses.get(pid, {}).get("precio_compra", 0), 0.0)
 
-                if is_gk and gk_count <= 1:
+                if is_gk and gk_count <= 1 and pid not in forced_sells:
+                    continue
+                if is_gk and is_avail and fit_gk_count <= 1 and pid not in forced_sells:
                     continue
                 if is_avail and fit_count <= 11 and pid not in forced_sells:
                     continue
+                if is_avail and not is_pure_gk and fit_outfield_count <= 10 and pid not in forced_sells:
+                    continue
+                # Respect minimum legal positional floor across official Biwenger formations (DF>=3, MF>=3, FW>=1, GK>=1)
+                if is_avail and pid not in forced_sells:
+                    if any(
+                        fit_by_line.get(ln_p, 0) <= (1 if ln_p in ("GK", "FW") else 3)
+                        for ln_p in valid_lns_p
+                    ) and len(valid_lns_p) == 1:
+                        continue
+                    elif len(valid_lns_p) > 1 and all(
+                        fit_by_line.get(ln_p, 0) <= (1 if ln_p in ("GK", "FW") else 3)
+                        for ln_p in valid_lns_p
+                    ):
+                        continue
 
                 offer_pct = (offer_amt - price) / max(price, 1.0)
                 prev_rolls = int(prev_theses.get(pid, {}).get("offer_rolls", 0) or 0)
@@ -826,7 +951,11 @@ class PortfolioOptimizer:
 
                 is_forced = (pid in forced_sells)
                 was_claused_premium = (purchase_p >= 1.20 * price) and (held_days < 8)
-                is_depreciating = (efr_72h <= -35_000.0) or (subida <= -15_000.0)
+                is_depreciating = (
+                    (efr_72h <= -65_000.0 or subida <= -40_000.0)
+                    if role == "STRUCTURAL_STARTER"
+                    else (efr_72h <= -35_000.0 or subida <= -15_000.0)
+                )
                 board_best_here = max((live_board_best_xp_by_line.get(ln, 0.0) for ln in valid_lns_p), default=0.0)
                 needs_slot_or_liquidity = (
                     (len(sq_pids) - len(sold_ids) >= eff_max_squad - 1)
@@ -873,8 +1002,26 @@ class PortfolioOptimizer:
                     if offer_amt >= (npv_res.get("npv_hold_eur", price) - decay_tax) and offer_pct >= -0.025:
                         is_hold_decay_sell = True
 
-                min_hold_days = 8 if was_claused_premium else 2
+                # Pre-kickoff (d_ko <= 1) debt relief: proactively realize existing firm offers on non-XI bench/flips
+                # before kickoff morning forces emergency sales out of limited 5-slot offers.
+                is_pre_ko_debt_relief = bool(
+                    eff_days_to_kickoff <= 1
+                    and working_cash < -250_000.0
+                    and role in ("SPECULATIVE_FLIP", "BENCH_PATCH")
+                    and pid not in core_xi_ids
+                    and offer_pct >= -0.045
+                )
+
+                min_hold_days = 8 if was_claused_premium else (4 if role == "STRUCTURAL_STARTER" else 2)
                 can_proactively_rotate = (not is_avail) or is_depreciating or needs_slot_or_liquidity
+                starter_churn_guard = not (
+                    is_avail
+                    and role == "STRUCTURAL_STARTER"
+                    and pid in core_xi_ids
+                    and board_best_here < xp_best + 0.65
+                    and efr_72h > -100_000.0
+                    and working_cash >= 0.0
+                )
 
                 if not is_avail:
                     is_npv_disposal = (inj_decision["action"] == InjuryAction.SELL_CASH_OUT)
@@ -883,12 +1030,14 @@ class PortfolioOptimizer:
                         bool(npv_res.get("recommend_sell", False))
                         and can_proactively_rotate
                         and held_days >= min_hold_days
-                    ) or is_hold_decay_sell
+                        and starter_churn_guard
+                    ) or is_hold_decay_sell or is_pre_ko_debt_relief
 
                 if is_npv_disposal and not is_forced:
                     if (
                         is_avail
                         and not is_hold_decay_sell
+                        and not is_pre_ko_debt_relief
                         and offer_pct < -0.018
                         and eff_days_to_kickoff >= 2
                         and prev_rolls < 2
@@ -937,6 +1086,12 @@ class PortfolioOptimizer:
                     working_cash += offer_amt
                     if is_avail:
                         fit_count -= 1
+                        if is_gk:
+                            fit_gk_count -= 1
+                        if not is_pure_gk:
+                            fit_outfield_count -= 1
+                        for ln_p in valid_lns_p:
+                            fit_by_line[ln_p] = max(0, fit_by_line.get(ln_p, 0) - 1)
                     if is_gk:
                         gk_count -= 1
 
@@ -984,36 +1139,58 @@ class PortfolioOptimizer:
         if self.credit_limit_ratio != self.rules.credit_limit_ratio:
             max_official_credit_bid = working_cash + self.credit_limit_ratio * rem_squad_value
 
-        if not can_use_credit:
+        if not can_use_credit or eff_days_to_kickoff <= 1:
+            # Overnight bids on d_ko <= 1 settle on kickoff morning (cash >= 0 required),
+            # so avoid taking overnight net debt right before kickoff.
             safe_acquisition_budget = max(0.0, working_cash - eff_reserve_buf)
             top_k_liquid_collateral = 0.0
         else:
             k_slots = max(1, int(self.rules.market_max_user_sales))
             non_core_values: List[float] = []
+            starter_wt = 0.48 if eff_days_to_kickoff == 2 else 0.55
             if not final_sq.empty:
                 for pid, pr_raw in zip(final_sq["player_id"].tolist(), final_sq["precio"].tolist()):
                     pid_i = int(pid)
-                    if eff_days_to_kickoff <= 1 and pid_i in locked_sell and int(self.rules.days_for_sale) > 1:
-                        continue
                     rl = role_by_pid.get(pid_i, "BENCH_PATCH")
                     if rl != "FRANCHISE_CORE" and pid_i not in untouchables:
-                        w = 0.95 if rl in ("SPECULATIVE_FLIP", "BENCH_PATCH") else 0.55
-                        non_core_values.append(safe_num(pr_raw, 0.0) * w)
+                        pr_f = safe_num(pr_raw, 0.0)
+                        w = 0.95 if rl in ("SPECULATIVE_FLIP", "BENCH_PATCH") else starter_wt
+                        non_core_values.append(pr_f * w)
             non_core_values.sort(reverse=True)
             top_k_liquid_collateral = float(sum(non_core_values[:k_slots]))
-            base_lev = 0.84 if eff_days_to_kickoff >= 2 else 0.72
-            leverage_factor = float(np.clip(base_lev * eff_credit_aggr, 0.50, 0.96))
+            base_lev = 0.84 if eff_days_to_kickoff >= 3 else 0.56
+            leverage_factor = float(np.clip(base_lev * eff_credit_aggr, 0.44, 0.96))
             safe_debt_cap = top_k_liquid_collateral * leverage_factor
             safe_acquisition_budget = min(max_official_credit_bid, working_cash + safe_debt_cap - eff_reserve_buf)
             safe_acquisition_budget = max(0.0, safe_acquisition_budget)
 
         owned_ids = {int(x) for x in final_sq["player_id"].tolist()} if not final_sq.empty else set()
         open_roster_slots = max(0, eff_max_squad - len(owned_ids))
+        legal_cap = min(int(self.rules.team_max_size), max(eff_max_squad + 3, eff_max_squad))
+        hard_open_slots = max(0, legal_cap - len(owned_ids))
+
+        # Compute clause allocation budget upfront (used both to prefer cheaper clauses in 3A and to scan 3B)
+        macro_cl_frac = float(macro_ctx.get("clause_budget_fraction", 0.30))
+        if arch is not None:
+            arch_cl_pct = float(arch.clause_cash_reserve_pct)
+            if arch.lifecycle_driven:
+                clause_frac = min(1.0, 0.45 * macro_cl_frac + 0.55 * arch_cl_pct)
+            else:
+                clause_frac = arch_cl_pct
+        else:
+            clause_frac = macro_cl_frac
+            arch_cl_pct = macro_cl_frac
+        if float(working_cash) >= 8_500_000.0 and (
+            int(sc_summary.get("free_ge_10m", 0)) <= 6 or int(sc_summary.get("free_ge_5m", 0)) <= 16
+        ) and clause_frac >= 0.20:
+            clause_frac = min(0.95, max(clause_frac, arch_cl_pct + 0.22))
+        clause_budget = max(0.0, (working_cash - 300_000.0 - eff_reserve_buf) * clause_frac) if eff_clauses_open else 0.0
 
         # 3A. Evaluate Market Auction Candidates (`AuctionBidModel`)
         bid_candidates: List[Dict[str, Any]] = []
         prio_pos = {str(p).upper() for p in (posture_mods.extra.get("priority_positions") or [])}
-        if open_roster_slots > 0 and safe_acquisition_budget >= 150_000 and market_listings_df is not None and not market_listings_df.empty:
+        need_gk_emergency = (xi_floor_by_pos.get("GK", 0.0) <= 1.2)
+        if hard_open_slots > 0 and safe_acquisition_budget >= 150_000 and market_listings_df is not None and not market_listings_df.empty:
             # Fast market column lookup (avoids full df_market_all to_dict('index') & iterrows)
             mkt_pids = df_market_all["player_id"].tolist()
             mkt_nom = df_market_all["nombre"].tolist() if "nombre" in df_market_all.columns else [""] * len(mkt_pids)
@@ -1069,7 +1246,10 @@ class PortfolioOptimizer:
                 is_rival = seller not in ("Mercado", "Libre", "None", "nan", "")
 
                 best_ln = str(xp_info.get("best_line", xp_info.get("natural_pos", "MF")))
-                delta_xp = max(0.0, float(xp_info.get("xp_best", 0.0)) - xi_floor_by_pos.get(best_ln, 3.2))
+                cand_xp_best = float(xp_info.get("xp_best", 0.0))
+                delta_xp = max(0.0, cand_xp_best - xi_floor_by_pos.get(best_ln, 3.2))
+                if need_gk_emergency and best_ln == "GK" and cand_xp_best >= 2.2:
+                    delta_xp = max(delta_xp, cand_xp_best + 2.0)
                 if pid in priority_buys:
                     delta_xp += 0.45
                 elif best_ln in prio_pos and delta_xp >= 0.20:
@@ -1129,17 +1309,7 @@ class PortfolioOptimizer:
                     "requires_human_approval": False,
                 })
 
-        # 3B. Evaluate Surgical Scarcity Clause Snipes (FIXED non-inverted `clause_cash_reserve_pct`!)
-        macro_cl_frac = float(macro_ctx.get("clause_budget_fraction", 0.30))
-        if arch is not None:
-            arch_cl_pct = float(arch.clause_cash_reserve_pct)
-            if arch.lifecycle_driven:
-                clause_frac = min(1.0, 0.45 * macro_cl_frac + 0.55 * arch_cl_pct)
-            else:
-                clause_frac = arch_cl_pct
-        else:
-            clause_frac = macro_cl_frac
-        clause_budget = max(0.0, (working_cash - 300_000.0 - eff_reserve_buf) * clause_frac) if eff_clauses_open else 0.0
+        # 3B. Evaluate Surgical Scarcity Clause Snipes (`clause_budget` computed before 3A)
         clause_targets = self.clause_sniper.scan_offensive_targets(
             df_market_today=df_market_all,
             xp_table=xp_table,
@@ -1158,6 +1328,8 @@ class PortfolioOptimizer:
             clause_alpha_floor_delta_eur=int(posture_mods.clause_alpha_floor_delta_eur),
             priority_positions=posture_mods.extra.get("priority_positions"),
             top_rival_managers=top_rivals,
+            remaining_rounds=max(1, 38 - current_jn + 1),
+            macro_phase=str(macro_ctx.get("phase", "")),
         )
 
         clause_actions: List[Dict[str, Any]] = []
@@ -1184,7 +1356,7 @@ class PortfolioOptimizer:
         # 3C. Joint Hierarchical Allocation
         def _acq_tier_key(x: Dict[str, Any]) -> Tuple[int, float]:
             dx = float(x.get("delta_xp_xi", 0.0))
-            is_empty_pos = (xi_floor_by_pos.get(x["position"], 3.0) <= 0.1)
+            is_empty_pos = (xi_floor_by_pos.get(x["position"], 3.0) <= 0.1) or (need_gk_emergency and x["position"] == "GK")
             reg = str(x.get("regime", ""))
             is_prio = int(x["player_id"]) in priority_buys
 
@@ -1214,11 +1386,16 @@ class PortfolioOptimizer:
         rem_budget = float(safe_acquisition_budget)
         rem_clause_budget = float(max(0.0, clause_budget))
         rem_slots = open_roster_slots
+        rem_hard_slots = hard_open_slots
         seen_acq_pids: Set[int] = set()
 
         for acq in combined_acqs:
-            if rem_slots <= 0 or rem_budget < 150_000:
+            if rem_hard_slots <= 0 or rem_budget < 150_000:
                 break
+            acq_tier = _acq_tier_key(acq)[0]
+            # Once soft roster target is full, still permit high-conviction XI upgrades / clauses (`tier >= 2`) up to hard cap
+            if rem_slots <= 0 and acq_tier < 2:
+                continue
             pid = int(acq["player_id"])
             if pid in seen_acq_pids:
                 continue
@@ -1231,6 +1408,7 @@ class PortfolioOptimizer:
                 rem_clause_budget -= amt
                 rem_budget -= amt
                 rem_slots -= 1
+                rem_hard_slots -= 1
                 seen_acq_pids.add(pid)
             else:
                 reserve_weight = 1.0 if (not can_use_credit or eff_days_to_kickoff <= 1) else max(0.68, float(acq["win_prob_est"]))
@@ -1240,6 +1418,7 @@ class PortfolioOptimizer:
                     rem_budget -= eff_cost
                     if reserve_weight >= 0.75:
                         rem_slots -= 1
+                        rem_hard_slots -= 1
                     seen_acq_pids.add(pid)
 
         # Step 4: Defensive Shields (`1:1` ratio) & Top-K (`<= 5`) Preventive Market Listings

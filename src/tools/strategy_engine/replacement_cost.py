@@ -19,7 +19,7 @@ from typing import Dict, List, Any, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
-from src.tools.strategy_engine.league_rules import LeagueRulesEngine
+from src.tools.strategy_engine.league_rules import LeagueRulesEngine, DEFAULT_CLAUSE_RANGES
 from src.utils.numeric import safe_num
 
 
@@ -46,22 +46,27 @@ def _lines_to_bitmask(lines: Any) -> int:
     return mask
 
 
-def _compute_official_clause_vec(prices: np.ndarray) -> np.ndarray:
+def _compute_official_clause_vec(
+    prices: np.ndarray,
+    clause_ranges: Optional[List[Tuple[float, float, str]]] = None,
+) -> np.ndarray:
     """Vectorized Biwenger official clause brackets matching LeagueRulesEngine.compute_official_clause."""
+    ranges = clause_ranges if clause_ranges else DEFAULT_CLAUSE_RANGES
     out = np.empty_like(prices, dtype=float)
-    m1 = prices < 2_000_000.0
-    m2 = (~m1) & (prices < 6_000_000.0)
-    m3 = (~m1) & (~m2) & (prices < 12_000_000.0)
-    m4 = (~m1) & (~m2) & (~m3) & (prices < 22_000_000.0)
-    m5 = (~m1) & (~m2) & (~m3) & (~m4) & (prices < 32_000_000.0)
-    m6 = ~(m1 | m2 | m3 | m4 | m5)
-    out[m1] = np.maximum(1_000_000.0, prices[m1] * 2.25)
-    out[m2] = prices[m2] * 2.00
-    out[m3] = prices[m3] * 1.6667
-    out[m4] = prices[m4] * 1.50
-    out[m5] = prices[m5] * 1.3333
-    out[m6] = prices[m6] * 1.25
-    return np.round(out / 10_000.0) * 10_000.0
+    rem = np.ones(len(prices), dtype=bool)
+    for threshold, rule_val, mode in ranges:
+        if not np.any(rem):
+            break
+        hit = rem & (prices <= float(threshold))
+        if np.any(hit):
+            if mode == "%":
+                out[hit] = prices[hit] * (float(rule_val) / 100.0)
+            else:
+                out[hit] = float(rule_val)
+            rem &= ~hit
+    if np.any(rem):
+        out[rem] = prices[rem] * 1.25
+    return np.round(out)
 
 
 def _build_calendar_index(df_calendar: Optional[pd.DataFrame]) -> Optional[Tuple[List[Tuple[int, pd.Timestamp]], Dict[Tuple[int, str], pd.Timestamp]]]:
@@ -270,14 +275,10 @@ class MarketScarcityEngine:
         need_calc = raw_cl <= 0.0
         eff_cl = raw_cl.copy()
         if np.any(need_calc):
-            if self.rules.clause_enabled:
-                # Use league-specific scaling when customized, fallback to fast vectorized official brackets
-                eff_cl[need_calc] = np.array(
-                    [float(self.rules.compute_official_clause(float(p))) for p in self._u_precio[need_calc]],
-                    dtype=float,
-                )
-            else:
-                eff_cl[need_calc] = _compute_official_clause_vec(self._u_precio[need_calc])
+            eff_cl[need_calc] = _compute_official_clause_vec(
+                self._u_precio[need_calc],
+                clause_ranges=self.rules.clause_ranges,
+            )
         self._u_eff_clause = eff_cl
         self._u_is_avail = self.universe_df["is_available"].values.astype(bool)
         self._u_is_free_avail = free_mask & self._u_is_avail
@@ -464,22 +465,31 @@ class MarketScarcityEngine:
         self._rep_cache[cache_key] = prof
         return prof
 
-    def best_achievable_reinvestment_xp(
+    def best_achievable_reinvestment_details(
         self,
         budget_eur: float,
         valid_lines: Set[str],
         clauses_open: bool = True,
-    ) -> Tuple[float, float]:
+        point_shadow_value_eur: float = 85_000.0,
+        horizon_rounds: int = 6,
+    ) -> Tuple[float, float, float]:
         """
         Given `budget_eur` proceeds from selling a player today, estimates:
-          `(achievable_xp_healthy, expected_wait_rounds)`
-        achievable in the current league market (via realistic free-agent auction or unlocked rival clause).
+          `(achievable_xp_healthy, expected_wait_rounds, clause_surcharge_eur)`
+        realistically achievable in the current league market after accounting for
+        the immediate `(clause - VM)` deadweight cost of paying a rival release clause.
         """
         if len(self._u_pid) == 0 or budget_eur <= 150_000:
-            return 2.2, 1.0
+            return 2.2, 1.0, 0.0
 
         target_mask = _lines_to_bitmask(valid_lines) or 15
-        cache_key = (int(round(budget_eur)), target_mask, bool(clauses_open))
+        cache_key = (
+            int(round(budget_eur)),
+            target_mask,
+            bool(clauses_open),
+            int(round(point_shadow_value_eur)),
+            int(horizon_rounds),
+        )
         cached = self._reinvest_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -501,24 +511,50 @@ class MarketScarcityEngine:
             wait_days = float(np.clip(1.0 / max(1e-3, p_hit), 1.0, 21.0))
             free_wait_rounds = float(np.clip(np.floor(wait_days / 7.0), 0.0, 3.0))
 
-        # Path 2: Affordable unlocked rival clause
-        best_clause_xp = 0.0
-        if self.rules.clause_enabled:
-            aff_cl_xps = self._u_xp_healthy[
-                line_avail_mask & self._u_is_rival_unlocked_avail & (self._u_eff_clause <= budget_eur)
-            ]
-            if len(aff_cl_xps) > 0:
-                best_clause_xp = float(np.max(aff_cl_xps))
+        free_net_eur = max(0.0, float(horizon_rounds) - free_wait_rounds) * best_free_xp * float(point_shadow_value_eur)
 
-        clause_wait_rounds = 0.0 if clauses_open else 1.0
-        free_6r = (6.0 - free_wait_rounds) * best_free_xp
-        clause_6r = (6.0 - clause_wait_rounds) * best_clause_xp
-        if clause_6r > free_6r and best_clause_xp > 0:
-            res = (round(best_clause_xp, 3), clause_wait_rounds)
+        # Path 2: Affordable unlocked rival clause (must deduct immediate `clause - VM` equity loss!)
+        best_clause_xp = 0.0
+        best_clause_surcharge = 0.0
+        clause_wait_rounds = 0.25 if clauses_open else 1.0
+        clause_net_eur = -1e12
+        if self.rules.clause_enabled:
+            cl_mask = line_avail_mask & self._u_is_rival_unlocked_avail & (self._u_eff_clause <= budget_eur)
+            aff_cl_xps = self._u_xp_healthy[cl_mask]
+            if len(aff_cl_xps) > 0:
+                aff_cl_surch = np.maximum(0.0, self._u_eff_clause[cl_mask] - self._u_precio[cl_mask])
+                active_r = max(0.0, float(horizon_rounds) - clause_wait_rounds)
+                net_vals = active_r * aff_cl_xps * float(point_shadow_value_eur) - aff_cl_surch
+                k_cl = min(3, len(net_vals))
+                top_cl_idx = np.argpartition(net_vals, len(net_vals) - k_cl)[-k_cl:] if len(net_vals) > k_cl else np.arange(len(net_vals))
+                best_clause_xp = float(np.median(aff_cl_xps[top_cl_idx]))
+                best_clause_surcharge = float(np.median(aff_cl_surch[top_cl_idx]))
+                clause_net_eur = float(np.median(net_vals[top_cl_idx]))
+
+        if clause_net_eur > free_net_eur and best_clause_xp > 0:
+            res = (round(best_clause_xp, 3), clause_wait_rounds, round(best_clause_surcharge, 1))
         else:
-            res = (round(best_free_xp, 3), free_wait_rounds)
+            res = (round(best_free_xp, 3), free_wait_rounds, 0.0)
         self._reinvest_cache[cache_key] = res
         return res
+
+    def best_achievable_reinvestment_xp(
+        self,
+        budget_eur: float,
+        valid_lines: Set[str],
+        clauses_open: bool = True,
+    ) -> Tuple[float, float]:
+        """
+        Given `budget_eur` proceeds from selling a player today, estimates:
+          `(achievable_xp_healthy, expected_wait_rounds)`
+        achievable in the current league market (via realistic free-agent auction or unlocked rival clause).
+        """
+        xp, wait_r, _ = self.best_achievable_reinvestment_details(
+            budget_eur=budget_eur,
+            valid_lines=valid_lines,
+            clauses_open=clauses_open,
+        )
+        return xp, wait_r
 
     def classify_asset_role(
         self,
@@ -548,7 +584,12 @@ class MarketScarcityEngine:
             and rep_profile.scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE")
             and (replacement_spread >= 1_800_000 or price >= 7_500_000)
         )
-        if is_elite_xp or is_scarce_star:
+        is_high_value_anchor = (
+            xp_healthy >= max(5.1, self.p60_starter_xp + 0.4)
+            and p_start_healthy >= 0.78
+            and price >= 9_000_000
+        )
+        if is_elite_xp or is_scarce_star or is_high_value_anchor:
             return "FRANCHISE_CORE"
 
         if in_current_xi and (xp_healthy >= max(4.1, self.p60_starter_xp - 0.3) or p_start_healthy >= 0.72):
@@ -663,10 +704,12 @@ def evaluate_hold_vs_sell_npv(
     npv_hold_eur = hold_points_6r * point_shadow_value_eur + terminal_asset_hold
 
     # 2. SELL Scenario (at `sale_offer_eur`, reinvesting into best realistic market alternative)
-    reinvest_xp, wait_rounds = scarcity_engine.best_achievable_reinvestment_xp(
+    reinvest_xp, wait_rounds, clause_surcharge_eur = scarcity_engine.best_achievable_reinvestment_details(
         budget_eur=sale_offer_eur,
         valid_lines=valid_lines,
         clauses_open=clauses_open,
+        point_shadow_value_eur=point_shadow_value_eur,
+        horizon_rounds=horizon_rounds,
     )
     w_r = min(float(horizon_rounds), float(wait_rounds))
     sell_points_6r = w_r * float(bench_backup_xp) + max(0.0, horizon_rounds - w_r) * float(reinvest_xp)
@@ -677,11 +720,17 @@ def evaluate_hold_vs_sell_npv(
     # Weight replacement spread by how likely the player returns within the season (0.55 normally; 0.15 if long-term >=45d injury)
     spread_weight = 0.15 if absence_days >= 45 else (0.55 if rep.scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE") else 0.30)
 
-    npv_sell_eur = sell_points_6r * point_shadow_value_eur + float(sale_offer_eur) - spread_weight * replacement_spread_eur
+    npv_sell_eur = (
+        sell_points_6r * point_shadow_value_eur
+        + float(sale_offer_eur)
+        - float(clause_surcharge_eur)
+        - spread_weight * replacement_spread_eur
+    )
 
     net_sell_advantage_eur = npv_sell_eur - npv_hold_eur
-    # Require a meaningful positive edge (> 65k €) to overcome transaction churn & 24h lock risk
-    hurdle_eur = max(65_000.0, market_price * 0.015)
+    # Healthy regular starters face auction execution risk + overbid friction (`3.5%`), whereas injured/non-starters use tighter hurdle (`1.5%`)
+    is_healthy_starter = bool(is_available and absence_days == 0 and xp_healthy >= max(4.0, scarcity_engine.p60_starter_xp * 0.90))
+    hurdle_eur = max(140_000.0, market_price * 0.035) if is_healthy_starter else max(65_000.0, market_price * 0.015)
     recommend_sell = bool(net_sell_advantage_eur > hurdle_eur)
 
     realized_acq_delta = (float(sale_offer_eur) - float(purchase_price)) if (purchase_price and purchase_price > 0) else None

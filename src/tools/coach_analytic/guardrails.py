@@ -367,7 +367,7 @@ def compute_squad_needs(squad: pd.DataFrame) -> dict:
             starter = float(row.get("COMUNIATE_STARTER") or 0.0)
             if starter >= 0.5:
                 mf_count += 1
-    notes.append(f"MF: Línea mejor cubierta ({mf_count} medios fiables). Los no titulares (ej. Camavinga) son transferibles para liquidez.")
+    notes.append(f"MF: Línea mejor cubierta ({mf_count} medios fiables). Los no titulares son transferibles para liquidez.")
 
     # 4. Forward Policy: Check confirmed top strikers
     pure_fw_starters = 0
@@ -384,7 +384,7 @@ def compute_squad_needs(squad: pd.DataFrame) -> dict:
 
     if pure_fw_starters == 0:
         missing.insert(0, "FW")  # Top priority
-        sub_names = ", ".join(pure_fw_subs) if pure_fw_subs else "Bisiwu"
+        sub_names = ", ".join(pure_fw_subs) if pure_fw_subs else "sin delanteros titulares"
         notes.append(f"FW: Mayor debilidad estructural. 0 delanteros centro titulares (solo suplente en revalorización: {sub_names}). Prioridad ALTA urgente: Fichar un delantero centro (FW) titular.")
 
     if result["fit_players"] < MIN_SQUAD_SIZE:
@@ -528,16 +528,18 @@ def validate_autopilot_plan_v2(
     max_exposure = cash + min(credit_line, max(0.0, unlocked_collateral) * 0.85)
     if not can_use_credit:
         max_exposure = max(0.0, cash)
-    kept_bids, committed = [], 0.0
+    kept_bids, committed, nominal_committed = [], 0.0, 0.0
+    max_api_bid_total = cash + credit_line
     for b in plan.get("market_bids", [])[:V2_MAX_DAILY_BIDS]:
         amt = float(b["amount"])
-        if amt > cash + credit_line:
-            blocked.append({**b, "blocked_reason": f"Supera puja máxima oficial ({cash + credit_line:,.0f} €)"})
+        if amt > max_api_bid_total or (nominal_committed + amt > max_api_bid_total and len(kept_bids) >= 1):
+            blocked.append({**b, "blocked_reason": f"Supera puja máxima oficial ({max_api_bid_total:,.0f} €)"})
             continue
         if committed + amt * max(0.65, float(b.get("win_prob_est", 1.0))) > max_exposure:
             blocked.append({**b, "blocked_reason": f"Excede exposición respaldada por colateral ({max_exposure:,.0f} €)"})
             continue
         kept_bids.append(b)
+        nominal_committed += amt
         committed += amt * max(0.65, float(b.get("win_prob_est", 1.0)))
     approved["market_bids"] = kept_bids
 

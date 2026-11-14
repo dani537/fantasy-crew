@@ -107,6 +107,41 @@ class TieredLLMRouter:
         return f"openrouter:{model}"
 
     @classmethod
+    def get_pydantic_ai_model_object(cls, tier: str = "daily"):
+        """
+        Builds a native Pydantic AI v2 `Model` (or `FallbackModel` chain) compatible
+        with custom Gemini / OpenRouter / DeepSeek model names (including `gemini-4-hydrogen`).
+        Falls back to `get_pydantic_ai_model(tier)` if model classes are unavailable.
+        """
+        candidates = cls.resolve_candidates(tier=tier)
+        if not candidates:
+            return cls.get_pydantic_ai_model(tier=tier)
+
+        try:
+            from pydantic_ai.models.google import GoogleModel
+            from pydantic_ai.providers.google import GoogleProvider
+            from pydantic_ai.models.openai import OpenAIChatModel
+            from pydantic_ai.providers.openai import OpenAIProvider
+            from pydantic_ai.models.fallback import FallbackModel
+        except Exception:
+            return cls.get_pydantic_ai_model(tier=tier)
+
+        models = []
+        for cand in candidates:
+            prov = cand["provider"]
+            model_name = cand["model"]
+            api_key = cand["api_key"]
+            base_url = cand["base_url"]
+            if prov == "gemini":
+                models.append(GoogleModel(model_name, provider=GoogleProvider(api_key=api_key)))
+            else:
+                models.append(OpenAIChatModel(model_name, provider=OpenAIProvider(base_url=base_url, api_key=api_key)))
+
+        if len(models) == 1:
+            return models[0]
+        return FallbackModel(*models)
+
+    @classmethod
     def get_client(cls, tier: str = "daily") -> LLMClient:
         """Returns an LLMClient bound to the requested tier with automatic failover."""
         return LLMClient(tier=tier, enable_failover=True)

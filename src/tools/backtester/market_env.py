@@ -219,10 +219,17 @@ class AZFinanceMarketEnv:
         delta_windows: Dict[int, List[Tuple[str, str]]] = {}
         needed_piv_dates: Set[str] = set()
         if hc_dates:
-            # Find earliest date covering end of J3 (default ~2026-09-02)
+            # Find earliest date AFTER J3 finishes where cumulative puntos_totales is actually populated (> 0)
             j3_dts = [s[:10] for s in cal_p1[cal_p1["jornada_num_int"] == 3]["fecha_hora"].tolist() if len(s) >= 10]
-            j3_end = max(j3_dts) if j3_dts else "2026-09-01"
-            j3_anchor_cands = [d for d in hc_dates if d > j3_end]
+            j3_end = max(j3_dts) if j3_dts else ""
+            mkt_df = self.view._df_market
+            pts_num = pd.to_numeric(mkt_df["puntos_totales"], errors="coerce").fillna(0)
+            pop_dates = sorted(
+                mkt_df.loc[pts_num > 0, "fecha"].astype(str).str.slice(0, 10).unique().tolist()
+            )
+            j3_anchor_cands = [d for d in pop_dates if d > j3_end]
+            if not j3_anchor_cands:
+                j3_anchor_cands = [d for d in hc_dates if d > j3_end]
             j3_anchor_date = j3_anchor_cands[0] if j3_anchor_cands else hc_dates[0]
             needed_piv_dates.add(j3_anchor_date)
         else:
@@ -419,7 +426,12 @@ class AZFinanceMarketEnv:
                             "paid_clause": pr_i,
                         })
 
-    def get_causal_standings_snapshot(self, date_str: str) -> Dict[str, Any]:
+    def get_causal_standings_snapshot(
+        self,
+        date_str: str,
+        mgrs_today: Optional[pd.DataFrame] = None,
+        my_net_worth: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """
         Computes strictly causal league standings on `date_str` using ONLY settled payouts
         with `payout_date <= date_str` and manager net worth on `date_str`. Zero lookahead!
@@ -447,16 +459,41 @@ class AZFinanceMarketEnv:
                 my_rank = idx
                 break
         leader_pts = ordered[0][1] if ordered else my_pts
+        second_pts = ordered[1][1] if len(ordered) > 1 else leader_pts
         podium_pts = ordered[min(2, len(ordered) - 1)][1] if ordered else my_pts
+        n_mgrs = max(1, len(ordered))
+        n_settled = len(settled_so_far)
+        top_rivals = [m for m, _ in ordered[:4] if m != self.target_manager]
+
+        leader_nw = 0.0
+        if mgrs_today is not None and not mgrs_today.empty and "patrimonio_total" in mgrs_today.columns:
+            rivals_nw = pd.to_numeric(
+                mgrs_today.loc[mgrs_today["manager"] != self.target_manager, "patrimonio_total"],
+                errors="coerce",
+            ).dropna()
+            if len(rivals_nw) > 0:
+                leader_nw = float(rivals_nw.max())
+        eff_my_nw = float(my_net_worth) if my_net_worth is not None else float(self.cash)
+        if leader_nw <= 0.0:
+            leader_nw = eff_my_nw
+
         return {
             "rank": my_rank,
-            "n_managers": max(1, len(ordered)),
+            "my_rank": my_rank,
+            "n_managers": n_mgrs,
+            "total_managers": n_mgrs,
             "my_points": my_pts,
             "leader_points": leader_pts,
+            "second_points": second_pts,
+            "podium_points": podium_pts,
             "gap_to_leader": max(0, leader_pts - my_pts),
             "gap_to_podium": max(0, podium_pts - my_pts),
-            "settled_rounds_count": len(settled_so_far),
+            "settled_rounds_count": n_settled,
+            "rounds_settled": n_settled,
             "remaining_rounds": max(1, 38 - (max(settled_so_far) if settled_so_far else 0)),
+            "my_net_worth": eff_my_nw,
+            "leader_net_worth": leader_nw,
+            "top_rival_managers": top_rivals,
         }
 
     def _get_mkt_idx(self, date_str: str, mkt_today: Optional[pd.DataFrame] = None) -> Dict[int, Dict[str, Any]]:
@@ -907,7 +944,9 @@ class AZFinanceMarketEnv:
         else:
             opt.clause_sniper.policy = clause_policy
 
-        opt_max_squad_cap = min(int(opt.max_squad_size), int(self.rules.team_max_size))
+        arch_lifecycle = (opt.archetype is None) or bool(getattr(opt.archetype, "lifecycle_driven", False))
+        soft_max = int(opt.max_squad_size) + (3 if arch_lifecycle else 2)
+        opt_max_squad_cap = min(int(self.rules.team_max_size), max(int(opt.max_squad_size), soft_max))
         supports_standings = "causal_standings_ctx" in inspect.signature(opt.generate_daily_plan).parameters
         supports_phase_ctx = "phase_ctx" in inspect.signature(opt.generate_daily_plan).parameters
         stressed_injuries: Dict[int, str] = {}
@@ -1248,7 +1287,15 @@ class AZFinanceMarketEnv:
                     if supports_phase_ctx:
                         dp_kwargs["phase_ctx"] = phase_ctx
                     if supports_standings:
-                        dp_kwargs["causal_standings_ctx"] = self.get_causal_standings_snapshot(date_str)
+                        curr_nw = self.cash + sum(
+                            float(mkt_idx.get(p, {}).get("precio", st.purchase_price))
+                            for p, st in self.squad.items()
+                        )
+                        dp_kwargs["causal_standings_ctx"] = self.get_causal_standings_snapshot(
+                            date_str,
+                            mgrs_today=mgrs_today,
+                            my_net_worth=curr_nw,
+                        )
                     plan = opt.generate_daily_plan(**dp_kwargs)
 
                 # B1. Execute Immediate Sales (Accepting firm offers)

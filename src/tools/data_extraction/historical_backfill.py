@@ -838,9 +838,9 @@ def extract_rounds_matches_reports_and_lineups(
         for g in games:
             m_id = int(g.get("id", 0) or 0)
             g_ts = g.get("date")
-            g_dt = datetime.datetime.fromtimestamp(g_ts) if g_ts else None
+            g_dt = datetime.datetime.fromtimestamp(g_ts, tz=datetime.timezone.utc) if g_ts else None
             g_dt_str = g_dt.strftime("%Y-%m-%d %H:%M:%S") if g_dt else ""
-            g_day_str = g_dt.strftime("%Y-%m-%d") if g_dt else datetime.date.today().strftime("%Y-%m-%d")
+            g_day_str = g_dt.strftime("%Y-%m-%d") if g_dt else datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
             g_status = str(g.get("status", "pending"))
 
             home = g.get("home", {}) or {}

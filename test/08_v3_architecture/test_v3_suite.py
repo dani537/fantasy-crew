@@ -367,6 +367,213 @@ class TestFantasyChampionV3Architecture(unittest.TestCase):
             for lit in forbidden_literals:
                 self.assertNotIn(lit, src_txt, f"Hardcoded personal ID '{lit}' found in {rel}!")
 
+    def test_milp_micro_deficit_bin_and_high_debt_collateral_recovery(self):
+        rules = LeagueRulesEngine(market_max_user_sales=5)
+        opt = PortfolioOptimizer(rules=rules)
+
+        # 1. Sub-thousand-euro Friday deficit (-417 EUR) must force a sale rather than taking bankruptcy slack
+        sq_micro = pd.DataFrame([
+            {"player_id": i, "nombre": f"U_{i}", "posicion": pos, "precio": pr}
+            for i, pos, pr in [
+                (1, "Portero", 3_000_000),
+                (2, "Defensa", 4_000_000), (3, "Defensa", 3_500_000), (4, "Defensa", 3_200_000), (5, "Defensa", 3_000_000),
+                (6, "Centrocampista", 4_200_000), (7, "Centrocampista", 3_800_000), (8, "Centrocampista", 3_100_000),
+                (9, "Delantero", 5_000_000), (10, "Delantero", 4_100_000), (11, "Delantero", 2_800_000),
+                (12, "Centrocampista", 900_000),
+            ]
+        ])
+        xp_micro = pd.DataFrame([
+            {"player_id": i, "xp_GK": 4.0 if i == 1 else 0.0, "xp_DF": 4.0, "xp_MF": 4.0, "xp_FW": 4.0, "xp_best": 4.0, "xp_healthy": 4.0, "p_start": 0.9, "is_available": True}
+            for i in range(1, 13)
+        ])
+        sol = opt.solve_joint_lineup_and_solvency_milp(
+            squad_df=sq_micro,
+            xp_table=xp_micro,
+            efr_map={i: 20_000.0 for i in range(1, 13)},
+            current_cash=-417.0,
+            must_be_solvent=True,
+            offer_map={12: 920_000.0, 11: 2_850_000.0},
+        )
+        self.assertTrue(sol["is_solvent"], "MILP opted for -417 EUR bankruptcy instead of liquidating a bench offer!")
+        self.assertGreaterEqual(sol["projected_cash"], 0.0)
+        self.assertEqual(len(sol["sales_to_execute"]), 1)
+
+        # 2. High debt (-9.2M EUR) exceeding bench/flip value must unlock STRUCTURAL_STARTER collateral instead of wasting slots on 0.15M dust
+        sq_debt = pd.DataFrame([
+            {"player_id": 201, "nombre": "CoreAnchor", "posicion": "Centrocampista", "precio": 16_000_000},
+            {"player_id": 202, "nombre": "StarterA", "posicion": "Defensa", "precio": 5_600_000},
+            {"player_id": 203, "nombre": "StarterB", "posicion": "Centrocampista", "precio": 5_500_000},
+            {"player_id": 204, "nombre": "StarterC", "posicion": "Defensa", "precio": 4_500_000},
+            {"player_id": 205, "nombre": "DustA", "posicion": "Delantero", "precio": 150_000},
+            {"player_id": 206, "nombre": "DustB", "posicion": "Delantero", "precio": 150_000},
+            {"player_id": 207, "nombre": "DustC", "posicion": "Portero", "precio": 150_000},
+        ])
+        roles_debt = {201: "FRANCHISE_CORE", 202: "STRUCTURAL_STARTER", 203: "STRUCTURAL_STARTER", 204: "STRUCTURAL_STARTER", 205: "BENCH_PATCH", 206: "BENCH_PATCH", 207: "BENCH_PATCH"}
+        listings_debt = opt.select_top_k_preventive_listings(
+            final_sq=sq_debt,
+            role_by_pid=roles_debt,
+            npv_by_pid={},
+            efr_map={i: 0.0 for i in range(201, 208)},
+            projected_max_debt_eur=9_200_000.0,
+            sell_locked_ids=set(),
+            untouchable_ids=set(),
+            max_slots=5,
+        )
+        coll_debt = sum(float(x["market_price"]) * 0.955 for x in listings_debt)
+        self.assertGreaterEqual(coll_debt, 9_200_000.0 * 1.15)
+        self.assertNotIn(201, {int(x["player_id"]) for x in listings_debt})
+
+        # 3. Extreme impossibility without FRANCHISE_CORE must still spare untouchable_ids and unlock non-untouchable core
+        sq_emg = pd.DataFrame([
+            {"player_id": 301, "nombre": "UntouchCore", "posicion": "Delantero", "precio": 15_000_000},
+            {"player_id": 302, "nombre": "LiquidCore", "posicion": "Centrocampista", "precio": 14_000_000},
+            {"player_id": 303, "nombre": "TinyA", "posicion": "Defensa", "precio": 200_000},
+        ])
+        listings_emg = opt.select_top_k_preventive_listings(
+            final_sq=sq_emg,
+            role_by_pid={301: "FRANCHISE_CORE", 302: "FRANCHISE_CORE", 303: "BENCH_PATCH"},
+            npv_by_pid={},
+            efr_map={301: 0.0, 302: 0.0, 303: 0.0},
+            projected_max_debt_eur=6_000_000.0,
+            sell_locked_ids=set(),
+            untouchable_ids={301},
+            max_slots=5,
+        )
+        emg_pids = {int(x["player_id"]) for x in listings_emg}
+        self.assertIn(302, emg_pids)
+        self.assertNotIn(301, emg_pids)
+
+    def test_xp_model_sub_shrinkage_and_postponed_match_zeroing(self):
+        from src.tools.strategy_engine.xp_model import ExpectedPointsEngine
+
+        xp_eng = ExpectedPointsEngine()
+        mkt = pd.DataFrame([
+            {"player_id": 1, "nombre": "SubCameo", "equipo": "ClubA", "posicion": "Delantero", "estado": "ok", "precio": 5_000_000, "media_puntos": 4.5, "puntos_totales": 45, "partidos_jugados": 10, "minutos": 650, "comuniate_titular": 1, "comuniate_duda": 0},
+            {"player_id": 2, "nombre": "PostponedStar", "equipo": "ClubB", "posicion": "Centrocampista", "estado": "ok", "precio": 10_000_000, "media_puntos": 6.5, "puntos_totales": 65, "partidos_jugados": 10, "minutos": 900, "comuniate_titular": 1, "comuniate_duda": 0},
+            {"player_id": 3, "nombre": "FullStarter", "equipo": "ClubA", "posicion": "Delantero", "estado": "ok", "precio": 5_000_000, "media_puntos": 4.5, "puntos_totales": 45, "partidos_jugados": 10, "minutos": 850, "comuniate_titular": 1, "comuniate_duda": 0},
+        ])
+        rep = pd.DataFrame(
+            [{"player_id": 1, "jornada_num": j, "minutos_jugados": 15, "es_titular": 0, "puntos_biwenger": 8.0} for j in (7, 8, 9)]
+            + [{"player_id": 2, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "puntos_biwenger": 7.0} for j in (7, 8, 9)]
+            + [{"player_id": 3, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "puntos_biwenger": 8.0} for j in (7, 8, 9)]
+        )
+        cal = pd.DataFrame([
+            {"jornada_num": 10, "part": 1, "local": "ClubA", "visitante": "ClubC", "estado_partido": "scheduled"},
+            {"jornada_num": 10, "part": 1, "local": "ClubB", "visitante": "ClubD", "estado_partido": "postponed"},
+        ])
+        out = xp_eng.compute_xp_table(mkt, rep, cal, target_jornada_num=10).set_index("player_id")
+        self.assertGreater(float(out.loc[3, "xp_best"]), float(out.loc[1, "xp_best"]) + 0.5)
+        self.assertEqual(float(out.loc[2, "xp_best"]), 0.0)
+        self.assertEqual(float(out.loc[2, "p_start"]), 0.0)
+
+    def test_clause_sniper_gk_overpay_guard_and_official_clause_brackets_vec(self):
+        from src.tools.strategy_engine.replacement_cost import _compute_official_clause_vec
+        from src.tools.strategy_engine.clause_sniper import ClauseSniper
+
+        rules = LeagueRulesEngine.load()
+        prices = pd.Series([500_000, 1_500_000, 5_500_000, 15_000_000]).to_numpy()
+        vec_clauses = _compute_official_clause_vec(prices)
+        for p_val, vc in zip(prices, vec_clauses):
+            self.assertEqual(int(vc), int(rules.compute_official_clause(float(p_val))))
+
+        sniper = ClauseSniper(policy="SURGICAL_SCARCITY", rules=rules)
+        mkt = pd.DataFrame([
+            {"player_id": 401, "nombre": "OverpricedGK", "equipo": "ClubA", "propietario_liga": "RivalA", "precio": 5_000_000, "subida_24h": 40_000, "clausula_actual": 9_500_000, "media_puntos": "4.8"},
+            {"player_id": 402, "nombre": "ScarceForward", "equipo": "ClubB", "propietario_liga": "RivalB", "precio": 10_000_000, "subida_24h": 80_000, "clausula_actual": 13_500_000, "media_puntos": "7.1"},
+        ])
+        xp_tbl = pd.DataFrame([
+            {"player_id": 401, "best_line": "GK", "natural_pos": "GK", "valid_lines": "GK", "xp_best": 4.9, "xp_healthy": 4.9, "p_start": 0.98, "is_available": True},
+            {"player_id": 402, "best_line": "FW", "natural_pos": "FW", "valid_lines": "FW", "xp_best": 7.2, "xp_healthy": 7.2, "p_start": 0.98, "is_available": True},
+        ])
+        targets = sniper.scan_offensive_targets(
+            df_market_today=mkt,
+            xp_table=xp_tbl,
+            efr_map={401: 90_000.0, 402: 200_000.0},
+            my_manager_name="MyClub",
+            my_current_xi_floor_by_pos={"GK": 3.5, "DF": 3.2, "MF": 3.5, "FW": 3.0},
+            max_budget=20_000_000.0,
+            idle_cash_eur=18_000_000.0,
+            clauses_open=True,
+        )
+        t_pids = {int(t["player_id"]) for t in targets}
+        self.assertNotIn(401, t_pids, "Should not pay >1.50x clause on GK when starting GK is healthy!")
+        self.assertIn(402, t_pids)
+
+    def test_posture_schema_compat_and_env_j1_j3_nonzero_anchor(self):
+        from src.tools.backtester.market_env import AZFinanceMarketEnv
+
+        rules = LeagueRulesEngine.load()
+        opt = PortfolioOptimizer(rules=rules)
+        mkt = pd.DataFrame([
+            {"player_id": 10 + i, "nombre": f"Free_{i}", "equipo": "ClubC", "posicion": "Defensa", "estado": "ok", "precio": 2_000_000, "subida_24h": 50_000, "clausula_actual": 4_500_000, "propietario_liga": "Libre", "media_puntos": "4.0"}
+            for i in range(4)
+        ])
+        sq = pd.DataFrame([
+            {"player_id": 500 + i, "nombre": f"Sq_{i}", "posicion": pos, "precio": 3_000_000, "subida_24h": 10_000}
+            for i, pos in enumerate(["Portero"] + ["Defensa"] * 4 + ["Centrocampista"] * 4 + ["Delantero"] * 2)
+        ])
+        xp_tbl = pd.DataFrame([
+            {"player_id": int(r["player_id"]), "best_line": r["posicion"][:2], "natural_pos": r["posicion"][:2], "valid_lines": "GK" if r["posicion"] == "Portero" else ("DF" if r["posicion"] == "Defensa" else ("MF" if r["posicion"] == "Centrocampista" else "FW")), "xp_best": 4.2, "xp_healthy": 4.2, "p_start": 0.9, "is_available": True}
+            for r in pd.concat([mkt, sq], ignore_index=True).to_dict("records")
+        ])
+        df_cal = pd.DataFrame([
+            {"jornada": "Jornada 8", "part": 1, "fecha_hora": "2026-10-16 21:00:00", "estado_partido": "pending"},
+        ])
+        plan = opt.generate_daily_plan(
+            current_date="2026-10-14",
+            my_manager_name="TestTeam",
+            current_cash=5_000_000.0,
+            squad_df=sq,
+            df_market_all=mkt,
+            market_listings_df=pd.DataFrame(),
+            xp_table=xp_tbl,
+            efr_map={},
+            phase_ctx=rules.compute_round_phase(pd.Timestamp("2026-10-14 10:00:00"), df_cal),
+            causal_standings_ctx={"my_rank": 10, "total_managers": 15, "leader_points": 450, "my_points": 320, "rounds_settled": 7},
+        )
+        self.assertEqual(plan["posture_state"]["posture"], "ASYMMETRIC_CHASER")
+
+        env = AZFinanceMarketEnv()
+        j1_j3_nonzero = [sum(1 for v in env.ground_truth_round_pts.get(j, {}).values() if v >= 8) for j in (1, 2, 3)]
+        self.assertTrue(all(cnt >= 10 for cnt in j1_j3_nonzero), f"J1-J3 anchor wiped player points: {j1_j3_nonzero}")
+
+    def test_pydantic_ai_agent_builds_with_custom_gemini_and_fallback(self):
+        from unittest.mock import patch
+        from pydantic_ai import Agent
+        from pydantic_ai.models.fallback import FallbackModel
+        from src.llm_endpoints.router import TieredLLMRouter
+        from src.agent.pydantic_biwenger_agent import create_biwenger_agent
+
+        fake_candidates = [
+            {
+                "provider": "gemini",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "model": "gemini-4-hydrogen",
+                "api_key": "fake-gem-key",
+            },
+            {
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "openai/gpt-6-luna-pro",
+                "api_key": "fake-or-key",
+            },
+        ]
+        fake_ctx = {
+            "user_id": 1,
+            "user_name": "Tester",
+            "league_id": 1,
+            "league_name": "TestLeague",
+            "team_id": 1,
+            "team_name": "TestFC",
+            "balance": 5_000_000.0,
+        }
+        with patch.object(TieredLLMRouter, "resolve_candidates", return_value=fake_candidates), \
+             patch("src.agent.pydantic_biwenger_agent.get_active_user_context", return_value=fake_ctx):
+            model_obj = TieredLLMRouter.get_pydantic_ai_model_object("daily")
+            self.assertIsInstance(model_obj, FallbackModel)
+            ag = create_biwenger_agent()
+            self.assertIsInstance(ag, Agent)
+
 
 if __name__ == "__main__":
     unittest.main()

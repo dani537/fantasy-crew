@@ -2577,7 +2577,11 @@ with tab_agent:
                     from src.agent.pydantic_biwenger_agent import create_biwenger_agent
                     agent_obj = create_biwenger_agent()
                     res_agent = agent_obj.run_sync(user_query)
-                    reply_text = res_agent.data if hasattr(res_agent, "data") else str(res_agent)
+                    reply_text = (
+                        res_agent.output
+                        if hasattr(res_agent, "output")
+                        else (res_agent.data if hasattr(res_agent, "data") else str(res_agent))
+                    )
                 except Exception as e_agent:
                     # Fallback to direct client
                     try:

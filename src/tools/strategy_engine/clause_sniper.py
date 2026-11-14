@@ -79,6 +79,8 @@ class ClauseSniper:
         clause_alpha_floor_delta_eur: int = 0,
         priority_positions: Optional[List[str]] = None,
         top_rival_managers: Optional[Set[str]] = None,
+        remaining_rounds: int = 26,
+        macro_phase: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Returns ranked rival players whose release clause offers positive net alpha,
@@ -112,7 +114,7 @@ class ClauseSniper:
         avg_col = df_market_today["media_puntos"].tolist() if "media_puntos" in df_market_today.columns else [0] * len(pid_col)
 
         pt_val_base = float(xp_point_value_eur) if xp_point_value_eur is not None else max(50_000.0, float(self.rules.bonus_per_point_eur) * 1.2)
-        idle_boost = 1.0 + float(np.clip((float(idle_cash_eur) - 5_000_000.0) / 8_000_000.0, 0.0, 3.2))
+        idle_boost_raw = float(np.clip((float(idle_cash_eur) - 5_000_000.0) / 8_000_000.0, 0.0, 3.2))
         cap = getattr(self, "league_ratio_cap", 2.20)
         min_avg = getattr(self, "clause_min_avg_pts", 4.8)
         min_dx = getattr(self, "clause_min_delta_xp", 0.75)
@@ -148,14 +150,6 @@ class ClauseSniper:
 
             avg_pts_raw = safe_num(str(raw_avg).replace(",", "."))
             efr_72h = float(efr_map.get(pid, subida * 2.4))
-            is_elite_rebound = (
-                avg_pts_raw >= 5.0
-                and subida >= -20_000
-                and self.policy in ("COMPETITIVE_VORP", "VALUE_COMPOUND_VORP", "AGGRESSIVE")
-            )
-            if (subida < 0 or efr_72h < 0) and not is_elite_rebound:
-                continue
-
             xp_best = float(xp_info.get("xp_best", 0.0))
             xp_healthy = float(xp_info.get("xp_healthy", xp_best))
             best_line = str(xp_info.get("best_line", xp_info.get("natural_pos", "MF")))
@@ -164,28 +158,14 @@ class ClauseSniper:
             xi_floor = float(my_current_xi_floor_by_pos.get(best_line, 3.5))
             delta_xp = max(0.0, xp_best - xi_floor)
 
-            shock_pts = float(shocks.get(pid, 0.0))
-            shock_wave_eur = (
-                max(0.0, shock_pts - 6.0) * 145_000.0
-                if price < 3_500_000
-                else max(0.0, shock_pts - 7.0) * 190_000.0
-            )
-            proj_12d_gain = float(efr_72h) * 2.85 + shock_wave_eur
-            proj_12d_price = min(price + proj_12d_gain, price * 4.5 + 1_800_000.0)
+            # High-value / Tier-1 peaked stars frequently oscillate slightly (-10k..-45k/day) in Biwenger
+            # without losing XI point ceiling; only exclude heavy crashes or negative low-quality fluff.
+            rel_tick_tol = max(35_000.0, price * 0.0065)
+            is_elite_rebound = (xp_healthy >= 4.9 or avg_pts_raw >= 4.9) and subida >= -rel_tick_tol and efr_72h >= -(rel_tick_tol * 2.5)
+            if (subida < 0 or efr_72h < 0) and not is_elite_rebound:
+                continue
 
-            horizon_matchdays = 8.0 if p_start >= 0.80 else (6.0 if p_start >= 0.70 else 3.5)
-            xi_points_eur = delta_xp * horizon_matchdays * pt_val_base * idle_boost if p_start >= 0.65 else 0.0
-
-            strategic_bonus_eur = 0.0
-            if owner in top_rivals:
-                strategic_bonus_eur += min(650_000.0, clause * 0.04)
-            if best_line in prio_pos:
-                strategic_bonus_eur += 350_000.0
-
-            total_12d_valuation = proj_12d_price + xi_points_eur + strategic_bonus_eur
-            net_alpha_eur = total_12d_valuation - clause - float(clause_alpha_floor_delta_eur)
             clause_ratio = clause / price
-
             scarcity_tier = "SCARCE"
             n_free_comp = 0
             if scarcity_engine is not None:
@@ -199,89 +179,151 @@ class ClauseSniper:
                 scarcity_tier = rep.scarcity_tier
                 n_free_comp = rep.n_free_comparable
 
+            shock_pts = float(shocks.get(pid, 0.0))
+            shock_wave_eur = (
+                max(0.0, shock_pts - 6.0) * 145_000.0
+                if price < 3_500_000
+                else max(0.0, shock_pts - 7.0) * 190_000.0
+            )
+            proj_12d_gain = float(efr_72h) * 2.85 + shock_wave_eur
+            proj_12d_price = min(price + proj_12d_gain, price * 4.5 + 1_800_000.0)
+
+            is_scarce_anchor = (scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE") or xp_best >= 5.3) and p_start >= 0.78
+            is_tier1_superstar = (xp_healthy >= 6.2 or scarcity_tier == "IRREPLACEABLE_FREE" or price >= 12_000_000.0)
+            idle_boost = 1.0 + (idle_boost_raw if is_tier1_superstar else 0.55 * idle_boost_raw)
+            if is_scarce_anchor:
+                horizon_matchdays = float(np.clip(0.55 * float(remaining_rounds), 9.5, 20.0))
+                eff_pt_val = max(pt_val_base, 88_000.0 if float(idle_cash_eur) >= 6_000_000.0 else 72_000.0)
+            else:
+                horizon_matchdays = 8.0 if p_start >= 0.80 else (6.0 if p_start >= 0.70 else 3.5)
+                eff_pt_val = pt_val_base
+            xi_points_eur = delta_xp * horizon_matchdays * eff_pt_val * idle_boost if p_start >= 0.65 else 0.0
+
+            strategic_bonus_eur = 0.0
+            if owner in top_rivals:
+                strategic_bonus_eur += min(650_000.0, clause * 0.04)
+            if best_line in prio_pos:
+                strategic_bonus_eur += 350_000.0
+
+            total_12d_valuation = proj_12d_price + xi_points_eur + strategic_bonus_eur
+            net_alpha_eur = total_12d_valuation - clause - float(clause_alpha_floor_delta_eur)
+
+            # Avoid destroying equity on >1.40x clauses for ordinary starters when comparable free agents abound
+            abundant_overpay_block = (
+                scarcity_tier == "ABUNDANT"
+                and n_free_comp >= 2
+                and xp_best < 5.5
+                and clause_ratio > 1.38
+            )
+            # Block >1.50x GK overpay when already rostering a starting GK (cheap free GKs abound)
+            gk_overpay_block = (
+                "GK" in valid_lines
+                and xi_floor >= 2.2
+                and clause_ratio > 1.50
+            )
+            # Also block >1.68x clause overpays on sub-6.5M stagnant mid-tier starters lacking irreplaceable scarcity
+            mid_tier_overpay_block = (
+                price < 6_500_000.0
+                and xp_healthy < 5.2
+                and efr_72h < 105_000.0
+                and scarcity_tier != "IRREPLACEABLE_FREE"
+                and clause_ratio > 1.68
+            )
+            overpay_blocked = abundant_overpay_block or gk_overpay_block or mid_tier_overpay_block
+
             is_micro_breakout = False
             is_star_steal = False
             if self.policy == "VALUE_COMPOUND_VORP":
                 # Synergy of EFR capital compounding + scarcity + genuine XI VORP delta
                 league_ratio_cap = cap if (float(idle_cash_eur) >= 4_000_000.0 or n_free_comp <= 1) else min(cap, 1.95)
                 is_micro_breakout = (
-                    clause <= 5_500_000
+                    not gk_overpay_block
+                    and clause <= 5_200_000
                     and clause_ratio <= min(cap, 2.20)
-                    and p_start >= 0.65
-                    and efr_72h >= 90_000
-                    and (subida >= 45_000 or shock_pts >= 7.5)
-                    and proj_12d_price >= clause * 0.90
-                    and net_alpha_eur >= max(180_000.0, clause * 0.06)
+                    and p_start >= 0.68
+                    and efr_72h >= 105_000
+                    and (subida >= 50_000 or shock_pts >= 8.0)
+                    and (scarcity_tier != "ABUNDANT" or xp_best >= 5.0)
+                    and proj_12d_price >= clause * 0.94
+                    and net_alpha_eur >= max(220_000.0, clause * 0.06)
                 )
                 is_star_steal = (
-                    p_start >= 0.70
-                    and (xp_best >= 4.2 or avg_pts_raw >= min_avg)
-                    and delta_xp >= max(0.35, min_dx * 0.85)
+                    not overpay_blocked
+                    and p_start >= 0.72
+                    and (xp_best >= 4.4 or avg_pts_raw >= min_avg)
+                    and delta_xp >= max(0.45, min_dx * 0.85)
                     and clause_ratio <= league_ratio_cap
-                    and (scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE") or delta_xp >= 0.85 or efr_72h >= 80_000)
-                    and net_alpha_eur >= max(280_000.0, clause * 0.05)
+                    and (scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE") or delta_xp >= 0.95 or efr_72h >= 90_000)
+                    and net_alpha_eur >= max(280_000.0, clause * 0.04)
                 )
             elif self.policy == "COMPETITIVE_VORP":
                 league_ratio_cap = cap if float(idle_cash_eur) >= 5_000_000.0 else min(cap, 1.95)
                 is_micro_breakout = (
-                    clause <= 5_200_000
-                    and clause_ratio <= 2.25
-                    and p_start >= 0.65
-                    and (subida >= 60_000 or shock_pts >= 8.0)
-                    and net_alpha_eur >= max(200_000.0, clause * 0.08)
-                    and proj_12d_price >= clause * 0.88
+                    not gk_overpay_block
+                    and clause <= 5_000_000
+                    and clause_ratio <= min(cap, 2.20)
+                    and p_start >= 0.68
+                    and (subida >= 65_000 or shock_pts >= 8.5)
+                    and (scarcity_tier != "ABUNDANT" or xp_best >= 5.0)
+                    and net_alpha_eur >= max(240_000.0, clause * 0.08)
+                    and proj_12d_price >= clause * 0.94
                 )
                 is_star_steal = (
-                    p_start >= 0.70
-                    and (xp_best >= 4.2 or avg_pts_raw >= min_avg)
+                    not overpay_blocked
+                    and p_start >= 0.72
+                    and (xp_best >= 4.4 or avg_pts_raw >= min_avg)
                     and delta_xp >= min_dx
                     and clause_ratio <= league_ratio_cap
-                    and (subida >= -20_000)
-                    and net_alpha_eur >= max(350_000.0, clause * 0.06)
+                    and net_alpha_eur >= max(320_000.0, clause * 0.05)
                 )
             elif self.policy == "SURGICAL_SCARCITY":
-                has_surplus_buffer = float(idle_cash_eur) >= (clause + 1_500_000.0)
+                has_surplus_buffer = float(idle_cash_eur) >= (clause + 1_200_000.0)
                 is_micro_breakout = (
                     has_surplus_buffer
+                    and not gk_overpay_block
                     and clause <= 4_200_000
                     and clause_ratio <= min(cap, 1.85)
-                    and p_start >= 0.70
+                    and p_start >= 0.72
                     and (subida >= 95_000 or shock_pts >= 11.0)
-                    and net_alpha_eur >= max(380_000.0, clause * 0.16)
-                    and proj_12d_price >= clause * 1.05
+                    and net_alpha_eur >= max(380_000.0, clause * 0.14)
+                    and proj_12d_price >= clause * 1.02
                     and idle_cash_eur < 30_000_000.0
                 )
-                flush = idle_boost >= 1.6
-                ultra_flush = float(idle_cash_eur) >= 16_000_000.0
-                max_ratio = min(cap, 1.55 if not ultra_flush else (1.75 if (subida >= 50_000 or n_free_comp <= 1) else 1.65))
-                scarcity_gate = (n_free_comp <= 1 and scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE")) or (clause_ratio <= 1.35)
+                flush = idle_boost >= 1.55
+                ultra_flush = float(idle_cash_eur) >= 13_000_000.0
+                max_ratio = min(cap, 1.80 if not ultra_flush else 2.00)
+                scarcity_gate = (n_free_comp <= 1 and scarcity_tier in ("IRREPLACEABLE_FREE", "SCARCE")) or (clause_ratio <= 1.38)
+                subida_ok = subida >= (0 if not is_scarce_anchor else -rel_tick_tol) if flush else (subida >= 20_000 or is_scarce_anchor)
                 is_star_steal = (
-                    float(idle_cash_eur) >= (clause + 800_000.0)
+                    not overpay_blocked
+                    and float(idle_cash_eur) >= (clause + 400_000.0)
                     and scarcity_gate
                     and p_start >= 0.76
-                    and delta_xp >= max(0.50, min_dx if not ultra_flush else min_dx * 0.85)
+                    and delta_xp >= max(0.55, min_dx if not ultra_flush else min_dx * 0.85)
                     and clause_ratio <= max_ratio
-                    and subida >= (0 if flush else 25_000)
-                    and net_alpha_eur >= max(600_000.0, clause * (0.08 if flush else 0.12))
+                    and subida_ok
+                    and net_alpha_eur >= max(450_000.0, clause * (0.06 if flush else 0.10))
                 )
             else:  # AGGRESSIVE
                 is_micro_breakout = (
-                    clause <= 5_400_000
-                    and (subida >= 45_000 or shock_pts >= 7.5)
-                    and net_alpha_eur >= max(180_000.0, clause * 0.10)
-                    and proj_12d_price >= clause * 0.92
+                    not gk_overpay_block
+                    and clause <= 5_400_000
+                    and (subida >= 50_000 or shock_pts >= 8.0)
+                    and (scarcity_tier != "ABUNDANT" or xp_best >= 5.0)
+                    and net_alpha_eur >= max(200_000.0, clause * 0.09)
+                    and proj_12d_price >= clause * 0.94
                     and idle_cash_eur < 35_000_000.0
                 )
-                flush = idle_boost >= 1.5
-                ultra_flush = float(idle_cash_eur) >= 14_000_000.0
-                max_ratio = min(cap, 2.00 if not ultra_flush else 2.25)
+                flush = idle_boost >= 1.45
+                ultra_flush = float(idle_cash_eur) >= 12_000_000.0
+                max_ratio = min(cap, 2.05 if not ultra_flush else 2.30)
                 is_star_steal = (
-                    p_start >= 0.70
-                    and (xp_best >= 4.0 or avg_pts_raw >= min_avg * 0.92)
-                    and delta_xp >= max(0.40, min_dx * 0.85)
+                    not overpay_blocked
+                    and p_start >= 0.70
+                    and (xp_best >= 4.2 or avg_pts_raw >= min_avg * 0.92)
+                    and delta_xp >= max(0.45, min_dx * 0.85)
                     and clause_ratio <= max_ratio
-                    and subida >= (-10_000 if flush else 15_000)
-                    and net_alpha_eur >= max(400_000.0, clause * 0.06)
+                    and net_alpha_eur >= max(350_000.0, clause * 0.05)
                 )
 
             if is_micro_breakout or is_star_steal:

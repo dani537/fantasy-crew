@@ -335,6 +335,13 @@ class TelegramDirectorBot:
         amt = int(target["amount_eur"])
 
         if act_type == "CLAUSE_SNIPE":
+            rules_live = LeagueRulesEngine.load()
+            phase_live = rules_live.compute_round_phase()
+            if not phase_live.clauses_open and not is_dry:
+                return (
+                    f"⚠️ <b>Ventana de cláusulas cerrada ({html.escape(phase_live.phase_name)}).</b>\n"
+                    f"Biwenger bloquea los clausulazos durante la jornada y las 48h previas al inicio."
+                )
             avail_max_bid = delta.get("available_max_bid")
             if avail_max_bid is not None and amt > avail_max_bid and not is_dry:
                 out_bids = delta.get("outgoing_bids") or []
@@ -381,7 +388,7 @@ class TelegramDirectorBot:
             df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)
             latest = df_m["fecha"].max()
             today = df_m[df_m["fecha"] == latest].copy()
-            my_mgr = delta.get("team_name") or "Dani SR"
+            my_mgr = delta.get("team_name") or resolve_active_user_identity().get("team_name") or ""
             rivals = today[~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None]) & today["propietario_liga"].notna()].copy()
         except Exception as e:
             return f"⚠️ Error consultando base de datos de jugadores: {html.escape(str(e))}"
@@ -443,12 +450,19 @@ class TelegramDirectorBot:
     def _cmd_clausular(self, player_name: str) -> str:
         q = (player_name or "").strip()
         if not q:
-            return "⚠️ Uso: <code>/clausular &lt;Nombre Jugador&gt;</code> (ej. <code>/clausular Requena</code>)"
+            return "⚠️ Uso: <code>/clausular &lt;Nombre Jugador&gt;</code> (ej. <code>/clausular NombreJugador</code>)"
 
         delta = self.delta_refresher.fetch(max_cache_age_seconds=30)
         bal = float(delta.get("balance") or 0.0)
         rules = LeagueRulesEngine.load()
-        my_mgr = delta.get("team_name") or "Dani SR"
+        phase_live = rules.compute_round_phase()
+        is_dry = GeneralSettings.DRY_RUN
+        if not phase_live.clauses_open and not is_dry:
+            return (
+                f"⚠️ <b>Cláusulas cerradas ahora mismo ({html.escape(phase_live.phase_name)}).</b>\n"
+                f"Las cláusulas están bloqueadas durante las 48h previas a la jornada o con la jornada en juego."
+            )
+        my_mgr = delta.get("team_name") or resolve_active_user_identity().get("team_name") or ""
 
         try:
             df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)

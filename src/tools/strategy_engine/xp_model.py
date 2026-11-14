@@ -135,8 +135,8 @@ class ExpectedPointsEngine:
         mkt["natural_pos"] = [p for p, k in zip(nat_pos_list, keep_mask) if k]
 
         # 1. Build Historical Rolling Performance Stats (Strictly Past Matches!) without pandas groupby
-        hist_stats: Dict[int, Tuple[float, float, float, float, float, float]] = {}
-        # Maps pid -> (n_apps, ema_pts_starter, ema_pts_sub, goals_per_90, recent_start_rate, recent_sub_rate)
+        hist_stats: Dict[int, Tuple[float, float, float, float, float, float, float]] = {}
+        # Maps pid -> (n_starts, n_apps, ema_pts_starter, ema_pts_sub, goals_per_90, recent_start_rate, recent_sub_rate)
         if df_reports_past is not None and not df_reports_past.empty:
             has_preparsed = (
                 "es_titular_num" in df_reports_past.columns
@@ -149,9 +149,18 @@ class ExpectedPointsEngine:
                 rep = df_reports_past.copy()
                 rep["player_id"] = pd.to_numeric(rep["player_id"], errors="coerce").fillna(0).astype(int)
                 rep["puntos_biwenger"] = pd.to_numeric(rep["puntos_biwenger"], errors="coerce").fillna(0.0)
-                rep["puntos_sofascore"] = pd.to_numeric(rep.get("puntos_sofascore", 0), errors="coerce").fillna(0.0)
-                rep["minutos_jugados"] = pd.to_numeric(rep.get("minutos_jugados", 0), errors="coerce").fillna(0.0)
-                rep["goles"] = pd.to_numeric(rep.get("goles", 0), errors="coerce").fillna(0.0)
+                rep["puntos_sofascore"] = pd.to_numeric(
+                    rep["puntos_sofascore"] if "puntos_sofascore" in rep.columns else pd.Series(0.0, index=rep.index),
+                    errors="coerce",
+                ).fillna(0.0)
+                rep["minutos_jugados"] = pd.to_numeric(
+                    rep["minutos_jugados"] if "minutos_jugados" in rep.columns else pd.Series(0.0, index=rep.index),
+                    errors="coerce",
+                ).fillna(0.0)
+                rep["goles"] = pd.to_numeric(
+                    rep["goles"] if "goles" in rep.columns else pd.Series(0.0, index=rep.index),
+                    errors="coerce",
+                ).fillna(0.0)
                 rep["es_titular_num"] = (
                     rep.get("es_titular", pd.Series(0, index=rep.index))
                     .astype(str)
@@ -202,7 +211,7 @@ class ExpectedPointsEngine:
                     else:
                         lst_b.append(blended)
 
-                    if tt_f > 0.5:
+                    if tt_f > 0.5 or mn_f >= 45.0:
                         lst_s = acc_start_pts.get(pid_i)
                         if lst_s is None:
                             acc_start_pts[pid_i] = [blended]
@@ -233,50 +242,69 @@ class ExpectedPointsEngine:
 
                 blended_list = acc_all_blended.get(pid_i)
                 if not blended_list:
-                    hist_stats[pid_i] = (0.0, 0.0, 1.6, 0.0, 0.0, 0.15)
+                    hist_stats[pid_i] = (0.0, 0.0, 0.0, 1.6, 0.0, 0.0, 0.15)
                     continue
 
                 n_apps = float(len(blended_list))
                 start_list = acc_start_pts.get(pid_i)
                 if start_list:
-                    ema_starter = _ema(start_list)
+                    n_starts = float(len(start_list))
+                    # Winsorize isolated early-season 1-match spikes/crashes so N=1 luck doesn't distort valuation
+                    calc_starts = [float(np.clip(v, -2.0, 12.5)) for v in start_list] if len(start_list) <= 3 else start_list
+                    ema_starter = _ema(calc_starts)
                 else:
-                    ema_starter = _ema(blended_list) * 1.15
+                    n_starts = 0.0
+                    ema_starter = 0.0
 
                 sub_list = acc_sub_pts.get(pid_i)
                 if sub_list:
                     ema_sub = float(np.clip(sum(sub_list) / len(sub_list), 0.8, 5.0))
                 else:
-                    ema_sub = float(np.clip(ema_starter * 0.42, 1.2, 4.2))
+                    ema_sub = float(np.clip(ema_starter * 0.42 if ema_starter > 0 else 1.6, 1.2, 4.2))
 
                 tot_mins = acc_mins.get(pid_i, 0.0)
                 tot_goals = acc_goals.get(pid_i, 0.0)
                 goals_per_90 = float(np.clip((tot_goals / max(tot_mins, 90.0)) * 90.0, 0.0, 1.1))
-                hist_stats[pid_i] = (n_apps, ema_starter, ema_sub, goals_per_90, recent3_start, max(0.20, recent3_sub))
+                hist_stats[pid_i] = (n_starts, n_apps, ema_starter, ema_sub, goals_per_90, recent3_start, max(0.20, recent3_sub))
 
         # 2. Build Matchup Context for `target_jornada_num` from `Partidos_Calendario`
         team_match_ctx: Dict[str, Tuple[bool, float, float, float]] = {}
+        postponed_teams: Set[str] = set()
         # Maps normalized team_name -> (is_home, win_prob, xg_for, xg_against)
         if df_calendar is not None and not df_calendar.empty and target_jornada_num > 0:
             jn_vals = pd.to_numeric(df_calendar["jornada_num"], errors="coerce").fillna(-1).astype(int).values
             cal_j = df_calendar[jn_vals == int(target_jornada_num)]
             if not cal_j.empty:
+                if "part" in cal_j.columns:
+                    cal_j = cal_j.sort_values("part", kind="mergesort")
                 locs = cal_j["local"].values if "local" in cal_j.columns else [""] * len(cal_j)
                 viss = cal_j["visitante"].values if "visitante" in cal_j.columns else [""] * len(cal_j)
                 p1s = cal_j["prob_local_1"].values if "prob_local_1" in cal_j.columns else [42] * len(cal_j)
                 p2s = cal_j["prob_visitante_2"].values if "prob_visitante_2" in cal_j.columns else [30] * len(cal_j)
                 xgls = cal_j["xg_local_eci"].values if "xg_local_eci" in cal_j.columns else [1.35] * len(cal_j)
                 xgvs = cal_j["xg_visitante_eci"].values if "xg_visitante_eci" in cal_j.columns else [1.10] * len(cal_j)
-                for l_r, v_r, p1_r, p2_r, xgl_r, xgv_r in zip(locs, viss, p1s, p2s, xgls, xgvs):
+                ests = cal_j["estado_partido"].values if "estado_partido" in cal_j.columns else ["pending"] * len(cal_j)
+                for l_r, v_r, p1_r, p2_r, xgl_r, xgv_r, st_r in zip(locs, viss, p1s, p2s, xgls, xgvs, ests):
                     loc = _norm_text(l_r)
                     vis = _norm_text(v_r)
+                    st_low = str(st_r or "pending").strip().lower()
+                    if st_low in ("postponed", "aplazado", "suspended", "cancelled"):
+                        if loc:
+                            postponed_teams.add(loc)
+                            team_match_ctx.pop(loc, None)
+                        if vis:
+                            postponed_teams.add(vis)
+                            team_match_ctx.pop(vis, None)
+                        continue
                     p1 = safe_num(p1_r, 42.0) / 100.0
                     p2 = safe_num(p2_r, 30.0) / 100.0
                     xgl = safe_num(xgl_r, 1.35)
                     xgv = safe_num(xgv_r, 1.10)
                     if loc:
+                        postponed_teams.discard(loc)
                         team_match_ctx[loc] = (True, p1, xgl, xgv)
                     if vis:
+                        postponed_teams.discard(vis)
                         team_match_ctx[vis] = (False, p2, xgv, xgl)
 
         # 3. Build Comuniate Starter Map for `target_jornada_num`
@@ -367,16 +395,20 @@ class ExpectedPointsEngine:
 
             hs = hist_stats.get(pid)
             if hs is not None:
-                n_apps, ema_st, ema_sub, g90_hist, rec_st_rate, rec_sub_rate = hs
+                n_starts, n_apps, ema_st, ema_sub, g90_hist, rec_st_rate, rec_sub_rate = hs
             else:
-                n_apps, ema_st, ema_sub, g90_hist, rec_st_rate, rec_sub_rate = 0.0, 0.0, 1.6, 0.0, 0.0, 0.25
+                n_starts, n_apps, ema_st, ema_sub, g90_hist, rec_st_rate, rec_sub_rate = 0.0, 0.0, 0.0, 1.6, 0.0, 0.0, 0.25
 
-            if n_apps > 0.0:
-                w_obs = n_apps / (n_apps + 2.8)
+            if n_starts > 0.0:
+                w_obs = n_starts / (n_starts + 4.5)
                 exp_pts_if_start = w_obs * ema_st + (1.0 - w_obs) * prior_starter_pts
                 exp_pts_if_sub = ema_sub
+            elif n_apps > 0.0:
+                # Only short sub cameos so far: anchor starter expectation cleanly to market/historical prior
+                exp_pts_if_start = prior_starter_pts
+                exp_pts_if_sub = ema_sub
             else:
-                exp_pts_if_start = prior_starter_pts * 0.92
+                exp_pts_if_start = prior_starter_pts * (1.0 if precio >= 4_500_000.0 else 0.95)
                 exp_pts_if_sub = max(1.1, prior_starter_pts * 0.35)
 
             # Determine starter probability (`p_start`) without lookahead
@@ -433,9 +465,9 @@ class ExpectedPointsEngine:
             out_p_start_h.append(round(p_start_healthy, 4))
             out_xp_h.append(round(xp_healthy, 4))
 
-            if not is_avail:
+            if not is_avail or (norm_eq and norm_eq in postponed_teams):
                 out_p_start.append(0.0)
-                out_mm.append(1.0)
+                out_mm.append(0.0 if (norm_eq and norm_eq in postponed_teams) else 1.0)
                 out_xp_base.append(0.0)
                 out_xp_gk.append(0.0)
                 out_xp_df.append(0.0)

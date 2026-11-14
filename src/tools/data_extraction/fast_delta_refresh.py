@@ -439,16 +439,19 @@ class FastDeltaRefresh:
             except Exception:
                 pass
 
-        # Calculate team value, max credit, and available max bid
+        # Calculate team value, max credit, and available max bid using LeagueRulesEngine
+        from src.tools.strategy_engine.league_rules import LeagueRulesEngine
+        rules = LeagueRulesEngine.load()
         status_map = result.get("live_player_status") or {}
         owned_meta = result.get("owned_players_meta") or {}
         team_val = sum(
             int(status_map.get(str(pid), {}).get("price") or meta.get("purchase_price", 0))
             for pid, meta in owned_meta.items()
         )
-        max_credit = int(team_val * 0.25)
-        committed = sum(int(b.get("amount", 0)) for b in result.get("outgoing_bids", []))
         cur_bal = int(result.get("balance") or 0)
+        max_official = int(round(rules.compute_max_official_bid(cur_bal, team_val)))
+        max_credit = max(0, max_official - cur_bal)
+        committed = sum(int(b.get("amount", 0)) for b in result.get("outgoing_bids", []))
         result["team_value"] = team_val
         result["max_credit"] = max_credit
         result["committed_bids_eur"] = committed
@@ -854,7 +857,10 @@ class FastDeltaRefresh:
                 df.loc[(df["propietario_liga"] == team_name) & (~df["player_id"].isin(owned_set)), "propietario_liga"] = "Mercado"
                 df.loc[df["player_id"].isin(owned_set), "propietario_liga"] = team_name
 
-            df["precio_compra"] = df["player_id"].apply(
+            owned_mask = df["player_id"].isin(owned_set)
+            if "precio_compra" not in df.columns:
+                df["precio_compra"] = 0
+            df.loc[owned_mask, "precio_compra"] = df.loc[owned_mask, "player_id"].apply(
                 lambda pid: owned_meta.get(str(int(pid)), {}).get("purchase_price", 0)
             )
             df["acquired_date"] = df["player_id"].apply(

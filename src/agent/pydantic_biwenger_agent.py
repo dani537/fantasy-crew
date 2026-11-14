@@ -22,8 +22,8 @@ from src.llm_endpoints.router import TieredLLMRouter
 
 
 def get_agent_model():
-    """Configura el modelo LLM para Pydantic AI según las claves dinámicas y TieredLLMRouter."""
-    return TieredLLMRouter.get_pydantic_ai_model(tier="daily")
+    """Configura el modelo LLM nativo para Pydantic AI v2 con failover via TieredLLMRouter."""
+    return TieredLLMRouter.get_pydantic_ai_model_object(tier="daily")
 
 
 def get_active_user_context() -> Dict[str, Any]:
