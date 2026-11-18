@@ -36,7 +36,11 @@ from src.tools.strategy_engine.league_rules import LeagueRulesEngine, RoundPhase
 from src.tools.strategy_engine.xp_model import ExpectedPointsEngine
 from src.tools.strategy_engine.auction_model import AuctionBidModel
 from src.tools.strategy_engine.clause_sniper import ClauseSniper
-from src.tools.strategy_engine.strategy_memory import StrategyMemoryLedger
+from src.tools.strategy_engine.strategy_memory import (
+    StrategyMemoryLedger,
+    _now_local,
+    _resolve_git_version_info,
+)
 from src.tools.strategy_engine.portfolio_optimizer import PortfolioOptimizer
 from src.tools.strategy_engine.posture_controller import StandingsPostureController
 from src.tools.strategy_engine.llm_supervisor import LLMStrategicSupervisor
@@ -970,6 +974,25 @@ class AutopilotRunner:
                 ),
             )
 
+        if not self.dry_run:
+            arch_id = str(getattr(getattr(self.optimizer, "archetype", None), "archetype_id", None) or StrategySettings.ACTIVE_ARCHETYPE)
+            self.memory.ensure_behavior_changelog_seeded(
+                architecture_mode=f"{arch_id} | {self.mode}",
+                force_sync=False,
+            )
+            audit_entries = self._build_cycle_audit_entries(
+                ctx=ctx,
+                phase_ctx=phase_ctx,
+                approved_plan=approved_plan,
+                validated=validated,
+                execution_results=execution_results,
+                queued_decisions=queued_decisions,
+                reconciled_decisions=reconciled_decisions,
+                pending_all=pending_all,
+                arch_id=arch_id,
+            )
+            self.memory.record_agent_activity_batch(audit_entries)
+
         league_bulletin = ctx.get("league_bulletin") or {}
 
         # 7. Executive Briefing & Plain-Language Summary via TieredLLMRouter
@@ -1042,6 +1065,155 @@ class AutopilotRunner:
             )
 
         return cycle_summary
+
+    def _build_cycle_audit_entries(
+        self,
+        ctx: Dict[str, Any],
+        phase_ctx: RoundPhaseContext,
+        approved_plan: Dict[str, Any],
+        validated: Dict[str, Any],
+        execution_results: List[Dict[str, Any]],
+        queued_decisions: List[str],
+        reconciled_decisions: List[Dict[str, Any]],
+        pending_all: List[Dict[str, Any]],
+        arch_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Formats per-cycle summary and per-action execution events for `Bitacora_Agente`."""
+        now_dt = _now_local()
+        now_ts = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        ts_key = now_dt.strftime("%Y%m%dT%H%M%S")
+        sha, _, _ = _resolve_git_version_info()
+        ver_str = f"{sha} | {arch_id} | {self.mode}"
+        jornada = int(ctx.get("target_jornada_num") or 0)
+        fase = f"{self.trigger_phase}:{phase_ctx.phase_name}"
+        lineup_info = approved_plan.get("lineup") or {}
+
+        bids_by_name = {str(b.get("nombre", "")): b for b in (approved_plan.get("market_bids") or [])}
+        sales_by_name = {
+            str(s.get("nombre", "")): s
+            for s in ((approved_plan.get("solvency_sales") or []) + (approved_plan.get("routine_sales") or []))
+        }
+        clauses_by_name = {str(c.get("nombre", "")): c for c in (approved_plan.get("clause_snipes") or [])}
+        shields_by_name = {str(sh.get("nombre", "")): sh for sh in (approved_plan.get("defensive_shields") or [])}
+
+        exec_map = {
+            "SOLVENCY_SALE": ("VENTA_SOLVENCIA", sales_by_name),
+            "ROUTINE_SALE": ("VENTA_RUTINARIA", sales_by_name),
+            "CLAUSE_SNIPE": ("CLAUSULA_SNIPE", clauses_by_name),
+            "CLAUSE_DEFERRED": ("CLAUSULA_POSPUESTA", clauses_by_name),
+            "DEFENSIVE_SHIELD": ("BLINDAJE", shields_by_name),
+            "MARKET_BID": ("PUJA_MERCADO", bids_by_name),
+            "LINEUP_SYNC": ("ALINEACION", {}),
+            "MARKET_LISTING_SYNC": ("ESCAPARATE_VENTA", {}),
+        }
+
+        entries: List[Dict[str, Any]] = [
+            {
+                "log_id": f"{ts_key}_CICLO_{self.trigger_phase}",
+                "fecha_hora": now_ts,
+                "jornada": jornada,
+                "fase": fase,
+                "tipo_evento": "CICLO_AUTOPILOT",
+                "jugador": "",
+                "player_id": 0,
+                "importe_eur": int(round(float(ctx.get("current_cash") or 0.0))),
+                "estado": "SOLVENTE" if validated.get("is_safe") else "DEFICIT",
+                "detalle": (
+                    f"Caja={int(ctx.get('current_cash') or 0):,}€ | Proy={int(validated.get('projected_cash') or 0):,}€ | "
+                    f"XI={lineup_info.get('formation')} ({float(lineup_info.get('expected_points') or 0.0):.1f} xP) | "
+                    f"Pujas={len(approved_plan.get('market_bids', []))} | Ventas={len(approved_plan.get('all_sales', []))} | "
+                    f"Escaparate={len(approved_plan.get('preventive_listings', []))} | Pendientes={len(pending_all)}"
+                ),
+                "version_codigo": ver_str,
+            }
+        ]
+
+        for idx, ex in enumerate(execution_results or []):
+            ex_type = str(ex.get("type") or "ACCION")
+            ev_type, lookup = exec_map.get(ex_type, (ex_type[:40], {}))
+            res_obj = ex.get("res") if isinstance(ex.get("res"), dict) else {}
+            target_name = str(ex.get("target") or res_obj.get("nombre") or ex.get("formation") or "")
+            meta = lookup.get(target_name, {})
+            pid = int(ex.get("player_id") or meta.get("player_id") or res_obj.get("player_id") or 0)
+            amt = int(round(float(
+                ex.get("amount")
+                or meta.get("amount")
+                or meta.get("sale_price")
+                or meta.get("recommended_cash_spend")
+                or res_obj.get("amount")
+                or res_obj.get("price")
+                or 0
+            )))
+            status_s = str(res_obj.get("status") or ex.get("status") or "OK")
+
+            if ex_type == "LINEUP_SYNC":
+                detail_s = (
+                    f"Formación={ex.get('formation') or lineup_info.get('formation')} | "
+                    f"Titulares={len(lineup_info.get('player_ids') or [])} | xP={float(lineup_info.get('expected_points') or 0.0):.1f}"
+                )
+            elif ex_type == "MARKET_BID" and meta:
+                detail_s = (
+                    f"{meta.get('regime')} | Seller={meta.get('seller')} | VM={int(meta.get('market_price') or 0):,}€ | "
+                    f"xP={meta.get('xp_best')} (+{meta.get('delta_xp_xi')}) | EFR72h={int(meta.get('efr_72h') or 0):+,}€"
+                )
+            elif ex_type in ("SOLVENCY_SALE", "ROUTINE_SALE") and meta:
+                detail_s = (
+                    f"{meta.get('reason')} | Buyer={meta.get('buyer_name') or 'Mercado'} | "
+                    f"VM={int(meta.get('market_price') or 0):,}€ | Prem={meta.get('offer_premium_pct')}%"
+                )
+            elif ex_type in ("CLAUSE_SNIPE", "CLAUSE_DEFERRED") and meta:
+                detail_s = (
+                    f"Seller={meta.get('seller')} | VM={int(meta.get('market_price') or 0):,}€ | "
+                    f"+{meta.get('delta_xp_xi')} xP | Tier={meta.get('scarcity_tier')}"
+                )
+            else:
+                detail_s = str(res_obj.get("detail") or res_obj.get("reason") or res_obj.get("action") or ex_type)
+
+            entries.append({
+                "log_id": f"{ts_key}_{idx:03d}_{ev_type}_{pid}",
+                "fecha_hora": now_ts,
+                "jornada": jornada,
+                "fase": fase,
+                "tipo_evento": ev_type,
+                "jugador": target_name,
+                "player_id": pid,
+                "importe_eur": amt,
+                "estado": status_s,
+                "detalle": detail_s,
+                "version_codigo": ver_str,
+            })
+
+        for idx, qid in enumerate(queued_decisions or []):
+            entries.append({
+                "log_id": f"{ts_key}_q_{idx:03d}_{qid}",
+                "fecha_hora": now_ts,
+                "jornada": jornada,
+                "fase": fase,
+                "tipo_evento": "ORDEN_ENCOLADA",
+                "jugador": str(qid),
+                "player_id": 0,
+                "importe_eur": 0,
+                "estado": "QUEUED_HUMAN",
+                "detalle": f"Pendiente aprobación humana ({qid})",
+                "version_codigo": ver_str,
+            })
+
+        for idx, rdec in enumerate(reconciled_decisions or []):
+            entries.append({
+                "log_id": f"{ts_key}_rec_{idx:03d}_{rdec.get('decision_id')}",
+                "fecha_hora": now_ts,
+                "jornada": jornada,
+                "fase": fase,
+                "tipo_evento": "RECONCILIACION",
+                "jugador": str(rdec.get("nombre") or ""),
+                "player_id": int(rdec.get("player_id") or 0),
+                "importe_eur": int(rdec.get("amount_eur") or 0),
+                "estado": str(rdec.get("new_status") or ""),
+                "detalle": f"{rdec.get('decision_id')} | {rdec.get('action_type')} | {rdec.get('reason')}",
+                "version_codigo": ver_str,
+            })
+
+        return entries
 
     def _evaluate_rival_negotiations(
         self,

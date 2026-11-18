@@ -42,6 +42,8 @@ MEMORY_TAB_PKS: Dict[str, List[str]] = {
     "Memoria_Estrategica": ["entry_id"],
     "Decisiones_Pendientes": ["decision_id"],
     "Eventos_Jornada": ["event_key"],
+    "Bitacora_Agente": ["log_id"],
+    "Historial_Cambios_Agente": ["version_id"],
 }
 
 PULSE_LIGHT_TAB_PKS: Dict[str, List[str]] = {
@@ -50,6 +52,8 @@ PULSE_LIGHT_TAB_PKS: Dict[str, List[str]] = {
     "Memoria_Estrategica": ["entry_id"],
     "Decisiones_Pendientes": ["decision_id"],
     "Eventos_Jornada": ["event_key"],
+    "Bitacora_Agente": ["log_id"],
+    "Historial_Cambios_Agente": ["version_id"],
 }
 
 

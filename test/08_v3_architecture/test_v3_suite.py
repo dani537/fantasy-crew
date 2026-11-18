@@ -977,6 +977,58 @@ class TestFantasyChampionV3Architecture(unittest.TestCase):
         self.assertNotIn(8801, bid_pids)
         self.assertIn(8805, bid_pids)
 
+    def test_agent_audit_log_and_behavior_changelog_persistence(self):
+        import sqlite3
+        import tempfile
+        import os
+        from src.tools.strategy_engine.strategy_memory import StrategyMemoryLedger, AGENT_BEHAVIOR_CHANGELOG
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            db_p = os.path.join(tmpd, "audit_test.db")
+            with sqlite3.connect(db_p) as conn:
+                conn.execute(
+                    "CREATE TABLE Movimientos (id_unico TEXT, fecha TEXT, tipo TEXT, jugador TEXT, player_id INTEGER, comprador TEXT, vendedor TEXT, precio INTEGER, es_clausula TEXT)"
+                )
+                conn.execute(
+                    "CREATE TABLE Pujas_Historico (id_puja TEXT, fecha TEXT, player_id INTEGER, jugador TEXT, precio_mercado_dia INTEGER, manager_pujador TEXT, importe_pujado INTEGER, gano_subasta TEXT, num_pujadores_subasta INTEGER, sobrepuja_pct REAL)"
+                )
+                conn.execute(
+                    "INSERT INTO Movimientos VALUES ('m1', '2026-11-14 08:03:25', 'Clausulazo', 'Berenguer', 897, 'TestTeam', 'RivalB', 10000000, 'SÍ')"
+                )
+                # Duplicate same-day 06:03 / 07:03 rows for identical bid must deduplicate cleanly
+                conn.execute(
+                    "INSERT INTO Pujas_Historico VALUES ('p1', '2026-11-15 06:02:35', 39885, 'Jugador X', 2790000, 'TestTeam', 3075639, 'SÍ', 1, 10.24)"
+                )
+                conn.execute(
+                    "INSERT INTO Pujas_Historico VALUES ('p2', '2026-11-15 07:02:35', 39885, 'Jugador X', 2790000, 'TestTeam', 3075639, 'SÍ', 1, 10.24)"
+                )
+
+            mem = StrategyMemoryLedger(db_path=db_p, sync_sheets=False)
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7020,
+                nombre="Crack Manual",
+                amount_eur=18_240_000,
+                market_price_eur=18_000_000,
+                counterparty="RivalC",
+            )
+            mem.resolve_pending_decision("CL-7020", "EXECUTED_MANUAL")
+
+            stats = mem.backfill_audit_history_from_warehouse(team_name="TestTeam", sync_to_sheets=False)
+            self.assertGreaterEqual(stats["changelog_inserted"], len(AGENT_BEHAVIOR_CHANGELOG))
+            # Second call is idempotent on historical changelog
+            self.assertEqual(mem.ensure_behavior_changelog_seeded(force_sync=False), 0)
+
+            changelog_df = mem.get_behavior_changelog()
+            self.assertIn("2026-11-07_v3_0_launch", set(changelog_df["version_id"].astype(str)))
+
+            audit_df = mem.get_agent_activity_log(limit=100)
+            puj_rows = audit_df[audit_df["tipo_evento"] == "PUJA_HISTORICA"]
+            self.assertEqual(len(puj_rows), 1)
+            self.assertEqual(puj_rows.iloc[0]["estado"], "GANADA")
+            self.assertTrue((audit_df["tipo_evento"] == "CLAUSULA_HIST").any())
+            self.assertTrue(((audit_df["tipo_evento"] == "CLAUSE_SNIPE") & (audit_df["estado"] == "EXECUTED_MANUAL")).any())
+
 
 if __name__ == "__main__":
     unittest.main()
