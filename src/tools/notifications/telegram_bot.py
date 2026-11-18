@@ -206,15 +206,18 @@ class TelegramDirectorBot:
 
         return self._handle_natural_conversation(msg)
 
+    @staticmethod
+    def _resolve_live_phase(rules: LeagueRulesEngine):
+        try:
+            cal = StrictCausalDataView().df_calendar
+        except Exception:
+            cal = pd.DataFrame()
+        return rules.resolve_round_phase(cal)
+
     def _cmd_estado(self) -> str:
         delta = self.delta_refresher.fetch(max_cache_age_seconds=30)
         rules = LeagueRulesEngine.load()
-        try:
-            view = StrictCausalDataView()
-            cal = view.df_calendar
-        except Exception:
-            cal = pd.DataFrame()
-        phase = rules.resolve_round_phase(cal)
+        phase = self._resolve_live_phase(rules)
 
         bal = delta.get("balance")
         bal_s = f"{int(bal):,} €" if bal is not None else "N/D"
@@ -291,6 +294,33 @@ class TelegramDirectorBot:
         return "\n".join(lines)
 
     def _cmd_pendientes(self) -> str:
+        try:
+            delta = self.delta_refresher.fetch(max_cache_age_seconds=30)
+            if delta.get("is_live"):
+                rules = LeagueRulesEngine.load()
+                phase = self._resolve_live_phase(rules)
+                owned_pids = {int(k) for k in (delta.get("owned_players_meta") or {}).keys() if str(k).isdigit()}
+                live_max_official_bid = float(
+                    rules.compute_max_official_bid(
+                        float(delta.get("balance") or 0.0),
+                        float(delta.get("team_value") or 0.0),
+                    )
+                ) if delta.get("team_value") else None
+                self.memory.reconcile_pending_decisions(
+                    owned_pids=owned_pids if owned_pids else None,
+                    clauses_open=bool(phase.clauses_open),
+                    waiting_offers_by_pid=delta.get("waiting_offers_by_pid") or {},
+                    incoming_counter_offers=delta.get("incoming_counter_offers") or [],
+                    clause_locked_ids={
+                        int(k) for k, m in (delta.get("owned_players_meta") or {}).items()
+                        if str(k).isdigit() and m.get("clause_locked")
+                    },
+                    market_listings_df=pd.DataFrame(delta.get("market_sales") or []),
+                    max_official_bid_eur=live_max_official_bid,
+                    is_live_state=True,
+                )
+        except Exception:
+            pass
         pending = self.memory.get_pending_decisions("PENDING")
         if not pending:
             return "✅ No tienes ninguna cláusula ni venta importante pendiente de confirmación."
@@ -333,11 +363,19 @@ class TelegramDirectorBot:
         act_type = target["action_type"]
         pid = int(target["player_id"])
         amt = int(target["amount_eur"])
+        owned_pids = {int(k) for k in (delta.get("owned_players_meta") or {}).keys() if str(k).isdigit()}
 
         if act_type == "CLAUSE_SNIPE":
+            if delta.get("is_live") and pid in owned_pids:
+                self.memory.resolve_pending_decision(target["decision_id"], "EXECUTED_MANUAL")
+                return (
+                    f"ℹ️ <b>{html.escape(target['nombre'])}</b> ya forma parte de tu plantilla "
+                    f"(clausulado manualmente). He cerrado la orden <code>{html.escape(target['decision_id'])}</code>."
+                )
             rules_live = LeagueRulesEngine.load()
-            phase_live = rules_live.compute_round_phase()
+            phase_live = self._resolve_live_phase(rules_live)
             if not phase_live.clauses_open and not is_dry:
+                self.memory.resolve_pending_decision(target["decision_id"], "EXPIRED")
                 return (
                     f"⚠️ <b>Ventana de cláusulas cerrada ({html.escape(phase_live.phase_name)}).</b>\n"
                     f"Biwenger bloquea los clausulazos durante la jornada y las 48h previas al inicio."
@@ -347,7 +385,7 @@ class TelegramDirectorBot:
                 out_bids = delta.get("outgoing_bids") or []
                 committed = delta.get("committed_bids_eur", 0)
                 return (
-                    f"⚠️ <b>Puja máxima insuficiente en Biwenger ({avail_max_bid:,} € < {amt:,} €).</b>\n"
+                    f"⚠️ <b>Puja máxima insuficiente en Biwenger ({avail_max_bid:,} € &lt; {amt:,} €).</b>\n"
                     f"Tienes {len(out_bids)} pujas activas reservando <code>{committed:,} €</code>.\n"
                     f"Cancela una puja con <code>/cancelar_puja &lt;ID&gt;</code> (usa <code>/pujas</code>) para liberar margen."
                 )
@@ -360,6 +398,12 @@ class TelegramDirectorBot:
         elif act_type == "DEFENSIVE_SHIELD":
             res = actions.raise_clause(player_id=pid, increment_eur=amt)
         elif act_type in ("IMPORTANT_SALE", "RIVAL_COUNTER_OFFER"):
+            if act_type == "IMPORTANT_SALE" and delta.get("is_live") and owned_pids and pid not in owned_pids:
+                self.memory.resolve_pending_decision(target["decision_id"], "EXECUTED_MANUAL")
+                return (
+                    f"ℹ️ <b>{html.escape(target['nombre'])}</b> ya salió de tu plantilla. "
+                    f"He cerrado la orden <code>{html.escape(target['decision_id'])}</code>."
+                )
             oid = int(target.get("offer_id") or 0)
             if act_type == "IMPORTANT_SALE":
                 live_of = (delta.get("waiting_offers_by_pid") or {}).get(str(pid))
@@ -384,12 +428,17 @@ class TelegramDirectorBot:
         delta = self.delta_refresher.fetch(max_cache_age_seconds=60)
         bal = float(delta.get("balance") or 0.0)
         rules = LeagueRulesEngine.load()
+        owned_pids = {int(k) for k in (delta.get("owned_players_meta") or {}).keys() if str(k).isdigit()}
         try:
             df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)
             latest = df_m["fecha"].max()
             today = df_m[df_m["fecha"] == latest].copy()
             my_mgr = delta.get("team_name") or resolve_active_user_identity().get("team_name") or ""
-            rivals = today[~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None]) & today["propietario_liga"].notna()].copy()
+            rivals = today[
+                ~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None])
+                & today["propietario_liga"].notna()
+                & ~today["player_id"].isin(owned_pids)
+            ].copy()
         except Exception as e:
             return f"⚠️ Error consultando base de datos de jugadores: {html.escape(str(e))}"
 
@@ -455,7 +504,7 @@ class TelegramDirectorBot:
         delta = self.delta_refresher.fetch(max_cache_age_seconds=30)
         bal = float(delta.get("balance") or 0.0)
         rules = LeagueRulesEngine.load()
-        phase_live = rules.compute_round_phase()
+        phase_live = self._resolve_live_phase(rules)
         is_dry = GeneralSettings.DRY_RUN
         if not phase_live.clauses_open and not is_dry:
             return (
@@ -463,12 +512,17 @@ class TelegramDirectorBot:
                 f"Las cláusulas están bloqueadas durante las 48h previas a la jornada o con la jornada en juego."
             )
         my_mgr = delta.get("team_name") or resolve_active_user_identity().get("team_name") or ""
+        owned_pids = {int(k) for k in (delta.get("owned_players_meta") or {}).keys() if str(k).isdigit()}
 
         try:
             df_m = pd.read_csv("data/warehouse/Historico_Continuo.csv", low_memory=False)
             latest = df_m["fecha"].max()
             today = df_m[df_m["fecha"] == latest].copy()
-            rivals = today[~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None]) & today["propietario_liga"].notna()].copy()
+            rivals = today[
+                ~today["propietario_liga"].isin(["Libre", "Mercado", my_mgr, None])
+                & today["propietario_liga"].notna()
+                & ~today["player_id"].isin(owned_pids)
+            ].copy()
         except Exception as e:
             return f"⚠️ Error consultando jugadores rivales: {html.escape(str(e))}"
 
@@ -715,11 +769,7 @@ class TelegramDirectorBot:
         """Conversational AI Director response grounded in live state & persistent strategy memory."""
         delta = self.delta_refresher.fetch(max_cache_age_seconds=180)
         rules = LeagueRulesEngine.load()
-        try:
-            cal = StrictCausalDataView().df_calendar
-        except Exception:
-            cal = pd.DataFrame()
-        phase = rules.resolve_round_phase(cal)
+        phase = self._resolve_live_phase(rules)
         mem_brief = self.memory.build_context_brief_for_llm()
         latest = self._load_latest_plan()
 

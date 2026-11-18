@@ -271,7 +271,7 @@ class BiwengerWarehouse:
                         sort_key_cols.append(k_col)
                     df_combined = df_combined.sort_values(by=sort_key_cols).drop(columns=sort_key_cols).reset_index(drop=True)
 
-        # Save to SQLite with indexes
+        # Save to SQLite with indexes (prefer UNIQUE index on pk_cols so INSERT OR REPLACE never duplicates)
         with self.get_connection() as conn:
             df_combined.to_sql(table_name, conn, if_exists="replace", index=False)
             if pk_cols:
@@ -279,7 +279,10 @@ class BiwengerWarehouse:
                 if valid_pks:
                     cols_sql = ", ".join(f'"{c}"' for c in valid_pks)
                     idx_name = f"idx_{table_name}_{'_'.join(valid_pks)}"
-                    conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ({cols_sql})')
+                    try:
+                        conn.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ({cols_sql})')
+                    except sqlite3.IntegrityError:
+                        conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ({cols_sql})')
             conn.commit()
 
         # Save CSV mirror in data/warehouse/

@@ -1,12 +1,15 @@
 name: Dynamic Matchday Tactical Pulse & Decision Executor (v3)
 
 on:
-  # Disparador externo exacto desde Cron-job.org (`{"event_type": "tactical-pulse"}`):
-  #   - Sale en <3s y 0 llamadas a Biwenger cuando no hay ventana activa.
-  #   - Se activa únicamente una vez por ventana real del calendario LaLiga (`Partidos_Calendario`):
+  # Trigger automático en GitHub Actions + compatible con Cron-job.org (`repository_dispatch`) y ejecución manual:
+  #   - Sale rápido y con 0 llamadas a Biwenger cuando no hay ventana activa ni comandos Telegram.
+  #   - Cubre automáticamente las 3 ventanas reales de jornada (`Partidos_Calendario`):
   #       1) T_kickoff - 48h  -> PRE_CLAUSE_LOCK (última ventana antes del cierre de cláusulas)
   #       2) T_kickoff - 2.5h -> PRE_KICKOFF_SOLVENCY (garantía saldo >= 0€ para no puntuar 0)
   #       3) T_kickoff - 45m  -> FINAL_LINEUP_GUARD (guardia anti-lesión/sanción de última hora del XI MILP)
+  #   - Evita 06:30-08:30 UTC para no colisionar con el tracker matinal.
+  schedule:
+    - cron: '15,45 9-23 * * *'
   repository_dispatch:
     types: [tactical-pulse, run-tactical-pulse]
   workflow_dispatch:

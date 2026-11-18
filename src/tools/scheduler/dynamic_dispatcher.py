@@ -182,6 +182,10 @@ class DynamicRoundDispatcher:
                     chosen_jn = settled_jn
 
         if not chosen_trigger:
+            self.memory.reconcile_pending_decisions(
+                clauses_open=bool(phase.clauses_open),
+                now_ts=(now_ts.to_pydatetime().replace(tzinfo=None) if now_ts is not None else None),
+            )
             return {
                 "triggered": False,
                 "approvals_processed": approval_results,

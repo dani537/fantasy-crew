@@ -22,15 +22,24 @@ import json
 import sqlite3
 import datetime
 import unicodedata
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Any, Optional, Set, Tuple
 import pandas as pd
 
-from src.config import GoogleSheetsConfig
+from src.config import GeneralSettings, GoogleSheetsConfig
 from src.tools.data_extraction.warehouse import WAREHOUSE_DB_PATH, BiwengerWarehouse
 from src.utils.instructions import get_instructions_for_recipient
 
 
 DIRECTIVES_JSON_PATH = "./data/autopilot/user_directives.json"
+
+
+def _now_local() -> datetime.datetime:
+    """Returns naive wall-clock time in configured league timezone (e.g. Europe/Madrid)."""
+    try:
+        return datetime.datetime.now(ZoneInfo(GeneralSettings.TIMEZONE)).replace(tzinfo=None)
+    except Exception:
+        return datetime.datetime.now()
 
 
 def _strip_accents(text: str) -> str:
@@ -137,6 +146,20 @@ class StrategyMemoryLedger:
                     summary TEXT
                 )
             """)
+            # Repair legacy tables whose PRIMARY KEY was dropped by pandas to_sql(if_exists="replace")
+            for tbl_name, pk_col in (
+                ("Tesis_Activos", "player_id"),
+                ("Memoria_Estrategica", "entry_id"),
+                ("Decisiones_Pendientes", "decision_id"),
+                ("Eventos_Jornada", "event_key"),
+            ):
+                cur.execute(
+                    f"DELETE FROM {tbl_name} WHERE rowid NOT IN ("
+                    f"SELECT MAX(rowid) FROM {tbl_name} GROUP BY {pk_col})"
+                )
+                cur.execute(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{tbl_name}_{pk_col} ON {tbl_name} ({pk_col})"
+                )
             conn.commit()
         finally:
             self._close_if_disk(conn)
@@ -206,7 +229,7 @@ class StrategyMemoryLedger:
                 d["priority_targets"].append(clean)
             msg = f"🎯 Añadido como OBJETIVO PRIORITARIO: {clean}"
         else:
-            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            ts = _now_local().strftime("%Y-%m-%d %H:%M")
             d["notes"].append(f"[{ts}] {clean}")
             d["notes"] = d["notes"][-25:]
             msg = f"📝 Nota estratégica guardada en memoria: {clean}"
@@ -335,7 +358,7 @@ class StrategyMemoryLedger:
         preserving multi-day `offer_rolls` continuity from previous sessions!
         """
         prev_map = self.get_asset_theses_map()
-        ts_str = current_date or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts_str = current_date or _now_local().strftime("%Y-%m-%d %H:%M:%S")
         owned_pids: Set[int] = set()
         clean_rows: List[Dict[str, Any]] = []
 
@@ -414,7 +437,7 @@ class StrategyMemoryLedger:
         origen: str = "AUTOPILOT",
         ts_override: Optional[str] = None,
     ) -> None:
-        ts = ts_override or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = ts_override or _now_local().strftime("%Y-%m-%d %H:%M:%S")
         entry_id = f"{ts}_{origen}_{jornada_objetivo}_{fase}"[:90]
         conn = self._connect()
         try:
@@ -456,6 +479,15 @@ class StrategyMemoryLedger:
     # ------------------------------------------------------------------ #
     # 4. Human-Gated Queue (`Decisiones_Pendientes` for SEMI_AUTO)
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _expire_stale_pending(conn: sqlite3.Connection, now_dt: Optional[datetime.datetime] = None) -> int:
+        now_s = (now_dt or _now_local()).strftime("%Y-%m-%d %H:%M:%S")
+        cur = conn.execute(
+            "UPDATE Decisiones_Pendientes SET status='EXPIRED' WHERE status='PENDING' AND expires_at < ?",
+            (now_s,),
+        )
+        return int(cur.rowcount or 0)
+
     def queue_pending_decision(
         self,
         action_type: str,
@@ -480,17 +512,13 @@ class StrategyMemoryLedger:
             "IMPORTANT_SALE": "VT",
             "RIVAL_COUNTER_OFFER": "CO",
         }.get(action_type, "OP")
-        now = datetime.datetime.now()
+        now = _now_local()
         exp = now + datetime.timedelta(hours=int(expires_hours))
 
         conn = self._connect()
         try:
             cur = conn.cursor()
-            #Expire old items first
-            cur.execute(
-                "UPDATE Decisiones_Pendientes SET status='EXPIRED' WHERE status='PENDING' AND expires_at < ?",
-                (now.strftime("%Y-%m-%d %H:%M:%S"),),
-            )
+            self._expire_stale_pending(conn, now_dt=now)
             # Reuse existing PENDING ID if same action_type & player_id
             cur.execute(
                 "SELECT decision_id FROM Decisiones_Pendientes WHERE status='PENDING' AND action_type=? AND player_id=?",
@@ -529,25 +557,192 @@ class StrategyMemoryLedger:
         self._sync_pending_to_sheets()
         return decision_id
 
-    def get_pending_decisions(self, status: str = "PENDING") -> List[Dict[str, Any]]:
-        now_s = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    @staticmethod
+    def _evaluate_pending_obsolescence(
+        row: Dict[str, Any],
+        owned_pids: Optional[Set[int]] = None,
+        clauses_open: Optional[bool] = None,
+        live_offer_pids: Optional[Set[int]] = None,
+        live_counter_offer_ids: Optional[Set[int]] = None,
+        clause_locked_ids: Optional[Set[int]] = None,
+        free_listed_pids: Optional[Set[int]] = None,
+        max_official_bid_eur: Optional[float] = None,
+    ) -> Optional[Tuple[str, str]]:
+        """Returns `(new_status, reason)` when a `PENDING` order is superseded or invalid."""
+        act = str(row.get("action_type") or "").strip().upper()
+        try:
+            pid = int(float(row.get("player_id") or 0))
+        except (TypeError, ValueError):
+            pid = 0
+        try:
+            oid = int(float(row.get("offer_id") or 0))
+        except (TypeError, ValueError):
+            oid = 0
+        try:
+            amt = float(row.get("amount_eur") or 0.0)
+        except (TypeError, ValueError):
+            amt = 0.0
+
+        if act == "CLAUSE_SNIPE":
+            if owned_pids is not None and pid in owned_pids:
+                return ("EXECUTED_MANUAL", "ya incorporado a tu plantilla")
+            if clauses_open is False:
+                return ("EXPIRED", "ventana de cláusulas cerrada")
+            if free_listed_pids is not None and pid in free_listed_pids:
+                return ("OBSOLETE", "jugador libre en mercado")
+            if max_official_bid_eur is not None and amt > float(max_official_bid_eur):
+                return ("OBSOLETE", "sin margen de puja máxima tras movimientos recientes")
+        elif act == "DEFENSIVE_SHIELD":
+            if owned_pids is not None and pid not in owned_pids:
+                return ("OBSOLETE", "jugador ya no está en plantilla")
+            if clause_locked_ids is not None and pid in clause_locked_ids:
+                return ("OBSOLETE", "cláusula ya blindada/bloqueada")
+            if clauses_open is False:
+                return ("EXPIRED", "ventana de cláusulas cerrada")
+        elif act == "IMPORTANT_SALE":
+            if owned_pids is not None and pid not in owned_pids:
+                return ("EXECUTED_MANUAL", "jugador ya salió de tu plantilla")
+            if live_offer_pids is not None and pid not in live_offer_pids:
+                return ("OBSOLETE", "oferta expirada o retirada en Biwenger")
+        elif act == "RIVAL_COUNTER_OFFER":
+            if owned_pids is not None and pid in owned_pids:
+                return ("EXECUTED_MANUAL", "ya incorporado a tu plantilla")
+            if live_counter_offer_ids is not None and oid > 0 and oid not in live_counter_offer_ids:
+                return ("OBSOLETE", "contraoferta ya no está activa")
+        return None
+
+    def reconcile_pending_decisions(
+        self,
+        owned_pids: Optional[Set[int]] = None,
+        clauses_open: Optional[bool] = None,
+        waiting_offers_by_pid: Optional[Dict[Any, Any]] = None,
+        incoming_counter_offers: Optional[List[Dict[str, Any]]] = None,
+        clause_locked_ids: Optional[Set[int]] = None,
+        market_listings_df: Optional[pd.DataFrame] = None,
+        max_official_bid_eur: Optional[float] = None,
+        is_live_state: bool = False,
+        now_ts: Optional[datetime.datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Reconciles `PENDING` decisions against current/live Biwenger state (e.g. manual buyouts,
+        closed clause windows, expired offers, insufficient maxBid) and pushes updates to Google Sheets.
+        """
+        free_listed_pids: Optional[Set[int]] = None
+        if is_live_state and market_listings_df is not None and not market_listings_df.empty and "player_id" in market_listings_df.columns:
+            sel_col = (
+                "seller_name"
+                if "seller_name" in market_listings_df.columns
+                else ("vendedor_o_origen" if "vendedor_o_origen" in market_listings_df.columns else None)
+            )
+            if sel_col:
+                free_mask = market_listings_df[sel_col].astype(str).str.strip().isin(["Mercado", "Libre", "", "nan", "None"])
+                free_listed_pids = {
+                    int(float(v))
+                    for v in market_listings_df.loc[free_mask, "player_id"].tolist()
+                    if pd.notna(v) and str(v).strip()
+                }
+
+        live_offer_pids: Optional[Set[int]] = None
+        if is_live_state and waiting_offers_by_pid is not None:
+            live_offer_pids = {int(k) for k in waiting_offers_by_pid.keys() if str(k).strip().isdigit()}
+
+        live_counter_offer_ids: Optional[Set[int]] = None
+        if is_live_state and incoming_counter_offers is not None:
+            live_counter_offer_ids = {
+                int(co.get("offer_id", 0) or 0)
+                for co in incoming_counter_offers
+                if int(co.get("offer_id", 0) or 0) > 0
+            }
+
+        reconciled: List[Dict[str, Any]] = []
+        expired_count = 0
         conn = self._connect()
         try:
-            conn.execute(
-                "UPDATE Decisiones_Pendientes SET status='EXPIRED' WHERE status='PENDING' AND expires_at < ?",
-                (now_s,),
-            )
-            conn.commit()
+            # Check manual execution / live obsolescence BEFORE time-expiry so manual buyouts
+            # are accurately recorded as EXECUTED_MANUAL even if checked after expires_at.
+            df = pd.read_sql_query("SELECT * FROM Decisiones_Pendientes WHERE status='PENDING'", conn)
+            if not df.empty:
+                rows_list = [dict(row) for _, row in df.iterrows()]
+                pending_sales_eur = 0.0
+                for rec in rows_list:
+                    if str(rec.get("action_type") or "").strip().upper() == "IMPORTANT_SALE":
+                        if self._evaluate_pending_obsolescence(
+                            row=rec,
+                            owned_pids=owned_pids,
+                            clauses_open=clauses_open,
+                            live_offer_pids=live_offer_pids,
+                            live_counter_offer_ids=live_counter_offer_ids,
+                            clause_locked_ids=clause_locked_ids,
+                            free_listed_pids=free_listed_pids,
+                        ) is None:
+                            pending_sales_eur += float(rec.get("amount_eur") or 0.0)
+
+                eff_bid_ceiling = (
+                    float(max_official_bid_eur) + pending_sales_eur
+                    if (is_live_state and max_official_bid_eur is not None)
+                    else None
+                )
+                for rec in rows_list:
+                    outcome = self._evaluate_pending_obsolescence(
+                        row=rec,
+                        owned_pids=owned_pids,
+                        clauses_open=clauses_open,
+                        live_offer_pids=live_offer_pids,
+                        live_counter_offer_ids=live_counter_offer_ids,
+                        clause_locked_ids=clause_locked_ids,
+                        free_listed_pids=free_listed_pids,
+                        max_official_bid_eur=eff_bid_ceiling,
+                    )
+                    if outcome is None:
+                        continue
+                    new_status, reason = outcome
+                    did = str(rec["decision_id"])
+                    old_rat = str(rec.get("rationale") or "").strip()
+                    suffix = f"[CERRADA: {reason}]"
+                    new_rat = old_rat if suffix in old_rat else (f"{old_rat} | {suffix}" if old_rat else suffix)
+                    conn.execute(
+                        "UPDATE Decisiones_Pendientes SET status=?, rationale=? WHERE decision_id=?",
+                        (new_status, new_rat, did),
+                    )
+                    reconciled.append({
+                        "decision_id": did,
+                        "action_type": rec.get("action_type"),
+                        "nombre": rec.get("nombre"),
+                        "new_status": new_status,
+                        "reason": reason,
+                    })
+            expired_count = self._expire_stale_pending(conn, now_dt=now_ts)
+            if expired_count > 0 or reconciled:
+                conn.commit()
+        except Exception:
+            return []
+        finally:
+            self._close_if_disk(conn)
+
+        if expired_count > 0 or reconciled:
+            self._sync_pending_to_sheets()
+        return reconciled
+
+    def get_pending_decisions(self, status: str = "PENDING") -> List[Dict[str, Any]]:
+        conn = self._connect()
+        expired_count = 0
+        try:
+            expired_count = self._expire_stale_pending(conn)
+            if expired_count > 0:
+                conn.commit()
             df = pd.read_sql_query(
                 "SELECT * FROM Decisiones_Pendientes WHERE status=? ORDER BY created_at DESC",
                 conn,
                 params=(status,),
             )
-            return df.to_dict("records") if not df.empty else []
+            recs = df.to_dict("records") if not df.empty else []
         except Exception:
             return []
         finally:
             self._close_if_disk(conn)
+        if expired_count > 0:
+            self._sync_pending_to_sheets()
+        return recs
 
     def resolve_pending_decision(self, decision_id: str, new_status: str) -> Optional[Dict[str, Any]]:
         clean_id = str(decision_id or "").strip().upper()
@@ -578,17 +773,24 @@ class StrategyMemoryLedger:
         norm = [str(s).strip().upper() for s in statuses if str(s).strip()]
         placeholders = ",".join("?" for _ in norm)
         conn = self._connect()
+        expired_count = 0
         try:
+            expired_count = self._expire_stale_pending(conn)
+            if expired_count > 0:
+                conn.commit()
             df = pd.read_sql_query(
                 f"SELECT * FROM Decisiones_Pendientes WHERE UPPER(TRIM(status)) IN ({placeholders}) ORDER BY created_at ASC",
                 conn,
                 params=tuple(norm),
             )
-            return df.to_dict("records") if not df.empty else []
+            recs = df.to_dict("records") if not df.empty else []
         except Exception:
             return []
         finally:
             self._close_if_disk(conn)
+        if expired_count > 0:
+            self._sync_pending_to_sheets()
+        return recs
 
     def _sync_pending_to_sheets(self) -> None:
         if not (self.sync_sheets and GoogleSheetsConfig.ENABLED):
@@ -625,7 +827,7 @@ class StrategyMemoryLedger:
         status: str = "OK",
         summary: str = "",
     ) -> None:
-        now_s = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_s = _now_local().strftime("%Y-%m-%d %H:%M:%S")
         conn = self._connect()
         try:
             conn.execute(

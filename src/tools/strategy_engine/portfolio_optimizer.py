@@ -592,6 +592,7 @@ class PortfolioOptimizer:
         force_sell_ids: Optional[Set[int]] = None,
         blacklist_buy_ids: Optional[Set[int]] = None,
         priority_target_ids: Optional[Set[int]] = None,
+        recent_sold_ids: Optional[Set[int]] = None,
         causal_standings_ctx: Optional[Dict[str, Any]] = None,
         llm_overrides: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -608,6 +609,7 @@ class PortfolioOptimizer:
         forced_sells = set(force_sell_ids or set()) - untouchables
         blacklist_buys = set(blacklist_buy_ids or set())
         priority_buys = set(priority_target_ids or set())
+        recent_sold = set(recent_sold_ids or set())
         indebted_rivals = indebted_rival_managers or set()
 
         # Resolve temporal phase flags
@@ -1255,6 +1257,11 @@ class PortfolioOptimizer:
                 elif best_ln in prio_pos and delta_xp >= 0.20:
                     delta_xp += 0.15
                 efr_72h = float(efr_map.get(pid, subida * 2.4))
+                # Anti-whipsaw self-sale cooldown: avoid rebuying a player sold voluntarily in the last 5 days
+                # unless price momentum & 72h EFR have strongly inflected upward or explicitly prioritized
+                if pid in recent_sold and pid not in priority_buys:
+                    if not (subida >= 40_000 and efr_72h >= 80_000):
+                        continue
 
                 bid_eval = self.auction_model.compute_optimal_bid(
                     player_id=pid,

@@ -129,7 +129,12 @@ class AuctionBidModel:
         ask = float(max(150_000.0, asking_price if asking_price > 0 else vm))
 
         # 1. Compute Intrinsic Economic Valuation (Capital EFR + Fantasy XI Points):
-        expected_5d_gain = max(0.0, float(efr_72h) * 1.45 * float(efr_weight) * float(speculation_weight))
+        raw_efr = float(efr_72h)
+        if raw_efr >= 0.0:
+            expected_5d_gain = raw_efr * 1.45 * float(efr_weight) * float(speculation_weight)
+        else:
+            # Asymmetric depreciation penalty: falling assets destroy short-term liquidity even if XI-eligible
+            expected_5d_gain = max(-0.18 * vm, raw_efr * 1.35)
         idle_boost = 1.0 + float(np.clip((float(idle_cash_eur) - 5_000_000.0) / 8_000_000.0, 0.0, 3.5))
         eff_p_start_floor = float(np.clip(0.60 + float(p_start_floor_delta), 0.45, 0.80))
         min_delta = 0.40 if idle_boost <= 1.0 else 0.25
@@ -148,7 +153,8 @@ class AuctionBidModel:
             else 0.0
         )
 
-        intrinsic_value = vm + expected_5d_gain + points_eur_value
+        intrinsic_value = max(0.0, vm + expected_5d_gain + points_eur_value)
+        is_materially_falling = (float(subida_24h) <= -20_000.0 and raw_efr <= -50_000.0)
 
         # Anti-tie deterministic jitter (based on player_id so backtest is 100% deterministic!)
         jitter = 1_300 + (int(player_id) % 7) * 600  # +1,300 .. +4,900 €
@@ -157,7 +163,18 @@ class AuctionBidModel:
         # Enforce the same disciplined VM overbid ceiling as Computer auctions (never bid 2x VM on
         # a rival's "6.66M / 7.77M" showcase price, which would also lock Biwenger maxBid credit!)
         if seller_is_rival:
+            if is_materially_falling and (float(delta_xp_xi) < 1.30 or float(p_start) < 0.85):
+                return {
+                    "should_bid": False,
+                    "bid_amount": 0,
+                    "intrinsic_value": round(intrinsic_value),
+                    "expected_surplus": 0.0,
+                    "regime": "SKIP_FALLING_RIVAL",
+                    "win_prob_est": 0.0,
+                }
             rival_overbid_cap = float(np.clip(0.18 * float(overbid_cap_mult) * float(core_bid_aggression), 0.12, 0.30))
+            if is_materially_falling:
+                rival_overbid_cap = min(rival_overbid_cap, 0.05)
             max_rational_rival_bid = min(intrinsic_value * 0.96, vm * (1.0 + rival_overbid_cap))
             effective_floor = max(vm, ask)
 
@@ -242,13 +259,24 @@ class AuctionBidModel:
             }
 
         # REGIME C: Structural Starting-XI Upgrade -> Grid search optimal bid shading b*
-        if delta_xp_xi >= 1.0 and p_start >= 0.80 and idle_boost >= 1.5:
-            hard_cap_pct = 0.22
-        elif (subida_24h >= 100_000 and p_start >= 0.80) or idle_boost >= 1.8:
-            hard_cap_pct = 0.18
+        is_falling_asset = (float(subida_24h) <= 0.0 and raw_efr < 0.0)
+        if is_falling_asset:
+            # Rivals rarely contest depreciating assets; cap overbid tightly so we never overpay on falling prices
+            base_cap = 0.055 if (delta_xp_xi >= 1.5 and p_start >= 0.85) else 0.025
+            hard_cap_pct = float(np.clip(base_cap * float(overbid_cap_mult), 0.015, 0.065))
         else:
-            hard_cap_pct = 0.14
-        hard_cap_pct = float(np.clip(hard_cap_pct * float(overbid_cap_mult) * float(core_bid_aggression), 0.08, 0.30))
+            if delta_xp_xi >= 1.15 and p_start >= 0.80 and (subida_24h >= 40_000 or vm >= 4_500_000) and idle_boost >= 1.5:
+                base_cap = 0.22
+            elif subida_24h >= 100_000 and p_start >= 0.80:
+                base_cap = 0.18
+            elif vm < 3_500_000 and subida_24h < 30_000 and delta_xp_xi < 1.35:
+                # Low/mid flat-momentum bench/patch upgrades are rarely heavily contested
+                base_cap = 0.045
+            elif idle_boost >= 1.8 and (subida_24h >= 20_000 or delta_xp_xi >= 1.15):
+                base_cap = 0.16
+            else:
+                base_cap = 0.12 if subida_24h >= 20_000 else 0.075
+            hard_cap_pct = float(np.clip(base_cap * float(overbid_cap_mult) * float(core_bid_aggression), 0.025, 0.30))
         max_bid_cap = min(intrinsic_value - 40_000.0, vm * (1.0 + hard_cap_pct))
         if max_bid_cap < ask:
             return {

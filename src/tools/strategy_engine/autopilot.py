@@ -237,6 +237,7 @@ class AutopilotRunner:
                     max_rival_pp = float(p_vals.max())
 
         directives = self.memory.resolve_active_directives(catalog_df=mkt_today)
+        recent_sold_ids = self._load_causal_recent_sold_ids(team_name=team_name, lookback_days=5)
         standings_snapshot = self._load_causal_standings_snapshot(
             team_name=team_name,
             mgrs_today=mgrs_today,
@@ -280,8 +281,62 @@ class AutopilotRunner:
             "league_median_max_bid": league_median_max_bid,
             "max_rival_pp": max_rival_pp,
             "directives": directives,
+            "recent_sold_ids": recent_sold_ids,
             "is_live_api": bool(delta_state.get("is_live")),
         }
+
+    def _load_causal_recent_sold_ids(self, team_name: str, lookback_days: int = 5) -> Set[int]:
+        """Returns player_ids voluntarily sold by `team_name` in `[today - lookback_days, today)`."""
+        sold_ids: Set[int] = set()
+        if not team_name or not self.today_date:
+            return sold_ids
+        try:
+            ref_date = datetime.date.fromisoformat(str(self.today_date)[:10])
+            cutoff_date = (ref_date - datetime.timedelta(days=max(1, int(lookback_days)))).isoformat()
+            upper_date = ref_date.isoformat()
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT player_id
+                    FROM Movimientos
+                    WHERE LOWER(TRIM(vendedor)) = LOWER(TRIM(?))
+                      AND substr(fecha, 1, 10) >= ?
+                      AND substr(fecha, 1, 10) < ?
+                      AND COALESCE(UPPER(es_clausula), '') NOT IN ('SÍ', 'SI', '1', 'TRUE')
+                    """,
+                    (str(team_name), cutoff_date, upper_date),
+                ).fetchall()
+                for (raw_pid,) in rows:
+                    try:
+                        pid = int(raw_pid)
+                        if pid > 0:
+                            sold_ids.add(pid)
+                    except (ValueError, TypeError):
+                        continue
+                # In live multi-pulse mode, also block same-day human-approved sales from re-bidding
+                if self.use_live_delta:
+                    dec_rows = conn.execute(
+                        """
+                        SELECT DISTINCT player_id
+                        FROM Decisiones_Pendientes
+                        WHERE action_type = 'IMPORTANT_SALE'
+                          AND status IN ('APPROVED_EXECUTED', 'EXECUTED_MANUAL')
+                          AND substr(created_at, 1, 10) >= ?
+                          AND substr(created_at, 1, 10) <= ?
+                        """,
+                        (cutoff_date, upper_date),
+                    ).fetchall()
+                    for (raw_pid,) in dec_rows:
+                        try:
+                            pid = int(raw_pid)
+                            if pid > 0:
+                                sold_ids.add(pid)
+                        except (ValueError, TypeError):
+                            continue
+        except Exception:
+            pass
+        return sold_ids
 
     def _load_causal_standings_snapshot(
         self,
@@ -475,6 +530,7 @@ class AutopilotRunner:
             force_sell_ids=directives["force_sell_ids"],
             blacklist_buy_ids=directives["blacklist_buy_ids"],
             priority_target_ids=directives["priority_target_ids"],
+            recent_sold_ids=ctx.get("recent_sold_ids"),
             causal_standings_ctx=causal_standings_ctx,
             llm_overrides=supervisor_res.get("overrides"),
         )
@@ -552,6 +608,7 @@ class AutopilotRunner:
             acquired_pids_now = set(neg_res["acquired_pids"])
 
         executed_sales_cash_gain = 0.0
+        sold_pids_now: Set[int] = set()
 
         # 5A. Pre-Kickoff Solvency Sales
         is_solvency_emergency = (
@@ -567,8 +624,11 @@ class AutopilotRunner:
                         oid = int(offer_id_map.get(pid, pid if self.dry_run else 0))
                         if oid > 0:
                             res = market_actions.accept_offer(oid)
-                            if not isinstance(res, dict) or res.get("status") != "ERROR":
+                            st = res.get("status") if isinstance(res, dict) else ""
+                            if st != "ERROR":
                                 executed_sales_cash_gain += float(s.get("sale_price", 0) or 0)
+                            if st not in ("ERROR", "DRY_RUN", "BLOCKED_UNVERIFIED", "SKIPPED_LOW_QUOTA"):
+                                sold_pids_now.add(pid)
                             execution_results.append({"type": "SOLVENCY_SALE", "target": s["nombre"], "res": res})
                     except Exception as e:
                         execution_results.append({"type": "SOLVENCY_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
@@ -600,8 +660,11 @@ class AutopilotRunner:
                     elif self.mode == "FULL_AUTO" or (self.mode == "SEMI_AUTO" and StrategySettings.AUTONOMOUS_ROUTINE_SALES_IN_SEMI_AUTO) or self.dry_run:
                         if oid > 0:
                             res = market_actions.accept_offer(oid)
-                            if not isinstance(res, dict) or res.get("status") != "ERROR":
+                            st = res.get("status") if isinstance(res, dict) else ""
+                            if st != "ERROR":
                                 executed_sales_cash_gain += float(s.get("sale_price", 0) or 0)
+                            if st not in ("ERROR", "DRY_RUN", "BLOCKED_UNVERIFIED", "SKIPPED_LOW_QUOTA"):
+                                sold_pids_now.add(pid)
                             execution_results.append({"type": "ROUTINE_SALE", "target": s["nombre"], "res": res})
                 except Exception as e:
                     execution_results.append({"type": "ROUTINE_SALE", "target": s.get("nombre", str(s)), "res": {"status": "ERROR", "detail": str(e)}})
@@ -816,6 +879,70 @@ class AutopilotRunner:
                 except Exception as e:
                     execution_results.append({"type": "MARKET_LISTING_SYNC", "res": {"status": "ERROR", "detail": str(e)}})
 
+        # 5G. Reconcile Human-Gated Pending Decisions against Live/Post-Execution State
+        initial_owned_pids = (
+            {int(x) for x in ctx["squad_df"]["player_id"].tolist() if pd.notna(x)}
+            if (ctx.get("squad_df") is not None and not ctx["squad_df"].empty)
+            else set()
+        )
+        owned_pids_now = (initial_owned_pids | acquired_pids_now) - sold_pids_now
+        offers_after = {
+            int(pid): meta
+            for pid, meta in (ctx.get("offers_meta_by_pid") or {}).items()
+            if int(pid) not in sold_pids_now
+        }
+        if not offers_after and ctx.get("offers_map"):
+            offers_after = {int(pid): amt for pid, amt in ctx["offers_map"].items() if int(pid) not in sold_pids_now}
+        active_counter_offers = [
+            co for co in (ctx.get("incoming_counter_offers") or [])
+            if int(co.get("player_id", 0) or 0) not in acquired_pids_now
+            and str(co.get("bot_action") or "") not in ("RECHAZADA_AUTO", "ACEPTADA_AUTO")
+        ]
+        reconciled_decisions: List[Dict[str, Any]] = []
+        live_official_max_bid: Optional[float] = None
+        if ctx.get("is_live_api"):
+            live_official_max_bid = float(
+                self.rules.compute_max_official_bid(
+                    float(ctx["current_cash"]) + float(executed_sales_cash_gain) - float(spent_cash_neg),
+                    squad_val,
+                )
+            )
+        if not self.dry_run:
+            reconciled_decisions = self.memory.reconcile_pending_decisions(
+                owned_pids=owned_pids_now if owned_pids_now else None,
+                clauses_open=bool(phase_ctx.clauses_open),
+                waiting_offers_by_pid=offers_after,
+                incoming_counter_offers=active_counter_offers,
+                clause_locked_ids=ctx.get("clause_locked_ids"),
+                market_listings_df=ctx.get("listings_df"),
+                max_official_bid_eur=live_official_max_bid,
+                is_live_state=bool(ctx.get("is_live_api")),
+            )
+            for rdec in reconciled_decisions:
+                print(
+                    f"🧹 Orden pendiente reconciliada [{rdec['decision_id']}]: "
+                    f"{rdec['nombre']} -> {rdec['new_status']} ({rdec['reason']})"
+                )
+            pending_all = self.memory.get_pending_decisions("PENDING")
+        else:
+            raw_pending = self.memory.get_pending_decisions("PENDING")
+            pending_sales_eur = sum(
+                float(p.get("amount_eur") or 0.0)
+                for p in raw_pending
+                if str(p.get("action_type") or "").strip().upper() == "IMPORTANT_SALE"
+            )
+            dry_bid_ceiling = (live_official_max_bid + pending_sales_eur) if live_official_max_bid is not None else None
+            pending_all = [
+                p for p in raw_pending
+                if self.memory._evaluate_pending_obsolescence(
+                    row=p,
+                    owned_pids=owned_pids_now if owned_pids_now else None,
+                    clauses_open=bool(phase_ctx.clauses_open),
+                    clause_locked_ids=ctx.get("clause_locked_ids"),
+                    max_official_bid_eur=dry_bid_ceiling,
+                ) is None
+            ]
+
         # 6. Persist Cross-Session Strategic Journal Note
         scarcity_s = approved_plan.get("scarcity_summary") or {}
         self.memory.record_strategic_note(
@@ -826,7 +953,7 @@ class AutopilotRunner:
             objetivos_prioritarios=", ".join(b["nombre"] for b in approved_plan.get("market_bids", [])[:3]),
             notas_estrategicas=(
                 f"XI {lineup_info.get('formation')} ({lineup_info.get('expected_points', 0):.1f} xP) | "
-                f"Pujas={len(approved_plan.get('market_bids', []))} | PendientesHumano={len(queued_decisions)}"
+                f"Pujas={len(approved_plan.get('market_bids', []))} | PendientesHumano={len(pending_all)}"
             ),
             origen="AUTOPILOT",
         )
@@ -843,7 +970,6 @@ class AutopilotRunner:
                 ),
             )
 
-        pending_all = self.memory.get_pending_decisions("PENDING")
         league_bulletin = ctx.get("league_bulletin") or {}
 
         # 7. Executive Briefing & Plain-Language Summary via TieredLLMRouter
@@ -897,6 +1023,7 @@ class AutopilotRunner:
             "is_solvent": validated["is_safe"],
             "plan": approved_plan,
             "pending_decisions": pending_all,
+            "reconciled_decisions": reconciled_decisions,
             "blocked_actions": validated["blocked"],
             "executions": execution_results,
             "briefing": briefing_text,

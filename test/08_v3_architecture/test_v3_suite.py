@@ -574,6 +574,409 @@ class TestFantasyChampionV3Architecture(unittest.TestCase):
             ag = create_biwenger_agent()
             self.assertIsInstance(ag, Agent)
 
+    def test_pending_decision_reconciliation_manual_buyout_expiration_and_unique_index(self):
+        import datetime
+        from unittest.mock import patch
+        from src.tools.data_extraction.warehouse import BiwengerWarehouse
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_p = os.path.join(tmpdir, "test_reconcile.db")
+            dir_p = os.path.join(tmpdir, "directives.json")
+
+            # 1. Simulate `sync_local.py` replace_all upsert followed by `mark_round_event_fired`:
+            #    must keep UNIQUE index so INSERT OR REPLACE never creates duplicate rows!
+            wh = BiwengerWarehouse(db_path=db_p)
+            df_ev = pd.DataFrame([{
+                "event_key": "2026-11-18_MORNING_FULL",
+                "jornada_num": 13,
+                "trigger_type": "MORNING_FULL",
+                "executed_at": "2026-11-18 08:05:24",
+                "status": "OK",
+                "summary": "first",
+            }])
+            wh.upsert_table("Eventos_Jornada", df_ev, pk_cols=["event_key"], replace_all=True)
+
+            mem = StrategyMemoryLedger(db_path=db_p, directives_path=dir_p, in_memory_only=False, sync_sheets=False)
+            mem.mark_round_event_fired("2026-11-18_MORNING_FULL", 13, "MORNING_FULL", "OK", "second")
+            with wh.get_connection() as conn:
+                cnt_ev = conn.execute("SELECT COUNT(*) FROM Eventos_Jornada WHERE event_key='2026-11-18_MORNING_FULL'").fetchone()[0]
+            self.assertEqual(cnt_ev, 1)
+
+            # 2. Manual buyout reconciliation (`CL-7001` already in `owned_pids` -> `EXECUTED_MANUAL`),
+            #    plus closed clause window (`CL-7002` -> `EXPIRED`), plus vanished offer (`VT-7003` -> `OBSOLETE`)
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7001,
+                nombre="Manual Buyout Star",
+                amount_eur=32_400_000,
+                market_price_eur=18_240_000,
+                counterparty="Rival X",
+                owner_user_id=101,
+                expires_hours=11,
+            )
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7002,
+                nombre="Window Closed Target",
+                amount_eur=14_000_000,
+                market_price_eur=9_000_000,
+                counterparty="Rival Y",
+                owner_user_id=102,
+                expires_hours=11,
+            )
+            mem.queue_pending_decision(
+                action_type="IMPORTANT_SALE",
+                player_id=7003,
+                nombre="Offer Gone Starter",
+                amount_eur=5_500_000,
+                market_price_eur=5_300_000,
+                counterparty="Mercado",
+                offer_id=999,
+                expires_hours=11,
+            )
+
+            with patch.object(mem, "_sync_pending_to_sheets") as mock_sync:
+                rec = mem.reconcile_pending_decisions(
+                    owned_pids={7001, 7003},
+                    clauses_open=False,
+                    waiting_offers_by_pid={},
+                    is_live_state=True,
+                )
+                self.assertEqual(mock_sync.call_count, 1)
+
+            by_id = {r["decision_id"]: r["new_status"] for r in rec}
+            self.assertEqual(by_id.get("CL-7001"), "EXECUTED_MANUAL")
+            self.assertEqual(by_id.get("CL-7002"), "EXPIRED")
+            self.assertEqual(by_id.get("VT-7003"), "OBSOLETE")
+            self.assertEqual(mem.get_pending_decisions("PENDING"), [])
+
+            # 3. Stale `expires_at` inside `get_pending_decisions` must also sync to Sheets!
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7004,
+                nombre="Expired Item",
+                amount_eur=8_000_000,
+                expires_hours=-1,
+            )
+            with patch.object(mem, "_sync_pending_to_sheets") as mock_sync_exp:
+                rem = mem.get_pending_decisions("PENDING")
+                self.assertEqual(rem, [])
+                self.assertEqual(mock_sync_exp.call_count, 1)
+
+            # Confirm status persisted cleanly in SQLite
+            expired_rows = mem.get_decisions_by_statuses(["EXPIRED"])
+            self.assertTrue(any(r["decision_id"] == "CL-7004" for r in expired_rows))
+
+            # 4. Manual buyout recorded as EXECUTED_MANUAL even if expires_at already passed
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7005,
+                nombre="Manual After Expiry",
+                amount_eur=15_000_000,
+                expires_hours=-2,
+            )
+            rec_late = mem.reconcile_pending_decisions(owned_pids={7005}, clauses_open=False)
+            self.assertEqual({r["decision_id"]: r["new_status"] for r in rec_late}.get("CL-7005"), "EXECUTED_MANUAL")
+
+            # 5. Another manual buyout drains cash below a queued clause -> marked OBSOLETE
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7006,
+                nombre="Unaffordable After Other Buyout",
+                amount_eur=30_000_000,
+                expires_hours=12,
+            )
+            rec_budget = mem.reconcile_pending_decisions(
+                owned_pids={7005},
+                clauses_open=True,
+                max_official_bid_eur=20_000_000.0,
+                is_live_state=True,
+            )
+            self.assertEqual({r["decision_id"]: r["new_status"] for r in rec_budget}.get("CL-7006"), "OBSOLETE")
+            _ = datetime.datetime
+
+    def test_telegram_bot_aprobar_handles_manual_buyout_and_live_phase(self):
+        from unittest.mock import patch, MagicMock
+        from src.tools.notifications.telegram_bot import TelegramDirectorBot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_p = os.path.join(tmpdir, "test_tg.db")
+            dir_p = os.path.join(tmpdir, "directives.json")
+            mem = StrategyMemoryLedger(db_path=db_p, directives_path=dir_p, in_memory_only=False, sync_sheets=False)
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7010,
+                nombre="Crack Ya Fichado",
+                amount_eur=22_000_000,
+                counterparty="Rival Z",
+                owner_user_id=202,
+                expires_hours=12,
+            )
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7011,
+                nombre="Crack Ventana Cerrada",
+                amount_eur=12_000_000,
+                counterparty="Rival Z",
+                owner_user_id=202,
+                expires_hours=12,
+            )
+
+            bot = TelegramDirectorBot(token="dummy", allowed_chat_id="1", offset_path=os.path.join(tmpdir, "off.json"))
+            bot.memory = mem
+
+            fake_delta = {
+                "is_live": True,
+                "league_id": 1,
+                "team_id": 2,
+                "balance": 5_000_000,
+                "available_max_bid": 15_000_000,
+                "owned_players_meta": {"7010": {"purchase_price": 22_000_000}},
+                "manager_id_by_name": {"Rival Z": 202},
+            }
+            fake_cal = pd.DataFrame([
+                {"jornada_num": 13, "part": 1, "fecha_hora": "2099-01-01 20:00:00", "estado_partido": "pending"},
+            ])
+            mock_actions = MagicMock()
+            with patch.object(bot.delta_refresher, "fetch", return_value=fake_delta), \
+                 patch("src.tools.notifications.telegram_bot.BiwengerMarketActions", return_value=mock_actions), \
+                 patch("src.tools.notifications.telegram_bot.StrictCausalDataView") as mock_view:
+                mock_view.return_value.df_calendar = fake_cal
+                msg_manual = bot._cmd_aprobar("CL-7010")
+                self.assertIn("ya forma parte de tu plantilla", msg_manual)
+                mock_actions.pay_clause.assert_not_called()
+
+                # Now test closed window path (doesn't raise TypeError on compute_round_phase!)
+                fake_cal_closed = pd.DataFrame([
+                    {"jornada_num": 13, "part": 1, "fecha_hora": (pd.Timestamp.utcnow() + pd.Timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S"), "estado_partido": "pending"},
+                ])
+                mock_view.return_value.df_calendar = fake_cal_closed
+                with patch.dict(os.environ, {"DRY_RUN": "false", "AUTOPILOT_MODE": "FULL_AUTO"}):
+                    msg_closed = bot._cmd_aprobar("CL-7011")
+                self.assertIn("Ventana de cláusulas cerrada", msg_closed)
+                mock_actions.pay_clause.assert_not_called()
+
+            self.assertTrue(any(r["decision_id"] == "CL-7010" for r in mem.get_decisions_by_statuses(["EXECUTED_MANUAL"])))
+            self.assertTrue(any(r["decision_id"] == "CL-7011" for r in mem.get_decisions_by_statuses(["EXPIRED"])))
+
+    def test_autopilot_reconciles_preexisting_manual_buyout_in_cycle(self):
+        from unittest.mock import patch, MagicMock
+        from src.tools.strategy_engine.autopilot import AutopilotRunner
+        from src.tools.strategy_engine.league_rules import RoundPhaseContext
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_p = os.path.join(tmpdir, "test_auto_rec.db")
+            dir_p = os.path.join(tmpdir, "directives.json")
+            mem = StrategyMemoryLedger(db_path=db_p, directives_path=dir_p, in_memory_only=False, sync_sheets=False)
+            mem.queue_pending_decision(
+                action_type="CLAUSE_SNIPE",
+                player_id=7020,
+                nombre="Crack Comprado Manual",
+                amount_eur=32_400_000,
+                market_price_eur=18_240_000,
+                counterparty="Rival X",
+                owner_user_id=101,
+                expires_hours=12,
+            )
+
+            phase_open = RoundPhaseContext(
+                now_ts=pd.Timestamp("2026-11-18 13:24:00"),
+                phase_name="OPEN_TRADING",
+                target_jornada_num=13,
+                active_in_progress_jornada=None,
+                next_kickoff_ts=pd.Timestamp("2026-11-20 21:00:00"),
+                clause_lock_ts=pd.Timestamp("2026-11-18 21:00:00"),
+                active_round_end_ts=None,
+                hours_to_kickoff=55.6,
+                days_to_kickoff=2,
+                hours_to_clause_lock=7.6,
+                is_kickoff_day=False,
+                must_be_solvent_now=False,
+                clauses_open=True,
+                can_use_credit_leverage=True,
+                is_international_break=False,
+                is_schedule_placeholder=False,
+            )
+            sq_df = pd.DataFrame([
+                {"player_id": 7020, "nombre": "Crack Comprado Manual", "posicion": "Centrocampista", "precio": 18_240_000, "subida_24h": 160_000, "estado": "ok", "propietario_liga": "Mi Equipo"}
+            ])
+            fake_ctx = {
+                "date": "2026-11-18", "team_name": "Mi Equipo", "league_name": "TestLeague", "is_live_api": True,
+                "team_id": 1, "league_id": 1,
+                "target_jornada_num": 13, "days_to_kickoff": 2, "is_kickoff_day": False,
+                "phase_ctx": phase_open, "current_cash": 6_641_690.0, "is_solvent": True,
+                "squad_df": sq_df, "market_today_df": sq_df.copy(), "listings_df": pd.DataFrame(),
+                "offers_map": {}, "offer_id_by_pid": {}, "offers_meta_by_pid": {},
+                "rival_incoming_offers": [], "incoming_counter_offers": [], "outgoing_bids": [],
+                "available_max_bid": 15_000_000, "committed_bids_eur": 0, "league_bulletin": {},
+                "currently_listed_pids": set(), "sell_locked_ids": set(), "clause_locked_ids": {7020},
+                "indebted_rivals": set(), "manager_id_by_name": {"Rival X": 101},
+                "league_median_max_bid": 15_000_000.0, "max_rival_pp": 25_000_000.0,
+                "directives": {"untouchable_ids": set(), "force_sell_ids": set(), "blacklist_buy_ids": set(), "priority_target_ids": set()},
+                "standings_snapshot": {"my_rank": 10, "total_managers": 15, "my_points": 469, "leader_points": 654, "second_points": 580, "podium_points": 540, "rounds_settled": 12, "my_net_worth": 62_000_000, "leader_net_worth": 90_000_000},
+            }
+            fake_plan = {
+                "starting_cash": 6_641_690, "post_sales_cash": 6_641_690,
+                "clauses_open": True, "is_kickoff_day": False, "can_use_credit_leverage": True,
+                "routine_sales": [], "solvency_sales": [], "all_sales": [],
+                "market_bids": [], "clause_snipes": [], "defensive_shields": [],
+                "preventive_listings": [], "asset_theses": [], "scarcity_summary": {"free_ge_5m": 6, "free_ge_10m": 1},
+                "lineup": {"formation": "4-3-3", "player_ids": [7020], "slots": [], "expected_points": 47.4},
+            }
+
+            runner = AutopilotRunner(mode="FULL_AUTO", db_path=db_p, dry_run=False, today_date="2026-11-18", trigger_phase="MORNING_FULL", use_live_delta=False)
+            runner.memory = mem
+            mock_actions = MagicMock()
+            with patch.object(runner, "load_active_context", return_value=fake_ctx), \
+                 patch.object(runner.optimizer, "generate_daily_plan", return_value=fake_plan), \
+                 patch("src.tools.strategy_engine.autopilot.BiwengerMarketActions", return_value=mock_actions), \
+                 patch("src.tools.strategy_engine.autopilot.TieredLLMRouter.get_client", return_value=None):
+                res = runner.execute_cycle(generate_briefing=False, send_notifications=False)
+
+            self.assertEqual(res["pending_decisions"], [])
+            self.assertEqual(len(res["reconciled_decisions"]), 1)
+            self.assertEqual(res["reconciled_decisions"][0]["new_status"], "EXECUTED_MANUAL")
+            notes = mem.get_recent_strategic_notes(limit=1)
+            self.assertIn("PendientesHumano=0", str(notes.iloc[0]["notas_estrategicas"]))
+
+    def test_auction_model_depreciation_penalty_and_low_momentum_shading(self):
+        from src.tools.strategy_engine.auction_model import AuctionBidModel
+
+        model = AuctionBidModel()
+        # 1. Negative EFR must reduce intrinsic value instead of clamping expected_5d_gain to 0
+        rising_res = model.compute_optimal_bid(
+            player_id=101,
+            market_price=3_000_000,
+            asking_price=3_000_000,
+            subida_24h=80_000,
+            efr_72h=150_000,
+            delta_xp_xi=0.9,
+            p_start=0.90,
+            idle_cash_eur=18_000_000,
+        )
+        falling_res = model.compute_optimal_bid(
+            player_id=101,
+            market_price=3_000_000,
+            asking_price=3_000_000,
+            subida_24h=-30_000,
+            efr_72h=-90_000,
+            delta_xp_xi=0.9,
+            p_start=0.90,
+            idle_cash_eur=18_000_000,
+        )
+        self.assertLess(falling_res["intrinsic_value"], rising_res["intrinsic_value"])
+        if falling_res["should_bid"]:
+            overpay_pct = (falling_res["bid_amount"] - 3_000_000) / 3_000_000
+            self.assertLessEqual(overpay_pct, 0.04, f"Overpaid on falling asset: {overpay_pct:.3%}")
+
+        # 2. Flat-momentum mid/micro upgrade must not get +8%..+18% uncontested idle_cash inflation
+        flat_mid = model.compute_optimal_bid(
+            player_id=202,
+            market_price=3_000_000,
+            asking_price=3_000_000,
+            subida_24h=0.0,
+            efr_72h=0.0,
+            delta_xp_xi=0.8,
+            p_start=0.85,
+            idle_cash_eur=20_000_000,
+        )
+        if flat_mid["should_bid"]:
+            flat_overpay = (flat_mid["bid_amount"] - 3_000_000) / 3_000_000
+            self.assertLessEqual(flat_overpay, 0.055, f"Uncontested flat mid overpay too high: {flat_overpay:.3%}")
+
+        # 3. Materially falling rival listing without elite XI delta is skipped cleanly
+        falling_rival = model.compute_optimal_bid(
+            player_id=303,
+            market_price=15_000_000,
+            asking_price=15_500_000,
+            subida_24h=-70_000,
+            efr_72h=-180_000,
+            delta_xp_xi=0.8,
+            p_start=0.90,
+            seller_is_rival=True,
+            idle_cash_eur=15_000_000,
+        )
+        self.assertFalse(falling_rival["should_bid"])
+        self.assertEqual(falling_rival["regime"], "SKIP_FALLING_RIVAL")
+
+    def test_recent_self_sale_cooldown_causal_filter_and_optimizer_guard(self):
+        import sqlite3
+        import tempfile
+        import os
+        import pandas as pd
+        from src.tools.strategy_engine.autopilot import AutopilotRunner
+        from src.tools.strategy_engine.portfolio_optimizer import PortfolioOptimizer
+        from src.tools.strategy_engine.league_rules import LeagueRulesEngine
+
+        # A. Causal SQL filter returns recent voluntary sales (< today_date), ignores future & clause thefts
+        with tempfile.TemporaryDirectory() as tmpd:
+            db_p = os.path.join(tmpd, "test_cooldown.db")
+            with sqlite3.connect(db_p) as conn:
+                conn.execute(
+                    "CREATE TABLE Movimientos (fecha TEXT, tipo TEXT, jugador TEXT, player_id INTEGER, comprador TEXT, vendedor TEXT, precio INTEGER, es_clausula TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO Movimientos VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("2026-11-15 21:00:00", "Venta Mercado", "Recien Vendido", 8801, "Mercado", "TestTeam", 3_000_000, "NO"),
+                        ("2026-11-10 12:00:00", "Venta Mercado", "Venta Vieja", 8802, "Mercado", "TestTeam", 2_500_000, "NO"),
+                        ("2026-11-17 18:00:00", "Cláusula", "Clausulado Rival", 8803, "RivalA", "TestTeam", 5_000_000, "SÍ"),
+                        ("2026-11-18 22:00:00", "Venta Mercado", "Futuro Mismo Dia", 8804, "Mercado", "TestTeam", 3_200_000, "NO"),
+                    ],
+                )
+            runner = AutopilotRunner.__new__(AutopilotRunner)
+            runner.db_path = db_p
+            runner.today_date = "2026-11-18"
+            runner.use_live_delta = False
+            sold_recent = runner._load_causal_recent_sold_ids(team_name="TestTeam", lookback_days=5)
+            self.assertEqual(sold_recent, {8801})
+
+        # B. PortfolioOptimizer skips rebuying a flat recently self-sold player, but allows strong inflection
+        rules = LeagueRulesEngine.load()
+        opt = PortfolioOptimizer(rules=rules)
+        sq = pd.DataFrame([
+            {"player_id": 500 + i, "nombre": f"Sq_{i}", "posicion": pos, "precio": 3_000_000, "subida_24h": 10_000}
+            for i, pos in enumerate(["Portero"] + ["Defensa"] * 4 + ["Centrocampista"] * 4 + ["Delantero"] * 2)
+        ])
+        listings = pd.DataFrame([
+            {"player_id": 8801, "jugador": "Flat Sold", "seller_name": "Mercado", "precio_mercado_dia": 3_100_000, "ask_price": 3_100_000},
+            {"player_id": 8805, "jugador": "Rebounding Sold", "seller_name": "Mercado", "precio_mercado_dia": 3_100_000, "ask_price": 3_100_000},
+        ])
+        mkt = pd.DataFrame([
+            {"player_id": 8801, "nombre": "Flat Sold", "equipo": "ClubA", "posicion": "Defensa", "estado": "ok", "precio": 3_100_000, "subida_24h": 0, "clausula_actual": 0, "propietario_liga": "Libre", "media_puntos": "4.8"},
+            {"player_id": 8805, "nombre": "Rebounding Sold", "equipo": "ClubB", "posicion": "Defensa", "estado": "ok", "precio": 3_100_000, "subida_24h": 90_000, "clausula_actual": 0, "propietario_liga": "Libre", "media_puntos": "5.2"},
+        ])
+        pos_map = {"Portero": "GK", "Defensa": "DF", "Centrocampista": "MF", "Delantero": "FW"}
+        xp_rows = []
+        for _, r in pd.concat([sq, mkt], ignore_index=True).iterrows():
+            ln = pos_map[r["posicion"]]
+            xp_rows.append({
+                "player_id": int(r["player_id"]),
+                "best_line": ln,
+                "natural_pos": ln,
+                "valid_lines": ln,
+                "xp_best": 5.5 if int(r["player_id"]) in (8801, 8805) else 4.0,
+                "xp_healthy": 5.5 if int(r["player_id"]) in (8801, 8805) else 4.0,
+                "p_start": 0.90,
+                "is_available": True,
+            })
+        df_cal = pd.DataFrame([{"jornada": "Jornada 13", "part": 1, "fecha_hora": "2026-11-20 21:00:00", "estado_partido": "pending"}])
+        plan = opt.generate_daily_plan(
+            current_date="2026-11-18",
+            my_manager_name="TestTeam",
+            current_cash=15_000_000.0,
+            squad_df=sq,
+            df_market_all=mkt,
+            market_listings_df=listings,
+            xp_table=pd.DataFrame(xp_rows),
+            efr_map={8801: 0.0, 8805: 210_000.0},
+            recent_sold_ids={8801, 8805},
+            phase_ctx=rules.compute_round_phase(pd.Timestamp("2026-11-18 10:00:00"), df_cal),
+        )
+        bid_pids = {int(b["player_id"]) for b in (plan.get("market_bids") or [])}
+        self.assertNotIn(8801, bid_pids)
+        self.assertIn(8805, bid_pids)
+
 
 if __name__ == "__main__":
     unittest.main()
