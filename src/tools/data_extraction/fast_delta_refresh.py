@@ -115,13 +115,15 @@ class FastDeltaRefresh:
             "available_max_bid": 0,         # balance + max_credit - committed_bids_eur
             "market_sales": [],             # list of dicts ready for listings_df
             "manager_id_by_name": {},       # manager_name -> user_id
-            "live_player_status": {},       # str(pid) -> {status, price, subida_24h, name, team_id, position}
+            "live_player_status": {},       # str(pid) -> {status, price, subida_24h, name, team, position, alt_positions}
+            "multipos_map": {},             # str(pid) -> sorted list of valid lines (e.g. ["DF", "FW", "MF"])
             "league_bulletin": {},          # Structured Liga news: clauses, deals, shields, standings, injuries
             "rate_limit_remaining": None,
             "elapsed_sec": 0.0,
         }
 
-        # 1. Public CDN call (0 user quota): live injury/suspension statuses + today's prices
+        # 1. Public CDN call (0 user quota): live injury/suspension statuses + today's prices + altPositions
+        pos_code_to_line = {1: "GK", 2: "DF", 3: "MF", 4: "FW"}
         teams_map: Dict[int, str] = {}
         try:
             cdn_url = f"https://cf.biwenger.com/api/v2/competitions/la-liga/data?lang=es&score={score_id}"
@@ -131,6 +133,17 @@ class FastDeltaRefresh:
                 for tid_s, t_obj in (cdn_data.get("teams") or {}).items():
                     teams_map[int(tid_s)] = str(t_obj.get("name", ""))
                 for pid_s, p_obj in (cdn_data.get("players") or {}).items():
+                    pos_code = int(p_obj.get("position", 3) or 3)
+                    nat_line = pos_code_to_line.get(pos_code, "")
+                    raw_alts = p_obj.get("altPositions") or []
+                    alt_lines = [
+                        pos_code_to_line[int(a)]
+                        for a in raw_alts
+                        if str(a).isdigit() and int(a) in pos_code_to_line
+                    ]
+                    valid_lines = sorted({ln for ln in ([nat_line] + alt_lines) if ln})
+                    if valid_lines:
+                        result["multipos_map"][str(pid_s)] = valid_lines
                     result["live_player_status"][str(pid_s)] = {
                         "status": str(p_obj.get("status", "ok") or "ok"),
                         "status_info": str(p_obj.get("statusInfo", "") or ""),
@@ -138,7 +151,8 @@ class FastDeltaRefresh:
                         "subida_24h": int(p_obj.get("priceIncrement", 0) or 0),
                         "name": str(p_obj.get("name", "")),
                         "team": teams_map.get(int(p_obj.get("teamID", 0) or 0), ""),
-                        "position": POSITION_MAP.get(int(p_obj.get("position", 3) or 3), "Centrocampista"),
+                        "position": POSITION_MAP.get(pos_code, "Centrocampista"),
+                        "alt_positions": sorted(set(alt_lines)),
                     }
         except Exception as e_cdn:
             print(f"⚠️ FastDeltaRefresh CDN warning: {e_cdn}")
@@ -156,7 +170,7 @@ class FastDeltaRefresh:
             # Call A: /api/v2/user
             try:
                 r_usr = auth.session.get(
-                    f"{API_BASE}/user?fields=*,lineup,players(id,owner),market,offers",
+                    f"{API_BASE}/user?fields=*,lineup,players(id,owner,position,altPositions),market,offers",
                     headers=hdrs,
                     timeout=12,
                 )
@@ -172,11 +186,33 @@ class FastDeltaRefresh:
                     lineup_obj = u_data.get("lineup") or {}
                     if isinstance(lineup_obj, dict) and isinstance(lineup_obj.get("playersID"), list):
                         result["current_lineup_ids"] = [int(x) for x in lineup_obj["playersID"] if str(x).isdigit()]
+                    if isinstance(lineup_obj, dict):
+                        for lp in (lineup_obj.get("players") or []):
+                            if isinstance(lp, dict) and lp.get("id"):
+                                lpid = int(lp["id"])
+                                l_nat = pos_code_to_line.get(int(lp.get("position", 0) or 0), "")
+                                l_alts = [
+                                    pos_code_to_line[int(a)]
+                                    for a in (lp.get("altPositions") or [])
+                                    if str(a).isdigit() and int(a) in pos_code_to_line
+                                ]
+                                l_valid = sorted({ln for ln in ([l_nat] + l_alts) if ln})
+                                if l_valid and str(lpid) not in result["multipos_map"]:
+                                    result["multipos_map"][str(lpid)] = l_valid
 
                     for p in (u_data.get("players") or []):
                         pid = int(p.get("id", 0) or 0)
                         if pid <= 0:
                             continue
+                        p_nat = pos_code_to_line.get(int(p.get("position", 0) or 0), "")
+                        p_alts = [
+                            pos_code_to_line[int(a)]
+                            for a in (p.get("altPositions") or [])
+                            if str(a).isdigit() and int(a) in pos_code_to_line
+                        ]
+                        p_valid = sorted({ln for ln in ([p_nat] + p_alts) if ln})
+                        if p_valid and str(pid) not in result["multipos_map"]:
+                            result["multipos_map"][str(pid)] = p_valid
                         own = p.get("owner") or {}
                         acq_ts = int(own.get("date", 0) or 0)
                         lock_until = int(own.get("clauseLockedUntil", 0) or 0)

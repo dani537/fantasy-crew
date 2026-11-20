@@ -109,6 +109,15 @@ AGENT_BEHAVIOR_CHANGELOG: List[Dict[str, str]] = [
         "comportamiento_y_motivo": "Cierre automático de órdenes manuales/caducadas (caso Arda Güler), penalización de EFR<0 y freno a sobrepujas en activos planos/en caída, cooldown 5d anti-recompra y cron 30m en tactical_pulse.yml.",
         "impacto_esperado": "Sin órdenes fantasma, menos sobrepago en perfiles medios/en caída y guardias automáticas de jornada activas.",
     },
+    {
+        "version_id": "2026-11-20_v3_9_multipos_xp",
+        "fecha": "2026-11-20",
+        "commit_hash": "v3.9",
+        "arquitectura_y_modo": "LIQUIDITY_VULTURE_PRO | FULL_AUTO",
+        "hito": "Multiposición universal vía CDN, diferencial de gol con signo y escala de cuotas",
+        "comportamiento_y_motivo": "Hidratación viva de altPositions desde el CDN en FastDeltaRefresh (evita pérdida de multiposición en tactical_pulse/FINAL_LINEUP_GUARD), diferencial de gol con signo (-1 pt/gol al adelantar MC->DL), desempate MILP por xP, normalización 0..1 de prob_local_1 + máscara causal de xg_local_eci, y bloqueo daysForSale=1 en escaparate.",
+        "impacto_esperado": "Los mayores goleadores multiposición ocupan siempre las líneas más retrasadas (DF/MC) y los pulsos pre-partido preservan la multiposición.",
+    },
 ]
 
 

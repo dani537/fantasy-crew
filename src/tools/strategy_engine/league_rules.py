@@ -121,6 +121,7 @@ class LeagueRulesEngine:
     bonus_ideal_lineup_eur: int = 250_000
     bonus_game_mvp_eur: int = 100_000
     bonus_round_mvp_eur: int = 500_000
+    bonus_clean_sheet_eur: int = 0
 
     @classmethod
     def from_api_payload(cls, league_data: Dict[str, Any], apply_env_overrides: bool = True) -> "LeagueRulesEngine":
@@ -212,6 +213,7 @@ class LeagueRulesEngine:
             bonus_ideal_lineup_eur=int(settings.get("bonusIdealLineup", 250_000) or 0),
             bonus_game_mvp_eur=int(settings.get("bonusGameMVP", 100_000) or 0),
             bonus_round_mvp_eur=int(settings.get("bonusRoundMVP", 500_000) or 0),
+            bonus_clean_sheet_eur=int(settings.get("bonusCleanSheet", 0) or 0),
         )
 
         if apply_env_overrides:

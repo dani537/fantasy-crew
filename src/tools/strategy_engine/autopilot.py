@@ -97,7 +97,9 @@ class AutopilotRunner:
             self.today_date = self.view.all_dates[-1] if self.view.all_dates else datetime.date.today().isoformat()
             self.view.set_date(self.today_date)
 
-        self.xp_engine = ExpectedPointsEngine()
+        self.xp_engine = ExpectedPointsEngine(
+            bonus_clean_sheet=(self.rules.bonus_clean_sheet_eur > 0),
+        )
         self.auction_model = AuctionBidModel()
         self.optimizer = PortfolioOptimizer(
             xp_engine=self.xp_engine,
@@ -119,8 +121,10 @@ class AutopilotRunner:
             )
             if delta_refresher.session_auth is not None:
                 self.session_auth = delta_refresher.session_auth
-            # Reload rules in case /league updated settings
+            # Reload rules in case /league updated settings, and hydrate live CDN altPositions
             self.rules = LeagueRulesEngine.load()
+            self.xp_engine.bonus_clean_sheet = bool(self.rules.bonus_clean_sheet_eur > 0)
+            self.xp_engine.update_multipos_map(delta_state)
             self.optimizer.rules = self.rules
             self.clause_sniper.rules = self.rules
 
@@ -1095,6 +1099,23 @@ class AutopilotRunner:
         }
         clauses_by_name = {str(c.get("nombre", "")): c for c in (approved_plan.get("clause_snipes") or [])}
         shields_by_name = {str(sh.get("nombre", "")): sh for sh in (approved_plan.get("defensive_shields") or [])}
+        pid_to_name: Dict[int, str] = {}
+        for _df_src in (ctx.get("squad_df"), ctx.get("market_today_df")):
+            if _df_src is not None and not _df_src.empty and "player_id" in _df_src.columns and "nombre" in _df_src.columns:
+                for _r_pid, _r_nm in zip(_df_src["player_id"].tolist(), _df_src["nombre"].tolist()):
+                    try:
+                        _ip = int(_r_pid)
+                        if _ip > 0 and _ip not in pid_to_name and str(_r_nm or "").strip():
+                            pid_to_name[_ip] = str(_r_nm).strip()
+                    except (ValueError, TypeError):
+                        continue
+        for _pl in (approved_plan.get("preventive_listings") or []):
+            try:
+                _ip = int(_pl.get("player_id") or 0)
+                if _ip > 0 and str(_pl.get("nombre") or "").strip():
+                    pid_to_name[_ip] = str(_pl["nombre"]).strip()
+            except (ValueError, TypeError):
+                continue
 
         exec_map = {
             "SOLVENCY_SALE": ("VENTA_SOLVENCIA", sales_by_name),
@@ -1132,9 +1153,26 @@ class AutopilotRunner:
             ex_type = str(ex.get("type") or "ACCION")
             ev_type, lookup = exec_map.get(ex_type, (ex_type[:40], {}))
             res_obj = ex.get("res") if isinstance(ex.get("res"), dict) else {}
+            payload_obj = res_obj.get("payload") if isinstance(res_obj.get("payload"), dict) else {}
+            body_obj = payload_obj.get("body") if isinstance(payload_obj.get("body"), dict) else {}
             target_name = str(ex.get("target") or res_obj.get("nombre") or ex.get("formation") or "")
             meta = lookup.get(target_name, {})
-            pid = int(ex.get("player_id") or meta.get("player_id") or res_obj.get("player_id") or 0)
+            pid_raw = (
+                ex.get("player_id")
+                or meta.get("player_id")
+                or res_obj.get("player_id")
+                or body_obj.get("player")
+                or payload_obj.get("player")
+                or 0
+            )
+            if not pid_raw and isinstance(payload_obj.get("url"), str) and "player=" in payload_obj["url"]:
+                try:
+                    pid_raw = int(payload_obj["url"].split("player=", 1)[1].split("&", 1)[0])
+                except (ValueError, TypeError):
+                    pid_raw = 0
+            pid = int(pid_raw or 0)
+            if not target_name and pid > 0:
+                target_name = pid_to_name.get(pid, f"ID {pid}")
             amt = int(round(float(
                 ex.get("amount")
                 or meta.get("amount")
@@ -1142,6 +1180,8 @@ class AutopilotRunner:
                 or meta.get("recommended_cash_spend")
                 or res_obj.get("amount")
                 or res_obj.get("price")
+                or body_obj.get("price")
+                or payload_obj.get("price")
                 or 0
             )))
             status_s = str(res_obj.get("status") or ex.get("status") or "OK")
@@ -1151,6 +1191,12 @@ class AutopilotRunner:
                     f"Formación={ex.get('formation') or lineup_info.get('formation')} | "
                     f"Titulares={len(lineup_info.get('player_ids') or [])} | xP={float(lineup_info.get('expected_points') or 0.0):.1f}"
                 )
+            elif ex_type == "MARKET_LISTING_SYNC":
+                act_s = str(res_obj.get("action") or "list_player")
+                err_s = str(res_obj.get("detail") or "").strip()
+                detail_s = f"{act_s} | Ask={amt:,}€" if amt > 0 else act_s
+                if err_s and status_s not in ("OK", "ALREADY_LISTED", "DRY_RUN"):
+                    detail_s = f"{detail_s} | {err_s[:140]}"
             elif ex_type == "MARKET_BID" and meta:
                 detail_s = (
                     f"{meta.get('regime')} | Seller={meta.get('seller')} | VM={int(meta.get('market_price') or 0):,}€ | "

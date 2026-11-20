@@ -16,6 +16,8 @@ from src.utils.numeric import safe_num
 POST_MATCH_CALENDAR_COLS = [
     "goles_local",
     "goles_visitante",
+    "xg_local_eci",
+    "xg_visitante_eci",
     "posesion_local",
     "posesion_visitante",
     "tiros_local",

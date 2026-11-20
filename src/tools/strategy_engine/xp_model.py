@@ -11,9 +11,10 @@ reports with `fecha_partido < t_cutoff` and daily market state `<= t`.
 """
 
 import os
+import json
 import unicodedata
 from functools import lru_cache
-from typing import Dict, List, Set, Optional, Tuple
+from typing import Any, Dict, List, Set, Optional, Tuple
 import numpy as np
 import pandas as pd
 from src.utils.numeric import safe_num
@@ -60,16 +61,42 @@ def normalize_position(pos_val: object) -> str:
     return POS_NORMALIZE.get(raw, "")
 
 
+def _parse_win_prob(raw_val: object, default_prob: float) -> float:
+    """Parses win probability in either [0, 1] decimal scale or [0, 100] percentage scale."""
+    val = safe_num(raw_val, -1.0)
+    if val <= 0.0:
+        return float(default_prob)
+    prob = val / 100.0 if val > 1.0 else val
+    return float(np.clip(prob, 0.03, 0.95))
+
+
 class ExpectedPointsEngine:
     """
     Computes player Expected Points (`xP`) across all valid multiposition lines
     (`xP_GK`, `xP_DF`, `xP_MF`, `xP_FW`, and `xP_best`) for an upcoming round.
     """
 
-    def __init__(self, multipos_csv_path: str = "./data/players_transformed.csv"):
+    def __init__(
+        self,
+        multipos_csv_path: str = "./data/players_transformed.csv",
+        bonus_clean_sheet: Optional[bool] = None,
+        live_delta_path: str = "./data/raw/live_delta_state.json",
+        live_user_path: str = "./data/raw/live_user_state.json",
+    ):
         self.multipos_map: Dict[int, Set[str]] = {}
         self.primary_pos_map: Dict[int, str] = {}
+        if bonus_clean_sheet is not None:
+            self.bonus_clean_sheet = bool(bonus_clean_sheet)
+        else:
+            try:
+                from src.tools.strategy_engine.league_rules import LeagueRulesEngine
+                self.bonus_clean_sheet = bool(LeagueRulesEngine.load().bonus_clean_sheet_eur > 0)
+            except Exception:
+                self.bonus_clean_sheet = False
+
         self._load_multiposition_catalog(multipos_csv_path)
+        self._load_multiposition_from_json(live_delta_path)
+        self._load_multiposition_from_json(live_user_path)
 
     def _load_multiposition_catalog(self, path: str) -> None:
         if not path or not os.path.exists(path):
@@ -96,6 +123,122 @@ class ExpectedPointsEngine:
                     self.multipos_map[pid] = valid_set
         except Exception:
             pass
+
+    def _load_multiposition_from_json(self, path: str) -> int:
+        """Hydrates multiposition sets from cached `live_delta_state.json` or `live_user_state.json`."""
+        if not path or not os.path.exists(path):
+            return 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            return self.update_multipos_map(payload)
+        except Exception:
+            return 0
+
+    def update_multipos_map(self, source: Optional[Dict[str, Any]]) -> int:
+        """
+        Merges live multiposition definitions into `self.multipos_map` (overriding stale CSV entries).
+        Accepts:
+          - Full `FastDeltaRefresh` dict (`multipos_map` and/or `live_player_status[*].alt_positions`)
+          - Raw `/api/v2/user` JSON (`players` and/or `lineup.players` with `position` & `altPositions`)
+          - Direct `{player_id: [lines]}` mapping
+        """
+        if not isinstance(source, dict) or not source:
+            return 0
+        updated = 0
+
+        # 1. Explicit `multipos_map` from FastDeltaRefresh
+        mp_dict = source.get("multipos_map")
+        if isinstance(mp_dict, dict):
+            for raw_pid, raw_lines in mp_dict.items():
+                try:
+                    pid = int(raw_pid)
+                except (ValueError, TypeError):
+                    continue
+                if pid <= 0 or not isinstance(raw_lines, (list, tuple, set)):
+                    continue
+                norm_set = {normalize_position(tok) for tok in raw_lines}
+                norm_set = {ln for ln in norm_set if ln in ("GK", "DF", "MF", "FW")}
+                if norm_set:
+                    self.multipos_map[pid] = norm_set
+                    updated += 1
+
+        # 2. `live_player_status` from FastDeltaRefresh CDN payload
+        lps = source.get("live_player_status")
+        if isinstance(lps, dict):
+            for raw_pid, p_info in lps.items():
+                if not isinstance(p_info, dict):
+                    continue
+                try:
+                    pid = int(raw_pid)
+                except (ValueError, TypeError):
+                    continue
+                if pid <= 0:
+                    continue
+                prim = normalize_position(p_info.get("position", ""))
+                alts = p_info.get("alt_positions") or p_info.get("altPositions") or []
+                norm_set: Set[str] = set()
+                if prim:
+                    norm_set.add(prim)
+                    self.primary_pos_map[pid] = prim
+                if isinstance(alts, str):
+                    alts = [tok.strip() for tok in alts.split(",") if tok.strip()]
+                if isinstance(alts, (list, tuple, set)):
+                    for tok in alts:
+                        nl = normalize_position(tok)
+                        if nl:
+                            norm_set.add(nl)
+                if norm_set and (pid not in self.multipos_map or len(norm_set) >= len(self.multipos_map[pid])):
+                    self.multipos_map[pid] = norm_set
+                    updated += 1
+
+        # 3. Raw `/api/v2/user` snapshot (`players` & `lineup.players`)
+        raw_player_lists: List[Any] = []
+        if isinstance(source.get("players"), list):
+            raw_player_lists.extend(source["players"])
+        lu_obj = source.get("lineup")
+        if isinstance(lu_obj, dict) and isinstance(lu_obj.get("players"), list):
+            raw_player_lists.extend(lu_obj["players"])
+        for p_obj in raw_player_lists:
+            if not isinstance(p_obj, dict) or not p_obj.get("id"):
+                continue
+            try:
+                pid = int(p_obj["id"])
+            except (ValueError, TypeError):
+                continue
+            if pid <= 0:
+                continue
+            prim = normalize_position(p_obj.get("position", ""))
+            alts = p_obj.get("altPositions") or []
+            norm_set = set()
+            if prim:
+                norm_set.add(prim)
+                self.primary_pos_map[pid] = prim
+            if isinstance(alts, (list, tuple, set)):
+                for tok in alts:
+                    nl = normalize_position(tok)
+                    if nl:
+                        norm_set.add(nl)
+            if norm_set and (pid not in self.multipos_map or len(norm_set) > len(self.multipos_map[pid])):
+                self.multipos_map[pid] = norm_set
+                updated += 1
+
+        # 4. Direct `{pid: [lines]}` mapping fallback
+        if not any(k in source for k in ("multipos_map", "live_player_status", "players", "lineup")):
+            for raw_pid, raw_lines in source.items():
+                try:
+                    pid = int(raw_pid)
+                except (ValueError, TypeError):
+                    continue
+                if pid <= 0 or not isinstance(raw_lines, (list, tuple, set)):
+                    continue
+                norm_set = {normalize_position(tok) for tok in raw_lines}
+                norm_set = {ln for ln in norm_set if ln in ("GK", "DF", "MF", "FW")}
+                if norm_set:
+                    self.multipos_map[pid] = norm_set
+                    updated += 1
+
+        return updated
 
     def get_valid_lines(self, player_id: int, fallback_pos: object = None) -> Set[str]:
         prim = normalize_position(fallback_pos) or self.primary_pos_map.get(int(player_id), "")
@@ -279,10 +422,10 @@ class ExpectedPointsEngine:
                     cal_j = cal_j.sort_values("part", kind="mergesort")
                 locs = cal_j["local"].values if "local" in cal_j.columns else [""] * len(cal_j)
                 viss = cal_j["visitante"].values if "visitante" in cal_j.columns else [""] * len(cal_j)
-                p1s = cal_j["prob_local_1"].values if "prob_local_1" in cal_j.columns else [42] * len(cal_j)
-                p2s = cal_j["prob_visitante_2"].values if "prob_visitante_2" in cal_j.columns else [30] * len(cal_j)
-                xgls = cal_j["xg_local_eci"].values if "xg_local_eci" in cal_j.columns else [1.35] * len(cal_j)
-                xgvs = cal_j["xg_visitante_eci"].values if "xg_visitante_eci" in cal_j.columns else [1.10] * len(cal_j)
+                p1s = cal_j["prob_local_1"].values if "prob_local_1" in cal_j.columns else [0.42] * len(cal_j)
+                p2s = cal_j["prob_visitante_2"].values if "prob_visitante_2" in cal_j.columns else [0.30] * len(cal_j)
+                xgls = cal_j["xg_local_eci"].values if "xg_local_eci" in cal_j.columns else [0.0] * len(cal_j)
+                xgvs = cal_j["xg_visitante_eci"].values if "xg_visitante_eci" in cal_j.columns else [0.0] * len(cal_j)
                 ests = cal_j["estado_partido"].values if "estado_partido" in cal_j.columns else ["pending"] * len(cal_j)
                 for l_r, v_r, p1_r, p2_r, xgl_r, xgv_r, st_r in zip(locs, viss, p1s, p2s, xgls, xgvs, ests):
                     loc = _norm_text(l_r)
@@ -296,10 +439,12 @@ class ExpectedPointsEngine:
                             postponed_teams.add(vis)
                             team_match_ctx.pop(vis, None)
                         continue
-                    p1 = safe_num(p1_r, 42.0) / 100.0
-                    p2 = safe_num(p2_r, 30.0) / 100.0
-                    xgl = safe_num(xgl_r, 1.35)
-                    xgv = safe_num(xgv_r, 1.10)
+                    p1 = _parse_win_prob(p1_r, 0.42)
+                    p2 = _parse_win_prob(p2_r, 0.30)
+                    xgl_raw = safe_num(xgl_r, 0.0)
+                    xgv_raw = safe_num(xgv_r, 0.0)
+                    xgl = float(xgl_raw) if xgl_raw > 0.0 else float(np.clip(0.75 + 1.80 * p1, 0.70, 2.50))
+                    xgv = float(xgv_raw) if xgv_raw > 0.0 else float(np.clip(0.65 + 1.80 * p2, 0.60, 2.40))
                     if loc:
                         postponed_teams.discard(loc)
                         team_match_ctx[loc] = (True, p1, xgl, xgv)
@@ -507,9 +652,18 @@ class ExpectedPointsEngine:
                 ln for ln in ("GK", "DF", "MF", "FW") if ln in valid_lines and ln != nat_pos
             ]
             for ln in ordered_valid:
-                goal_diff_bonus = max(0.0, GOAL_BONUS_BY_LINE[ln] - nat_goal_b) * exp_goals
-                cs_bonus = 0.35 * clean_sheet_prob * p_start if (ln == "DF" and nat_pos in ("MF", "FW")) else 0.0
-                val = round(raw_xp + goal_diff_bonus + cs_bonus, 4)
+                # Signed goal bonus differential: playing deeper adds +1/+2 pts/goal, playing forward costs -1/-2 pts/goal
+                goal_diff_bonus = (GOAL_BONUS_BY_LINE[ln] - nat_goal_b) * exp_goals
+                if self.bonus_clean_sheet:
+                    if ln == "DF" and nat_pos in ("MF", "FW"):
+                        cs_bonus = 0.35 * clean_sheet_prob * p_start
+                    elif nat_pos == "DF" and ln in ("MF", "FW"):
+                        cs_bonus = -0.35 * clean_sheet_prob * p_start
+                    else:
+                        cs_bonus = 0.0
+                else:
+                    cs_bonus = 0.0
+                val = round(max(0.0, raw_xp + goal_diff_bonus + cs_bonus), 4)
                 line_xps[ln] = val
                 if val > best_val:
                     best_val = val

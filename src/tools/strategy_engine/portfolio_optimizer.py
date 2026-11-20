@@ -220,7 +220,7 @@ class PortfolioOptimizer:
                     ub[var_idx] = 0.0
                 else:
                     xp_val = float(xp_info.get(f"xp_{ln}", 0.0)) if is_avail else 0.01
-                    depth_tie = (3 - l_idx) * 0.015
+                    depth_tie = (3 - l_idx) * (0.015 + 0.001 * xp_val)
                     c[var_idx] = -(100.0 * xp_val + depth_tie)
 
             xp_best = float(xp_info.get("xp_best", 0.0))
@@ -412,8 +412,9 @@ class PortfolioOptimizer:
             pid = int(r["player_id"])
             if pid in untouchable_ids:
                 continue
-            # Only skip sell_locked_ids if league lock > 1 day (with standard 1-day lock, players bought today unlock tomorrow at 06:00!)
-            if pid in sell_locked_ids and int(self.rules.days_for_sale) > 1:
+            # Biwenger enforces HTTP 403 "Sell not allowed" during the full `daysForSale` window (>= 1 day);
+            # skip locked players so we never waste a precious Top-K market listing slot.
+            if pid in sell_locked_ids and int(self.rules.days_for_sale) >= 1:
                 continue
             role = role_by_pid.get(pid, "BENCH_PATCH")
 

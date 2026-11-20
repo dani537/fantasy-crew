@@ -1029,6 +1029,169 @@ class TestFantasyChampionV3Architecture(unittest.TestCase):
             self.assertTrue((audit_df["tipo_evento"] == "CLAUSULA_HIST").any())
             self.assertTrue(((audit_df["tipo_evento"] == "CLAUSE_SNIPE") & (audit_df["estado"] == "EXECUTED_MANUAL")).any())
 
+    def test_signed_multipos_goal_bonus_cdn_hydration_and_odds_scale(self):
+        from src.tools.strategy_engine.xp_model import ExpectedPointsEngine
+        from src.tools.backtester.causal_clock import StrictCausalDataView
+
+        # 1. Start with NO players_transformed.csv and NO local JSON caches (exact tactical_pulse runner state)
+        xp_eng = ExpectedPointsEngine(
+            multipos_csv_path="/tmp/nonexistent_players_transformed.csv",
+            bonus_clean_sheet=False,
+            live_delta_path="",
+            live_user_path="",
+        )
+        self.assertEqual(xp_eng.multipos_map, {})
+
+        # Hydrate live multipositions from a FastDeltaRefresh-shaped payload
+        fake_delta = {
+            "multipos_map": {
+                "1001": ["GK"],
+                "1002": ["DF"],
+                "1003": ["DF"],
+                "1004": ["DF"],
+                "1005": ["DF"],
+                "1006": ["DF", "FW", "MF"],  # Versatile FW/DF/MF (like Angel Perez)
+                "1007": ["MF"],              # Pure MF (like Tchouameni)
+                "1008": ["FW", "MF"],        # Natural MF, high exp_goals (like Arda Guler)
+                "1009": ["FW", "MF"],        # Natural FW, high exp_goals (like Berenguer)
+                "1010": ["FW", "MF"],        # Natural MF, mid exp_goals (like Mario Soriano)
+                "1011": ["FW", "MF"],        # Natural FW, low exp_goals (like Cepeda)
+            }
+        }
+        updated = xp_eng.update_multipos_map(fake_delta)
+        self.assertEqual(updated, 11)
+        self.assertEqual(xp_eng.get_valid_lines(1006, "Delantero"), {"DF", "MF", "FW"})
+        self.assertEqual(xp_eng.get_valid_lines(1008, "Centrocampista"), {"MF", "FW"})
+
+        mkt = pd.DataFrame([
+            {"player_id": 1001, "nombre": "GK_A", "equipo": "TeamMid", "posicion": "Portero", "estado": "ok", "precio": 3_000_000, "comuniate_titular": 1},
+            {"player_id": 1002, "nombre": "DF_1", "equipo": "TeamFav", "posicion": "Defensa", "estado": "ok", "precio": 4_000_000, "comuniate_titular": 1},
+            {"player_id": 1003, "nombre": "DF_2", "equipo": "TeamMid", "posicion": "Defensa", "estado": "ok", "precio": 2_000_000, "comuniate_titular": 1},
+            {"player_id": 1004, "nombre": "DF_3", "equipo": "TeamMid", "posicion": "Defensa", "estado": "ok", "precio": 1_500_000, "comuniate_titular": 1},
+            {"player_id": 1005, "nombre": "DF_4", "equipo": "TeamMid", "posicion": "Defensa", "estado": "ok", "precio": 1_200_000, "comuniate_titular": 1},
+            {"player_id": 1006, "nombre": "Versatile_DF_MF_FW", "equipo": "TeamMid", "posicion": "Delantero", "estado": "ok", "precio": 2_700_000, "comuniate_titular": 1},
+            {"player_id": 1007, "nombre": "Pure_MF", "equipo": "TeamFav", "posicion": "Centrocampista", "estado": "ok", "precio": 5_500_000, "comuniate_titular": 1},
+            {"player_id": 1008, "nombre": "Star_MF_FW", "equipo": "TeamFav", "posicion": "Centrocampista", "estado": "ok", "precio": 18_000_000, "comuniate_titular": 1},
+            {"player_id": 1009, "nombre": "Scorer_FW_MF", "equipo": "TeamFav", "posicion": "Delantero", "estado": "ok", "precio": 6_200_000, "comuniate_titular": 1},
+            {"player_id": 1010, "nombre": "Playmaker_MF_FW", "equipo": "TeamMid", "posicion": "Centrocampista", "estado": "ok", "precio": 6_100_000, "comuniate_titular": 1},
+            {"player_id": 1011, "nombre": "LowGoal_FW_MF", "equipo": "TeamDog", "posicion": "Delantero", "estado": "ok", "precio": 1_700_000, "comuniate_titular": 1},
+        ])
+        rep = pd.DataFrame(
+            [{"player_id": 1008, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "goles": 1 if j in (1, 3, 5) else 0, "puntos_biwenger": 9.5} for j in range(1, 9)]
+            + [{"player_id": 1009, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "goles": 1 if j in (1, 2, 4, 6) else 0, "puntos_biwenger": 6.5} for j in range(1, 9)]
+            + [{"player_id": 1010, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "goles": 1 if j in (2, 7) else 0, "puntos_biwenger": 6.0} for j in range(1, 9)]
+            + [{"player_id": 1011, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "goles": 0, "puntos_biwenger": 4.2} for j in range(1, 9)]
+            + [{"player_id": 1006, "jornada_num": j, "minutos_jugados": 90, "es_titular": 1, "goles": 0, "puntos_biwenger": 4.5} for j in range(1, 9)]
+        )
+        # Calendar in decimal [0, 1] probability scale (matches real Partidos_Calendario)
+        cal_dec = pd.DataFrame([
+            {"jornada_num": 13, "part": 1, "local": "TeamFav", "visitante": "TeamDog", "estado_partido": "pending", "prob_local_1": 0.84, "prob_visitante_2": 0.05},
+            {"jornada_num": 13, "part": 1, "local": "TeamMid", "visitante": "TeamOther", "estado_partido": "pending", "prob_local_1": 0.45, "prob_visitante_2": 0.25},
+        ])
+        # Same calendar in [0, 100] percentage scale -> must produce IDENTICAL match_multiplier & xP!
+        cal_pct = cal_dec.copy()
+        cal_pct["prob_local_1"] = cal_pct["prob_local_1"] * 100.0
+        cal_pct["prob_visitante_2"] = cal_pct["prob_visitante_2"] * 100.0
+
+        xp_dec = xp_eng.compute_xp_table(mkt, rep, cal_dec, target_jornada_num=13).set_index("player_id")
+        xp_pct = xp_eng.compute_xp_table(mkt, rep, cal_pct, target_jornada_num=13).set_index("player_id")
+
+        # Odds scale invariance & strong home favorite boost (> 1.05, never penalized to ~0.92!)
+        self.assertAlmostEqual(float(xp_dec.loc[1008, "match_multiplier"]), float(xp_pct.loc[1008, "match_multiplier"]), places=4)
+        self.assertGreater(float(xp_dec.loc[1008, "match_multiplier"]), 1.08)
+
+        # Signed goal-bonus differential: natural MF moving forward to FW MUST have strictly lower xp_FW < xp_MF!
+        self.assertLess(float(xp_dec.loc[1008, "xp_FW"]), float(xp_dec.loc[1008, "xp_MF"]) - 0.20)
+        self.assertLess(float(xp_dec.loc[1010, "xp_FW"]), float(xp_dec.loc[1010, "xp_MF"]) - 0.05)
+        # Natural FW moving back to MF / DF MUST have strictly higher xp_MF > xp_FW and xp_DF > xp_MF > xp_FW!
+        self.assertGreater(float(xp_dec.loc[1009, "xp_MF"]), float(xp_dec.loc[1009, "xp_FW"]) + 0.20)
+        self.assertGreater(float(xp_dec.loc[1006, "xp_DF"]), float(xp_dec.loc[1006, "xp_MF"]))
+        self.assertGreater(float(xp_dec.loc[1006, "xp_MF"]), float(xp_dec.loc[1006, "xp_FW"]))
+
+        # MILP must pick 5-4-1 placing Star/Scorer/Playmaker in MF, LowGoal in FW, and Versatile in DF!
+        opt = PortfolioOptimizer(xp_engine=xp_eng)
+        sol = opt.solve_joint_lineup_and_solvency_milp(
+            squad_df=mkt,
+            xp_table=xp_dec.reset_index(),
+            efr_map={},
+            current_cash=5_000_000.0,
+            must_be_solvent=False,
+        )
+        self.assertEqual(sol["formation"], "5-4-1")
+        line_by_pid = {int(s["player_id"]): s["linea"] for s in sol["lineup_slots"]}
+        self.assertEqual(line_by_pid[1006], "DF")
+        self.assertEqual(line_by_pid[1008], "MF")
+        self.assertEqual(line_by_pid[1009], "MF")
+        self.assertEqual(line_by_pid[1010], "MF")
+        self.assertEqual(line_by_pid[1011], "FW")
+
+        # 2. Exact exp_goals tie-breaker: higher xP player gets MF over lower xP player when both have 0 exp_goals delta
+        sq_tie = mkt.copy()
+        xp_tie = xp_dec.reset_index().copy()
+        for pid_t, base_v in [(1008, 9.0), (1009, 6.0), (1010, 5.0), (1011, 3.0)]:
+            mask_t = xp_tie["player_id"] == pid_t
+            xp_tie.loc[mask_t, ["xp_MF", "xp_FW", "xp_best"]] = base_v
+        sol_tie = opt.solve_joint_lineup_and_solvency_milp(
+            squad_df=sq_tie, xp_table=xp_tie, efr_map={}, current_cash=5_000_000.0, must_be_solvent=False
+        )
+        line_tie = {int(s["player_id"]): s["linea"] for s in sol_tie["lineup_slots"]}
+        self.assertEqual(line_tie[1008], "MF")
+        self.assertEqual(line_tie[1011], "FW")
+
+        # 3. Causal calendar masking: `xg_local_eci` & `xg_visitante_eci` must be masked on future matches
+        if os.path.exists("./data/warehouse/biwenger_history.db"):
+            v = StrictCausalDataView("./data/warehouse/biwenger_history.db")
+            v.set_date("2026-10-15")
+            cal_c = v.get_calendar_causal()
+            j9_fut = cal_c[cal_c["jornada_num_int"] == 9]
+            if not j9_fut.empty and "xg_local_eci" in j9_fut.columns:
+                self.assertTrue((j9_fut["xg_local_eci"] == "").all(), "Future xg_local_eci leaked in causal calendar!")
+
+    def test_sell_locked_days_for_sale_1_and_backtester_signed_multipos(self):
+        from src.tools.backtester.market_env import AZFinanceMarketEnv
+
+        # 1. With days_for_sale=1, a newly acquired player in `sell_locked_ids` must NOT consume a Top-5 listing slot
+        rules = LeagueRulesEngine(market_max_user_sales=5, days_for_sale=1)
+        opt = PortfolioOptimizer(rules=rules)
+        sq = pd.DataFrame([
+            {"player_id": 600 + i, "nombre": f"Flip_{i}", "posicion": "Centrocampista", "precio": 1_000_000 + i * 100_000, "subida_24h": 0}
+            for i in range(6)
+        ])
+        roles = {600 + i: "SPECULATIVE_FLIP" for i in range(6)}
+        listings = opt.select_top_k_preventive_listings(
+            final_sq=sq,
+            role_by_pid=roles,
+            npv_by_pid={},
+            efr_map={600 + i: 0.0 for i in range(6)},
+            projected_max_debt_eur=0.0,
+            sell_locked_ids={605},  # Highest price flip, bought today -> locked 24h!
+            untouchable_ids=set(),
+            max_slots=5,
+        )
+        listed_pids = {int(x["player_id"]) for x in listings}
+        self.assertNotIn(605, listed_pids, "Sell-locked player (days_for_sale=1) was listed and would trigger HTTP 403!")
+        self.assertEqual(len(listed_pids), 5)
+
+        # 2. Backtester signed multiposition goal penalty: natural MF fielded as FW loses -1 pt per goal
+        env = AZFinanceMarketEnv()
+        env.player_meta[99901] = {"natural_pos": "MF", "nombre": "TestMF"}
+        env.player_meta[99902] = {"natural_pos": "FW", "nombre": "TestFW"}
+        env.ground_truth_round_pts[99] = {99901: 12, 99902: 10}
+        env.ground_truth_goals[99] = {99901: 2, 99902: 1}
+        env.ground_truth_awards[99] = {}
+        env.rival_round_points[99] = {}
+        env.locked_round_lineups[99] = {
+            "is_solvent": True,
+            "formation": "4-4-2",
+            "owned_at_kickoff": {99901, 99902},
+            "slots": [
+                {"player_id": 99901, "linea": "FW"},  # MF -> FW with 2 goals => -2 pts (12 - 2 = 10)
+                {"player_id": 99902, "linea": "MF"},  # FW -> MF with 1 goal  => +1 pt  (10 + 1 = 11)
+            ] + [{"player_id": 99910 + k, "linea": "DF"} for k in range(9)],
+        }
+        res = env._score_locked_round(99)
+        self.assertEqual(res["points"], 21)
+
 
 if __name__ == "__main__":
     unittest.main()

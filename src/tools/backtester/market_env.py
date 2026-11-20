@@ -723,7 +723,7 @@ class AZFinanceMarketEnv:
             base_p = int(pts_map.get(pid, 0))
             nat_pos = self.player_meta.get(pid, {}).get("natural_pos", ln) or ln
             goals = int(gls_map.get(pid, 0))
-            multipos_goal_bonus = int(max(0.0, GOAL_BONUS_BY_LINE.get(ln, 3.0) - GOAL_BONUS_BY_LINE.get(nat_pos, 3.0)) * goals)
+            multipos_goal_bonus = int(round((GOAL_BONUS_BY_LINE.get(ln, 3.0) - GOAL_BONUS_BY_LINE.get(nat_pos, 3.0)) * goals))
             total_pts += base_p + multipos_goal_bonus
 
             m_m, m_j, o_i = awd_map.get(pid, (0, 0, 0))
@@ -776,7 +776,7 @@ class AZFinanceMarketEnv:
             gls = int(gls_map.get(pid, 0))
             p_scores_by_line[pid] = {}
             for ln in valid_lns:
-                g_bon = int(max(0.0, GOAL_BONUS_BY_LINE.get(ln, 3.0) - GOAL_BONUS_BY_LINE.get(nat_pos, 3.0)) * gls)
+                g_bon = int(round((GOAL_BONUS_BY_LINE.get(ln, 3.0) - GOAL_BONUS_BY_LINE.get(nat_pos, 3.0)) * gls))
                 p_scores_by_line[pid][ln] = base_p + g_bon
 
         best_total = -999
